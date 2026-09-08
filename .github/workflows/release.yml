@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing or new release tag to publish
+        required: true
+        default: v0.1.0
 
 permissions:
   contents: write
@@ -12,6 +18,12 @@ jobs:
   macos:
     name: Build macOS universal
     runs-on: macos-14
+    env:
+      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      RELEASE_APPLE_ID: ${{ secrets.APPLE_ID }}
+      RELEASE_APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      RELEASE_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,23 +35,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Configure macOS signing
-        if: ${{ secrets.MAC_CSC_LINK != '' }}
+        if: ${{ env.MAC_CSC_LINK != '' }}
         env:
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ env.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ env.MAC_CSC_KEY_PASSWORD }}
         run: |
-          printf 'CSC_LINK=%s\n' "$MAC_CSC_LINK" >> "$GITHUB_ENV"
-          printf 'CSC_KEY_PASSWORD=%s\n' "$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          printf 'CSC_LINK=%s\n' "$CSC_LINK" >> "$GITHUB_ENV"
+          printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
       - name: Configure macOS notarization
-        if: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        if: ${{ env.RELEASE_APPLE_ID != '' && env.RELEASE_APPLE_PASSWORD != '' && env.RELEASE_APPLE_TEAM_ID != '' }}
         env:
-          RELEASE_APPLE_ID: ${{ secrets.APPLE_ID }}
-          RELEASE_APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          RELEASE_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ env.RELEASE_APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ env.RELEASE_APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ env.RELEASE_APPLE_TEAM_ID }}
         run: |
-          printf 'APPLE_ID=%s\n' "$RELEASE_APPLE_ID" >> "$GITHUB_ENV"
-          printf 'APPLE_APP_SPECIFIC_PASSWORD=%s\n' "$RELEASE_APPLE_PASSWORD" >> "$GITHUB_ENV"
-          printf 'APPLE_TEAM_ID=%s\n' "$RELEASE_APPLE_TEAM_ID" >> "$GITHUB_ENV"
+          printf 'APPLE_ID=%s\n' "$APPLE_ID" >> "$GITHUB_ENV"
+          printf 'APPLE_APP_SPECIFIC_PASSWORD=%s\n' "$APPLE_APP_SPECIFIC_PASSWORD" >> "$GITHUB_ENV"
+          printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Build macOS artifacts
         run: npm run build && npx electron-builder --mac --universal --publish never
       - name: Upload macOS artifacts
@@ -56,6 +68,9 @@ jobs:
   windows:
     name: Build Windows x64
     runs-on: windows-2022
+    env:
+      WINDOWS_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,14 +82,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Configure Windows signing
-        if: ${{ secrets.WIN_CSC_LINK != '' }}
+        if: ${{ env.WINDOWS_CSC_LINK != '' }}
         env:
-          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ env.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ env.WINDOWS_CSC_KEY_PASSWORD }}
         shell: bash
         run: |
-          printf 'CSC_LINK=%s\n' "$WIN_CSC_LINK" >> "$GITHUB_ENV"
-          printf 'CSC_KEY_PASSWORD=%s\n' "$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+          printf 'CSC_LINK=%s\n' "$CSC_LINK" >> "$GITHUB_ENV"
+          printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
       - name: Build Windows artifacts
         run: npm run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never
       - name: Upload Windows artifacts
@@ -108,7 +123,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           mapfile -t assets < <(find release -maxdepth 1 -type f -print | sort)
