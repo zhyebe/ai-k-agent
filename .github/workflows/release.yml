@@ -12,12 +12,6 @@ jobs:
   macos:
     name: Build macOS universal
     runs-on: macos-14
-    env:
-      CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,6 +22,24 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Configure macOS signing
+        if: ${{ secrets.MAC_CSC_LINK != '' }}
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        run: |
+          printf 'CSC_LINK=%s\n' "$MAC_CSC_LINK" >> "$GITHUB_ENV"
+          printf 'CSC_KEY_PASSWORD=%s\n' "$MAC_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+      - name: Configure macOS notarization
+        if: ${{ secrets.APPLE_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        env:
+          RELEASE_APPLE_ID: ${{ secrets.APPLE_ID }}
+          RELEASE_APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          RELEASE_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          printf 'APPLE_ID=%s\n' "$RELEASE_APPLE_ID" >> "$GITHUB_ENV"
+          printf 'APPLE_APP_SPECIFIC_PASSWORD=%s\n' "$RELEASE_APPLE_PASSWORD" >> "$GITHUB_ENV"
+          printf 'APPLE_TEAM_ID=%s\n' "$RELEASE_APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Build macOS artifacts
         run: npm run build && npx electron-builder --mac --universal --publish never
       - name: Upload macOS artifacts
@@ -44,9 +56,6 @@ jobs:
   windows:
     name: Build Windows x64
     runs-on: windows-2022
-    env:
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,6 +66,15 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
+      - name: Configure Windows signing
+        if: ${{ secrets.WIN_CSC_LINK != '' }}
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          printf 'CSC_LINK=%s\n' "$WIN_CSC_LINK" >> "$GITHUB_ENV"
+          printf 'CSC_KEY_PASSWORD=%s\n' "$WIN_CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
       - name: Build Windows artifacts
         run: npm run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never
       - name: Upload Windows artifacts

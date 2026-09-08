@@ -105,7 +105,7 @@ git push origin main --tags
 
 已安装的桌面端只在生产包中启用 `electron-updater`：启动后自动检查并下载更新，下载完成后可在顶部按钮重启安装；退出应用也会安装已下载版本。开发模式不会请求 GitHub。Windows 自动更新使用 NSIS 安装包，portable 版本适合手动下载更新。
 
-正式发布应配置代码签名和 macOS 公证。GitHub Actions 可使用 `CSC_LINK` / `CSC_KEY_PASSWORD`、`APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` 以及 Windows 的 `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` secrets。未签名 macOS 包只适合本地测试，可能被 Gatekeeper 拦截，不能视作正式自动更新验证。自动更新默认面向公开 GitHub Release；私有仓库需要额外配置更新服务认证。
+正式发布应配置代码签名和 macOS 公证。GitHub Actions 使用 `MAC_CSC_LINK` / `MAC_CSC_KEY_PASSWORD`、`APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` / `APPLE_TEAM_ID` 以及 Windows 的 `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` secrets；未配置时仍会生成未签名测试包。未签名 macOS 包只适合本地测试，可能被 Gatekeeper 拦截，不能视作正式自动更新验证。自动更新默认面向公开 GitHub Release；私有仓库需要额外配置更新服务认证。
 
 本地发布命令需要 `GH_TOKEN` 和已存在的 GitHub 仓库：
 
