@@ -92,6 +92,11 @@ jobs:
           printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
       - name: Build Windows artifacts
         run: npm run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem "release/*-setup.exe")) { throw "NSIS installer missing" }
+          if (-not (Get-ChildItem "release/*-portable.exe")) { throw "Portable executable missing" }
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
