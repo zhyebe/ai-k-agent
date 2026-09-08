@@ -1,0 +1,102 @@
+{
+  "name": "axiom-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Axiom Agent desktop workflow console",
+  "homepage": "https://github.com/zhyebe/ai-k-agent",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhyebe/ai-k-agent.git"
+  },
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:api\"",
+    "dev:web": "vite --host 127.0.0.1 --port 5173",
+    "dev:api": "node server/index.mjs",
+    "dev:desktop": "concurrently -k \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron": "electron .",
+    "api": "node server/index.mjs",
+    "mcp": "node mcp/server.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "vite build",
+    "check": "npm run typecheck && npm run build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "node --test",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win",
+    "release": "npm run build && electron-builder --publish always",
+    "release:mac": "npm run build && electron-builder --mac --universal --publish always",
+    "release:win": "npm run build && electron-builder --win --x64 --publish always"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@fastify/websocket": "^11.0.2",
+    "dotenv": "^16.4.7",
+    "electron-updater": "^6.8.9",
+    "fastify": "^5.1.0",
+    "lucide-react": "^0.468.0",
+    "mongodb": "^6.12.0",
+    "mysql2": "^3.11.5",
+    "playwright": "^1.49.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.axiom.agent",
+    "productName": "Axiom Agent",
+    "asar": true,
+    "asarUnpack": [
+      "server/**"
+    ],
+    "files": [
+      "dist/index.html",
+      "dist/assets/**",
+      "electron/**",
+      "server/**",
+      "package.json",
+      "node_modules/**"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "zhyebe",
+      "repo": "ai-k-agent",
+      "releaseType": "release"
+    },
+    "mac": {
+      "category": "public.app-category.finance",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "Axiom-Agent-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "artifactName": "Axiom-Agent-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "axiom-local-tools": {
+      "command": "node",
+      "args": ["mcp/server.mjs"],
+      "env": {
+        "BROWSER_ALLOWED_DOMAINS": "localhost,127.0.0.1",
+        "SHELL_ALLOWED_COMMANDS": "pwd,ls,rg,node,npm,docker,bash,sh",
+        "SHELL_ALLOWED_CWDS": ".",
+        "DESKTOP_ALLOWED_APPS": "Calculator,TextEdit,notepad",
+        "DESKTOP_ALLOWED_PATHS": "/Applications"
+      }
+    }
+  }
+}

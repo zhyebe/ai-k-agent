@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+.axiom-data/
+.env
+.env.*
+!.env.example
+*.vault.json
+.axiom-secret
+task_plan.md
+findings.md
+progress.md
+*.log
+.DS_Store
