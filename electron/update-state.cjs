@@ -1,3 +1,5 @@
+const path = require("node:path");
+
 function emptyUpdateState(currentVersion = "dev") {
   return {
     status: "disabled",
@@ -27,13 +29,68 @@ function supportsDesktopAutoUpdate({ isPackaged, platform, env = process.env } =
   return platform === "darwin" || platform === "win32";
 }
 
-function installForceQuitDelayMs(platform) {
-  // Windows NSIS already schedules quit after spawning setup.exe; a backup quit
-  // covers the case where the installer started but the app stayed open.
-  // macOS Squirrel.Mac must keep this process alive to pipe the zip — force-quit
-  // here is what surfaces as "Cannot pipe update".
-  if (platform === "win32") return 2500;
+function normalizeVersion(value) {
+  return String(value || "").trim().replace(/^v/i, "");
+}
+
+function compareVersions(first, second) {
+  const left = normalizeVersion(first).split(".").map((part) => Number(part.replace(/[^0-9].*$/, "")) || 0);
+  const right = normalizeVersion(second).split(".").map((part) => Number(part.replace(/[^0-9].*$/, "")) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const diff = (left[index] || 0) - (right[index] || 0);
+    if (diff !== 0) return diff;
+  }
   return 0;
+}
+
+function selectInstallerAsset(assets, { platform = process.platform, arch = process.arch } = {}) {
+  const candidates = (Array.isArray(assets) ? assets : [])
+    .filter((asset) => asset?.name && asset?.url)
+    .map((asset) => ({ name: asset.name, url: asset.url, size: asset.size }));
+
+  if (platform === "win32") {
+    const installers = candidates.filter((asset) => /\.exe$/i.test(asset.name) && !/portable/i.test(asset.name));
+    return installers.find((asset) => /setup\.exe$/i.test(asset.name)) || installers[0] || null;
+  }
+
+  if (platform === "darwin") {
+    const dmgs = candidates.filter((asset) => /\.dmg$/i.test(asset.name));
+    if (arch === "arm64") return dmgs.find((asset) => /arm64|universal/i.test(asset.name)) || dmgs[0] || null;
+    return dmgs.find((asset) => /x64|universal/i.test(asset.name) && !/arm64/i.test(asset.name)) || dmgs.find((asset) => /universal/i.test(asset.name)) || dmgs[0] || null;
+  }
+
+  return null;
+}
+
+function requirePositiveInteger(value) {
+  const pid = Number(value);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("INVALID_PID");
+  return pid;
+}
+
+function isAbsoluteFsPath(filePath) {
+  return path.isAbsolute(filePath) || /^[A-Za-z]:[\\/]/.test(filePath) || filePath.startsWith("\\\\");
+}
+
+function assertSafeFsPath(filePath) {
+  const value = String(filePath || "");
+  if (!value || !isAbsoluteFsPath(value) || /[\r\n"%]/.test(value)) throw new Error("INVALID_UPDATE_PATH");
+  return value;
+}
+
+function windowsInstallScript({ pid, installerPath }) {
+  const safePid = requirePositiveInteger(pid);
+  const installer = assertSafeFsPath(installerPath);
+  if (!/\.exe$/i.test(installer) || /portable/i.test(installer)) throw new Error("INVALID_UPDATE_PATH");
+  return [
+    "@echo off",
+    "timeout /t 1 /nobreak >nul",
+    `taskkill /F /PID ${safePid} /T >nul 2>&1`,
+    "timeout /t 2 /nobreak >nul",
+    `start "" "${installer}"`,
+    "",
+  ].join("\r\n");
 }
 
 function reduceUpdateState(current, patch = {}) {
@@ -67,7 +124,10 @@ module.exports = {
   shouldSkipUpdateCheck,
   isWindowsPortableApp,
   supportsDesktopAutoUpdate,
-  installForceQuitDelayMs,
+  normalizeVersion,
+  compareVersions,
+  selectInstallerAsset,
+  windowsInstallScript,
   reduceUpdateState,
   updateIntent,
 };

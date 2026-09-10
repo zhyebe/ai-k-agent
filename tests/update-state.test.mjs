@@ -8,7 +8,9 @@ const {
   reduceUpdateState,
   shouldSkipUpdateCheck,
   supportsDesktopAutoUpdate,
-  installForceQuitDelayMs,
+  selectInstallerAsset,
+  windowsInstallScript,
+  compareVersions,
   updateIntent,
 } = require("../electron/update-state.cjs");
 
@@ -39,26 +41,46 @@ test("Mac Squirrel pipe errors and Windows installer spawn errors keep the packa
   }
 });
 
-test("macOS stays alive for Squirrel.Mac; Windows NSIS can force-quit after spawning setup", () => {
-  assert.equal(installForceQuitDelayMs("darwin"), 0);
-  assert.equal(installForceQuitDelayMs("win32"), 2500);
+test("Windows installer is the setup exe, never the portable build", () => {
+  const assets = [
+    { name: "Axiom-Agent-0.2.6-x64-portable.exe", url: "https://example.com/portable.exe" },
+    { name: "Axiom-Agent-0.2.6-x64-setup.exe", url: "https://example.com/setup.exe" },
+  ];
+  const selected = selectInstallerAsset(assets, { platform: "win32", arch: "x64" });
+  assert.equal(selected.name, "Axiom-Agent-0.2.6-x64-setup.exe");
+});
+
+test("macOS installer is the dmg for the current architecture", () => {
+  const assets = [
+    { name: "Axiom-Agent-0.2.6-arm64.zip", url: "https://example.com/app.zip" },
+    { name: "Axiom-Agent-0.2.6-x64.dmg", url: "https://example.com/x64.dmg" },
+    { name: "Axiom-Agent-0.2.6-arm64.dmg", url: "https://example.com/arm64.dmg" },
+  ];
+  assert.equal(selectInstallerAsset(assets, { platform: "darwin", arch: "arm64" }).name, "Axiom-Agent-0.2.6-arm64.dmg");
+  assert.equal(selectInstallerAsset(assets, { platform: "darwin", arch: "x64" }).name, "Axiom-Agent-0.2.6-x64.dmg");
+});
+
+test("Windows install script kills this process before starting setup", () => {
+  const script = windowsInstallScript({
+    pid: 4242,
+    installerPath: "C:\\Users\\me\\Downloads\\Axiom Agent Updates\\Axiom-Agent-0.2.6-x64-setup.exe",
+  });
+  assert.match(script, /taskkill \/F \/PID 4242 \/T/);
+  assert.match(script, /start "" "C:\\Users\\me\\Downloads\\Axiom Agent Updates\\Axiom-Agent-0.2.6-x64-setup.exe"/);
+  assert.ok(script.indexOf("taskkill") < script.indexOf("start \"\""));
+});
+
+test("packaged Mac and Windows can update; Windows portable cannot", () => {
   assert.equal(supportsDesktopAutoUpdate({ isPackaged: true, platform: "darwin" }), true);
   assert.equal(supportsDesktopAutoUpdate({ isPackaged: true, platform: "win32" }), true);
   assert.equal(supportsDesktopAutoUpdate({ isPackaged: false, platform: "darwin" }), false);
   assert.equal(supportsDesktopAutoUpdate({ isPackaged: false, platform: "win32" }), false);
-});
-
-test("Windows portable builds do not use auto-update", () => {
   assert.equal(supportsDesktopAutoUpdate({
     isPackaged: true,
     platform: "win32",
     env: { PORTABLE_EXECUTABLE_DIR: "C:\\Axiom Agent" },
   }), false);
-  assert.equal(supportsDesktopAutoUpdate({
-    isPackaged: true,
-    platform: "darwin",
-    env: { PORTABLE_EXECUTABLE_DIR: "/tmp" },
-  }), true);
+  assert.equal(compareVersions("0.2.7", "0.2.6") > 0, true);
 });
 
 test("checking and not-available stay as check, not install", () => {

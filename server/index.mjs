@@ -30,12 +30,26 @@ await app.register(cors, {
 await app.register(websocket, { options: { maxPayload: 50 * 1024 * 1024 } });
 const persistence = await createPersistence();
 setPersistence(persistence);
-const restoredState = await persistence.loadState?.().catch(() => null);
+let restoredState = null;
+let stateLoadFailed = false;
+try {
+  restoredState = await persistence.loadState?.() || null;
+} catch (error) {
+  stateLoadFailed = true;
+  console.error("persistence.loadState failed", error);
+  restoredState = null;
+}
 hydrateState(restoredState);
 const restoredCredentials = await persistence.loadCredentials?.().catch(() => []);
 await initVault({ persistedRecords: restoredCredentials });
 setVaultPersistence(persistence);
-hydrateUsers(restoredState?.users || await persistence.loadUsers?.().catch(() => []), restoredState?.assignments || []);
+const restoredUsers = restoredState?.users?.length
+  ? restoredState.users
+  : await persistence.loadUsers?.().catch((error) => { console.error("loadUsers failed", error); return []; }) || [];
+const restoredAssignments = restoredState?.assignments?.length
+  ? restoredState.assignments
+  : await persistence.loadAssignments?.().catch((error) => { console.error("loadAssignments failed", error); return []; }) || [];
+hydrateUsers(restoredUsers, restoredAssignments);
 hydrateUserSessions(await persistence.loadUserSessions?.().catch(() => []));
 setUserPersistence(persistence);
 const streams = new Set();
@@ -311,8 +325,12 @@ async function bootstrapDesktopUser() {
   addEvent("user_bootstrapped", `已创建桌面用户 ${user.username}`, { userId: user.id });
 }
 
-await persistHydratedDefaults();
-await bootstrapDesktopUser();
+if (stateLoadFailed) {
+  console.error("skip persistHydratedDefaults/bootstrapDesktopUser: database state was not restored");
+} else {
+  if (restoredState) await persistHydratedDefaults();
+  await bootstrapDesktopUser();
+}
 
 app.get("/api/health", async () => ({ ok: true, service: "axiom-api", uptimeSec: Math.round(process.uptime()), persistence: await persistence.health(), persistentSecret: hasPersistentSecret(), vault: vaultStatus(), adapters: listConnectorAdapters().length }));
 app.post("/api/admin/login", async (request, reply) => {
@@ -483,7 +501,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     analysisCoverage: null,
   };
   state.tasks.unshift(task);
-  persistTask(task);
+  await persistTask(task);
   if (request.auth?.type === "user") await assignTask(request.auth.user.id, task.id);
   addEvent("task_created", `已创建任务：${task.name}`, { taskId: task.id });
   broadcast();

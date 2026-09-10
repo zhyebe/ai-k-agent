@@ -4,16 +4,15 @@ const http = require("node:http");
 const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
-const { autoUpdater } = require("electron-updater");
 const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
 const {
   emptyUpdateState,
   hasDownloadedPackage,
   shouldSkipUpdateCheck,
   supportsDesktopAutoUpdate,
-  installForceQuitDelayMs,
   reduceUpdateState,
 } = require("./update-state.cjs");
+const { checkForUpdates: checkGithubUpdates, downloadInstaller, openInstaller } = require("./update-service.cjs");
 
 let apiProcess;
 let mainWindow;
@@ -21,6 +20,8 @@ let updateCheckTimer;
 let updateCheckPromise;
 let installTimer;
 let quittingForUpdate = false;
+let latestUpdateAsset = null;
+let downloadedInstallerPath = "";
 let apiPort = Number(process.env.AXIOM_API_PORT || 8787);
 if (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535) apiPort = 8787;
 let apiBaseUrl = "";
@@ -58,8 +59,21 @@ function checkForUpdates() {
   if (updateCheckPromise) return updateCheckPromise;
 
   publishUpdateState({ status: "checking", currentVersion: app.getVersion(), error: null });
-  updateCheckPromise = autoUpdater.checkForUpdates()
-    .then(() => currentUpdateState())
+  updateCheckPromise = checkGithubUpdates()
+    .then((result) => {
+      latestUpdateAsset = result.asset || null;
+      if (result.available && result.asset) {
+        publishUpdateState({ status: "available", availableVersion: result.latestVersion, progress: 0, error: null });
+        downloadUpdatePackage().catch(() => {});
+      } else if (result.available) {
+        publishUpdateState({ status: "error", error: result.message });
+      } else if (result.message && result.message.startsWith("检查更新失败")) {
+        publishUpdateState({ status: "error", error: result.message });
+      } else {
+        publishUpdateState({ status: "not-available", availableVersion: null, progress: 0, error: null });
+      }
+      return currentUpdateState();
+    })
     .catch((error) => {
       publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
       return currentUpdateState();
@@ -68,41 +82,53 @@ function checkForUpdates() {
   return updateCheckPromise;
 }
 
-function configureAutoUpdater() {
+async function downloadUpdatePackage() {
+  if (!supportsAutoUpdate()) return currentUpdateState();
+  if (!latestUpdateAsset) {
+    const checked = await checkGithubUpdates();
+    latestUpdateAsset = checked.asset || null;
+    if (checked.available && checked.latestVersion) {
+      publishUpdateState({ status: "available", availableVersion: checked.latestVersion, error: null });
+    }
+  }
+  if (!latestUpdateAsset) {
+    publishUpdateState({ status: "error", error: "没有匹配当前系统的安装包" });
+    return currentUpdateState();
+  }
+  if (downloadedInstallerPath && fs.existsSync(downloadedInstallerPath) && updateState.downloadedVersion === updateState.availableVersion) {
+    publishUpdateState({ status: "downloaded", downloadedVersion: updateState.availableVersion, progress: 100, error: null });
+    return currentUpdateState();
+  }
+  try {
+    publishUpdateState({ status: "downloading", progress: 0, error: null });
+    downloadedInstallerPath = await downloadInstaller(latestUpdateAsset);
+    publishUpdateState({
+      status: "downloaded",
+      downloadedVersion: updateState.availableVersion || latestUpdateAsset.name,
+      progress: 100,
+      error: null,
+    });
+  } catch (error) {
+    publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+  }
+  return currentUpdateState();
+}
+
+function configureUpdates() {
   if (!supportsAutoUpdate()) {
     publishUpdateState({ status: app.isPackaged ? "unsupported" : "disabled", currentVersion: app.getVersion() });
     return;
   }
 
   publishUpdateState({ status: "idle", currentVersion: app.getVersion(), error: null });
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.autoRunAppAfterInstall = true;
-  autoUpdater.allowDowngrade = false;
-  autoUpdater.disableWebInstaller = true;
-  autoUpdater.on("checking-for-update", () => publishUpdateState({ status: "checking", error: null }));
-  autoUpdater.on("update-available", (info) => publishUpdateState({ status: "available", availableVersion: info.version, progress: 0, error: null }));
-  autoUpdater.on("update-not-available", () => publishUpdateState({ status: "not-available", availableVersion: null, progress: 0, error: null }));
-  autoUpdater.on("download-progress", (progress) => publishUpdateState({ status: "downloading", progress: Math.round(progress.percent), error: null }));
-  autoUpdater.on("update-downloaded", (info) => publishUpdateState({ status: "downloaded", downloadedVersion: info.version, progress: 100, error: null }));
-  autoUpdater.on("error", (error) => publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) }));
-
   setTimeout(() => { checkForUpdates(); }, 5000);
   updateCheckTimer = setInterval(() => { checkForUpdates(); }, 6 * 60 * 60 * 1000);
 }
 
 ipcMain.handle("update:get-state", () => currentUpdateState());
 ipcMain.handle("update:check", () => checkForUpdates());
-ipcMain.handle("update:download", async () => {
-  if (!supportsAutoUpdate() || updateState.status !== "available") return currentUpdateState();
-  try {
-    publishUpdateState({ status: "downloading", progress: 0, error: null });
-    await autoUpdater.downloadUpdate();
-  } catch (error) {
-    publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
-  }
-  return currentUpdateState();
-});
+ipcMain.handle("update:download", () => downloadUpdatePackage());
+
 function prepareAppForUpdateQuit() {
   quittingForUpdate = true;
   if (updateCheckTimer) {
@@ -113,27 +139,26 @@ function prepareAppForUpdateQuit() {
   if (apiProcess && !apiProcess.killed) apiProcess.kill();
 }
 
-function installDownloadedUpdate() {
-  if (!supportsAutoUpdate() || !hasDownloadedPackage(updateState) || updateState.status === "installing") {
-    return currentUpdateState();
-  }
+async function installDownloadedUpdate() {
+  if (!supportsAutoUpdate()) return currentUpdateState();
+  if (!hasDownloadedPackage(updateState) && !latestUpdateAsset) return currentUpdateState();
   publishUpdateState({ status: "installing", error: null });
-  prepareAppForUpdateQuit();
   try {
-    // Windows NSIS: not silent, relaunch after setup. macOS ignores these args and
-    // uses Squirrel.Mac to apply the downloaded zip.
-    autoUpdater.quitAndInstall(false, true);
+    if (!downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
+      await downloadUpdatePackage();
+    }
+    if (!downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
+      throw new Error("安装包不存在");
+    }
+    prepareAppForUpdateQuit();
+    await openInstaller(downloadedInstallerPath);
+    if (installTimer) clearTimeout(installTimer);
+    installTimer = setTimeout(() => {
+      app.exit(0);
+    }, 400);
   } catch (error) {
     quittingForUpdate = false;
     publishUpdateState({ status: "downloaded", error: error instanceof Error ? error.message : String(error) });
-    return currentUpdateState();
-  }
-  const forceQuitAfterMs = installForceQuitDelayMs(process.platform);
-  if (forceQuitAfterMs > 0) {
-    if (installTimer) clearTimeout(installTimer);
-    installTimer = setTimeout(() => {
-      if (quittingForUpdate) app.quit();
-    }, forceQuitAfterMs);
   }
   return currentUpdateState();
 }
@@ -360,7 +385,7 @@ app.whenReady().then(async () => {
   }
   showMainWindow();
   try {
-    configureAutoUpdater();
+    configureUpdates();
   } catch (error) {
     console.error("auto-update setup failed", error);
   }

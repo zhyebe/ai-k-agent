@@ -136,7 +136,7 @@ MONGO_DB=axiom_agent
 ```bash
 git clone <repo> /opt/axiom-agent
 cd /opt/axiom-agent
-git checkout v0.2.6
+git checkout v0.2.7
 npm ci --omit=dev
 cp .env.example .env
 # 编辑 .env
@@ -281,7 +281,7 @@ BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 推送 `v*` 标签后，[`.github/workflows/release.yml`](../.github/workflows/release.yml) 构建 macOS universal 与 Windows x64，并上传 GitHub Release（含 `latest-mac.yml` / `latest.yml`）。
 
 ```bash
-git tag v0.2.6
+git tag v0.2.7
 git push origin main --tags
 ```
 
@@ -292,7 +292,7 @@ npm run release:mac
 npm run release:win
 ```
 
-已安装的生产包用 `electron-updater` 检查更新；开发模式不会打 GitHub。
+已安装的生产包向 GitHub Release 检查并下载 dmg / NSIS 安装包；开发模式不会打 GitHub。
 
 ## 11. 上线检查
 

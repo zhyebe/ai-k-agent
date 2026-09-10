@@ -219,7 +219,7 @@ function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateS
               : state.status === "not-available"
                 ? "已是最新"
                 : "检查更新";
-  const disabled = busy || ["checking", "downloading", "installing"].includes(state.status);
+  const disabled = busy || ["checking", "downloading"].includes(state.status);
   const title = [`桌面版 v${state.currentVersion}`, canInstall && state.downloadedVersion ? `已下载 v${state.downloadedVersion}` : "", state.error || actionLabel].filter(Boolean).join(" · ");
   return <button type="button" className={`update-control update-${canInstall ? "downloaded" : state.status}`} onClick={onAction} disabled={disabled} title={title}><Download size={14} /><span>{actionLabel}</span></button>;
 }
@@ -446,10 +446,20 @@ function App() {
     if (!user) return;
     let active = true;
     fetchWorkspace()
-      .then((next) => { if (!active) return; setWorkspace(next); setLoadError(null); })
+      .then((next) => {
+        if (!active) return;
+        setWorkspace(next);
+        if (next.auth?.user) setUser(next.auth.user);
+        setLoadError(null);
+      })
       .catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区加载失败"); });
     const timer = window.setInterval(() => {
-      fetchWorkspace().then((next) => { if (active) { setWorkspace(next); setLoadError(null); } }).catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区同步失败"); });
+      fetchWorkspace().then((next) => {
+        if (!active) return;
+        setWorkspace(next);
+        if (next.auth?.user) setUser(next.auth.user);
+        setLoadError(null);
+      }).catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区同步失败"); });
     }, 5000);
     return () => { active = false; window.clearInterval(timer); };
   }, [user]);
@@ -528,7 +538,7 @@ function App() {
           ? await bridge.download()
           : await bridge.check();
       setUpdateState(next);
-      if (next.status === "installing") notify("正在退出并安装更新，请稍候");
+      if (next.status === "installing") notify("正在打开安装包并退出应用");
       else if (next.status === "error" && !next.downloadedVersion) notify(`更新失败：${next.error || "请稍后重试"}`);
       else if (next.error && canInstall) notify(`安装未完成：${next.error}。可再点一次「重启并安装」`);
     } catch (error) {

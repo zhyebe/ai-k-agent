@@ -63,6 +63,7 @@ function createMemoryAdapter() {
     async loadCredentials() { return []; },
     async loadUsers() { return []; },
     async loadUserSessions() { return []; },
+    async loadAssignments() { return []; },
     async close() {},
   };
   return serializeWrites(adapter, ["recordAudit", "saveTask", "saveSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
@@ -318,8 +319,8 @@ async function createMySqlAdapter() {
       const [connectorRows] = await pool.query("SELECT * FROM connectors ORDER BY updated_at DESC");
       const [orderRows] = await pool.query("SELECT * FROM orders ORDER BY created_at DESC LIMIT 200").catch(() => [[]]);
       const [eventRows] = await pool.query("SELECT payload_json FROM audit_logs ORDER BY created_at DESC LIMIT 80").catch(() => [[]]);
-      const [userRows] = await pool.query("SELECT * FROM users ORDER BY updated_at DESC").catch(() => [[]]);
-      const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments").catch(() => [[]]);
+      const [userRows] = await pool.query("SELECT * FROM users ORDER BY updated_at DESC");
+      const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments");
       const [analysisRows] = await pool.query("SELECT * FROM analysis_runs ORDER BY created_at DESC LIMIT 200").catch(() => [[]]);
       const [agentRunRows] = await pool.query("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 100").catch(() => [[]]);
       const [agentOutputRows] = await pool.query("SELECT * FROM agent_output ORDER BY created_at DESC LIMIT 1200").catch(() => [[]]);
@@ -389,6 +390,10 @@ async function createMySqlAdapter() {
     async loadUserSessions() {
       const [rows] = await pool.query("SELECT token_hash, user_id, expires_at FROM user_sessions WHERE expires_at > ?", [Date.now()]);
       return rows.map((row) => ({ tokenHash: row.token_hash, userId: row.user_id, expiresAt: Number(row.expires_at) }));
+    },
+    async loadAssignments() {
+      const [rows] = await pool.query("SELECT user_id, task_id FROM task_assignments").catch(() => [[]]);
+      return rows.map((row) => ({ userId: row.user_id, taskId: row.task_id }));
     },
     close: () => pool.end(),
   };
@@ -463,6 +468,9 @@ async function createMongoAdapter() {
     },
     async loadUserSessions() {
       return (await collections.sessions.find({ expiresAt: { $gt: Date.now() } }).toArray()).map(({ _id, ...item }) => item);
+    },
+    async loadAssignments() {
+      return (await collections.assignments.find().toArray()).map(({ userId, taskId }) => ({ userId, taskId }));
     },
     close: () => client.close(),
   };
