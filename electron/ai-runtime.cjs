@@ -69,6 +69,19 @@ function scheduleReconnect(app) {
   reconnectTimer = setTimeout(() => connect(app, activeSession), delay);
 }
 
+function safeCloseSocket(ws) {
+  if (!ws) return;
+  try { ws.on("error", () => {}); } catch {}
+  for (const event of ["open", "message", "close"]) {
+    try { ws.removeAllListeners(event); } catch {}
+  }
+  try {
+    if (ws.readyState === 1) ws.close();
+    else if (typeof ws.terminate === "function") ws.terminate();
+    else ws.close();
+  } catch {}
+}
+
 function disconnect() {
   stopped = true;
   clearTimeout(reconnectTimer);
@@ -76,10 +89,7 @@ function disconnect() {
   const current = socket;
   socket = null;
   activeSession = null;
-  if (current) {
-    try { current.removeAllListeners?.(); } catch {}
-    try { current.close(); } catch {}
-  }
+  safeCloseSocket(current);
 }
 
 function connect(app, session) {
@@ -89,8 +99,9 @@ function connect(app, session) {
   stopped = false;
   activeSession = { apiBaseUrl, userToken };
   clearTimeout(reconnectTimer);
-  if (socket && socket.readyState === 1) {
-    try { socket.close(); } catch {}
+  if (socket) {
+    safeCloseSocket(socket);
+    socket = null;
   }
   let next;
   try {
@@ -100,6 +111,9 @@ function connect(app, session) {
     return { ok: false, error: error?.message || "DESKTOP_AI_CONNECT_FAILED" };
   }
   socket = next;
+  next.on("error", () => {
+    if (socket === next) socket = null;
+  });
   next.on("open", () => {
     reconnectAttempt = 0;
   });
@@ -118,9 +132,6 @@ function connect(app, session) {
     if (socket === next) socket = null;
     if (!stopped) scheduleReconnect(app);
   });
-  next.on("error", () => {
-    try { next.close(); } catch {}
-  });
   return { ok: true };
 }
 
@@ -132,4 +143,4 @@ function bindIpc(ipcMain, app) {
   });
 }
 
-module.exports = { bindIpc, disconnect };
+module.exports = { bindIpc, disconnect, safeCloseSocket };

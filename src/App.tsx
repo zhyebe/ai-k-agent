@@ -234,6 +234,15 @@ function hostnameOf(url = "") {
   }
 }
 
+function sameWorkspaceUser(left: WorkspaceUser | null | undefined, right: WorkspaceUser | null | undefined) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  if (left.id !== right.id || left.username !== right.username || left.displayName !== right.displayName) return false;
+  const current = [...(left.assignedTaskIds || [])].sort();
+  const nextIds = [...(right.assignedTaskIds || [])].sort();
+  return current.length === nextIds.length && current.every((id, index) => id === nextIds[index]);
+}
+
 function savedCredentialForTarget(credentials: SavedCredential[] = [], targetType: string, url: string, installPath: string) {
   return credentials.find((item) => {
     if (targetType === "app") return String(item.target?.installPath || "") === String(installPath || "");
@@ -440,7 +449,7 @@ function App() {
     if (!userToken) return;
     ai.connect({ apiBaseUrl: getApiBaseUrl(), userToken }).catch(() => {});
     return () => { ai.disconnect().catch(() => {}); };
-  }, [user]);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user) return;
@@ -449,7 +458,8 @@ function App() {
       .then((next) => {
         if (!active) return;
         setWorkspace(next);
-        if (next.auth?.user) setUser(next.auth.user);
+        const nextUser = next.auth?.user;
+        if (nextUser) setUser((current) => (sameWorkspaceUser(current, nextUser) ? current : nextUser));
         setLoadError(null);
       })
       .catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区加载失败"); });
@@ -457,12 +467,13 @@ function App() {
       fetchWorkspace().then((next) => {
         if (!active) return;
         setWorkspace(next);
-        if (next.auth?.user) setUser(next.auth.user);
+        const nextUser = next.auth?.user;
+        if (nextUser) setUser((current) => (sameWorkspaceUser(current, nextUser) ? current : nextUser));
         setLoadError(null);
       }).catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区同步失败"); });
     }, 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [user]);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!toast) return;
@@ -800,7 +811,8 @@ function App() {
         try {
           const next = await fetchWorkspace();
           setWorkspace(next);
-          if (next.auth?.user) setUser(next.auth.user);
+          const nextUser = next.auth?.user;
+        if (nextUser) setUser((current) => (sameWorkspaceUser(current, nextUser) ? current : nextUser));
         } catch {
           setWorkspace((current) => ({ ...current, tasks: [created, ...current.tasks] }));
         }
