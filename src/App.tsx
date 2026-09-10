@@ -64,6 +64,8 @@ import {
   fetchAgentOutput,
   fetchWorkspace,
   getApiBaseUrl,
+  getUserToken,
+  clearUserToken,
   saveProvider,
   saveSkill,
   setAutoDecision,
@@ -74,6 +76,7 @@ import {
   takeoverPendingAction,
   testConnector,
   testProvider,
+  setUserToken,
   userLogin,
   userLogout,
   userSession,
@@ -220,8 +223,7 @@ function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateS
 const emptyWorkspace: Workspace = { tasks: [], skills: [], providers: [], events: [], runs: [], connectors: [], orders: [], agentRuns: [] };
 
 function preferredProviderId(providers: Provider[]) {
-  return providers.find((item) => item.configured && item.id !== "provider_deepseek")?.id
-    || providers.find((item) => item.configured)?.id;
+  return providers.find((item) => item.configured)?.id;
 }
 
 function configuredProviders(providers: Provider[]) {
@@ -319,7 +321,7 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
         await fetchApiHealth();
       }
       const session = await userLogin(account, password);
-      window.sessionStorage.setItem("axiom.user.token", session.token);
+      setUserToken(session.token);
       onSignedIn(session.user as WorkspaceUser);
     } catch (reason) {
       const code = reason instanceof Error ? reason.message : "";
@@ -390,9 +392,18 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    const existing = getUserToken();
+    if (!existing) {
+      setAuthChecked(true);
+      return;
+    }
     userSession()
-      .then((session) => { if (!active) return; setUser(session.user); })
-      .catch(() => { window.sessionStorage.removeItem("axiom.user.token"); if (active) setUser(null); })
+      .then((session) => {
+        if (!active) return;
+        setUserToken(existing);
+        setUser(session.user);
+      })
+      .catch(() => { clearUserToken(); if (active) setUser(null); })
       .finally(() => { if (active) setAuthChecked(true); });
     return () => { active = false; };
   }, []);
@@ -404,7 +415,7 @@ function App() {
       ai.disconnect().catch(() => {});
       return;
     }
-    const userToken = window.sessionStorage.getItem("axiom.user.token") || "";
+    const userToken = getUserToken();
     if (!userToken) return;
     ai.connect({ apiBaseUrl: getApiBaseUrl(), userToken }).catch(() => {});
     return () => { ai.disconnect().catch(() => {}); };
@@ -479,7 +490,7 @@ function App() {
 
   async function handleLogout() {
     await userLogout().catch(() => {});
-    window.sessionStorage.removeItem("axiom.user.token");
+    clearUserToken();
     setUser(null);
     setWorkspace(emptyWorkspace);
   }
@@ -1031,7 +1042,7 @@ function SummaryTile({ label, value, icon, tone }: { label: string; value: strin
 function SkillRow({ skill, onApprove }: { skill: Skill; onApprove: (skill: Skill) => void }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{skill.chunks} 个切片</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div></div>; }
 
 function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderTest, onProviderDelete, onSelectProvider, busyAction }: { task: Task; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderTest: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号自己添加 Provider 和目标凭据。后台只管账号分配，看不到密钥。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid"><TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /><section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onDelete={onProviderDelete} onSelect={onSelectProvider} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} />)}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见。保存后可点「使用」作为本任务分析模型。</span></div></section></div><section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section></>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号自己添加 Provider 和目标凭据。后台只管账号分配，看不到密钥。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid"><TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /><section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onDelete={onProviderDelete} onSelect={onSelectProvider} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见。保存后可点「使用」作为本任务分析模型。</span></div></section></div><section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section></>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
@@ -1080,7 +1091,7 @@ function ProviderModal({ onClose, onSave }: { onClose: () => void; onSave: (payl
       setBusy(false);
     }
   }
-  return <ModalShell title="添加自己的 AI Provider" subtitle="每个桌面账号独立保存。密钥加密进数据库，后台管理员看不到明文。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：天成 / DeepSeek / 自建网关" disabled={busy} /></label><label>接口地址<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://ai.tiancheng.tcyun.net 或 https://api.deepseek.com/v1" type="url" required disabled={busy} /></label><div className="form-row"><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-6-astra" required disabled={busy} /></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="openai_responses">OpenAI Responses</option><option value="openai_chat">Chat Completions</option></select></label></div><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只保存在服务端" type="password" autoComplete="new-password" required disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />天成网关不要加 /v1，协议选 Responses。DeepSeek 等兼容接口用 Chat Completions，地址带 /v1。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><KeyRound size={15} />{busy ? "保存中" : "保存到我的账号"}</button></div></form></ModalShell>;
+  return <ModalShell title="添加自己的 AI Provider" subtitle="每个桌面账号独立保存。密钥加密进数据库，后台管理员看不到明文。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>接口地址<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" type="url" required disabled={busy} /></label><div className="form-row"><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="your-model" required disabled={busy} /></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="openai_responses">OpenAI Responses</option><option value="openai_chat">Chat Completions</option></select></label></div><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只保存在服务端" type="password" autoComplete="new-password" required disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />根地址（无路径或 /）走 Responses；带 /v1 的地址走 Chat Completions。也可在协议里手动指定。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><KeyRound size={15} />{busy ? "保存中" : "保存到我的账号"}</button></div></form></ModalShell>;
 }
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {

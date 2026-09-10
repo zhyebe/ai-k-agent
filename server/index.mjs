@@ -238,34 +238,8 @@ async function bootstrapDesktopUser() {
   addEvent("user_bootstrapped", `已创建桌面用户 ${user.username}`, { userId: user.id });
 }
 
-function applyProviderFromEnv(id, { name, model, baseUrl, apiKey }) {
-  const existing = state.providers.find((item) => item.id === id);
-  if (!existing) return null;
-  existing.model = model || existing.model;
-  existing.baseUrl = baseUrl || existing.baseUrl;
-  if (apiKey && !existing.encryptedKey) {
-    const next = createProvider({ id: existing.id, name: existing.name || name, model: existing.model, baseUrl: existing.baseUrl, apiKey }, existing);
-    Object.assign(existing, next);
-    return existing;
-  }
-  return null;
-}
-
-async function bootstrapDeepseekProvider() {
-  const seeded = applyProviderFromEnv("provider_deepseek", {
-    name: "DeepSeek",
-    model: String(process.env.DEEPSEEK_MODEL || "deepseek-v4-pro"),
-    baseUrl: String(process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1"),
-    apiKey: String(process.env.DEEPSEEK_API_KEY || "").trim(),
-  });
-  if (!seeded) return;
-  await persistProvider(seeded);
-  addEvent("provider_bootstrapped", "已将 DeepSeek 密钥加密写入数据库（明文不入库）", { providerId: seeded.id });
-}
-
 await persistHydratedDefaults();
 await bootstrapDesktopUser();
-await bootstrapDeepseekProvider();
 
 app.get("/api/health", async () => ({ ok: true, service: "axiom-api", uptimeSec: Math.round(process.uptime()), persistence: await persistence.health(), persistentSecret: hasPersistentSecret(), vault: vaultStatus(), adapters: listConnectorAdapters().length }));
 app.post("/api/admin/login", async (request, reply) => {

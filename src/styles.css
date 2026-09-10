@@ -226,6 +226,7 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .provider-switch select { min-width: 168px; max-width: 240px; min-height: 28px; padding: 0 8px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
 .provider-row.selected { background: var(--blue-soft); border-radius: 6px; padding-right: 8px; padding-left: 8px; }
 .provider-actions { display: inline-flex; align-items: center; gap: 6px; }
+.empty-state { display: flex; align-items: center; gap: 7px; min-height: 64px; color: var(--muted); font-size: 10px; }
 .pending-action-card { margin: 14px 18px 0; padding: 12px; background: var(--amber-soft); border: 1px solid rgba(233, 184, 109, 0.24); border-radius: 6px; }
 .pending-action-card.waiting { background: rgba(126, 185, 238, 0.08); border-color: rgba(126, 185, 238, 0.28); }
 .pending-action-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

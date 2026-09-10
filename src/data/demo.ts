@@ -83,10 +83,7 @@ export const demoSkills: Skill[] = [
   },
 ];
 
-export const demoProviders: Provider[] = [
-  { id: "provider_deepseek", name: "DeepSeek", model: "deepseek-v4-pro", baseUrl: "https://api.deepseek.com/v1", configured: false, keyPreview: "未配置", status: "未配置" },
-  { id: "provider_custom", name: "自定义 OpenAI Compatible", model: "未设置", baseUrl: "", configured: false, keyPreview: "未配置", status: "未配置" },
-];
+export const demoProviders: Provider[] = [];
 
 export const demoEvents: EventItem[] = [];
 

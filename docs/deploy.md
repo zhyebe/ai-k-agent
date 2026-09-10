@@ -80,12 +80,12 @@ cp .env.example .env
 | `ALLOW_MEMORY_FALLBACK` | `0` | 库连不上应直接失败 |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | **必改** | 后台登录 |
 | `ADMIN_SESSION_TTL_SEC` | `28800` | 管理会话秒数 |
+| `USER_SESSION_TTL_SEC` | `2592000` | 桌面登录会话秒数，默认 30 天 |
 | `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` / `DESKTOP_DISPLAY_NAME` | 可选 | 首次启动创建桌面用户并分配已有任务 |
 | `CORS_ALLOWED_ORIGINS` | **后台页面源** | 逗号分隔，例如 `https://ops.example.com`。Electron 的 `null` 已内置 |
 | `BROWSER_ALLOWED_DOMAINS` | 含目标域名 | 默认需含 `smyw.haohandahan.cn` |
 | `AXIOM_DATA_DIR` | 固定数据盘路径 | Playwright 配置、Vault |
 | `AXIOM_SECRET_FILE` / `AXIOM_VAULT_FILE` | 建议放数据盘 | 本地密钥与凭据文件 |
-| `DEEPSEEK_API_KEY` 等 | 可选，仅首次种子 | 日常在桌面「连接器」保存 Provider |
 | `HAOHAN_ANALYSIS_TIMEFRAMES` | `1m,1h,1d,1mo` | 只读采集周期 |
 | `HAOHAN_KLINE_COUNT` | `2000` | 单周期请求上限 |
 | `MONITOR_POLL_INTERVAL_MS` | 可选 `1000–120000` | 覆盖按周期推导的轮询 |
@@ -136,7 +136,7 @@ MONGO_DB=axiom_agent
 ```bash
 git clone <repo> /opt/axiom-agent
 cd /opt/axiom-agent
-git checkout v0.2.2
+git checkout v0.2.3
 npm ci --omit=dev
 cp .env.example .env
 # 编辑 .env
@@ -271,9 +271,8 @@ BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 
 1. 密钥用 `APP_SECRET` 加密进 MySQL `providers.encrypted_key`，只对当前桌面账号可见。
 2. 保存后可点「使用」，作为该任务的分析模型。
-3. 天成网关 `https://ai.tiancheng.tcyun.net` **不要加 `/v1`**，协议选 Responses；当前验证过 `gpt-6-astra`。
-4. DeepSeek 等 Chat Completions 接口地址带 `/v1`。
-5. `.env` 里的 `DEEPSEEK_*` 只在库里还没有 DeepSeek 行时做种子，不能代替用户自己添加。
+3. 根地址（无路径或 `/`）走 Responses；带 `/v1` 的地址走 Chat Completions。也可在桌面里手动指定协议。
+4. 默认列表是空的，需要每个桌面账号自己添加 Provider。
 
 没有可用 Provider 时模型阶段保持 HOLD，并带 `PROVIDER_NOT_CONFIGURED`。
 
@@ -282,7 +281,7 @@ BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 推送 `v*` 标签后，[`.github/workflows/release.yml`](../.github/workflows/release.yml) 构建 macOS universal 与 Windows x64，并上传 GitHub Release（含 `latest-mac.yml` / `latest.yml`）。
 
 ```bash
-git tag v0.2.2
+git tag v0.2.3
 git push origin main --tags
 ```
 
@@ -302,7 +301,7 @@ npm run release:win
 3. 桌面端改服务地址、登录、把任务切到「实盘（确认后下单）」、保存 Provider、测试连接器。
 4. 目标页保持登录后「立即分析」，输出流为 `connect → login → collect → analyze → rules → action`。
 5. `BUY` / `SELL` 会弹确认窗；点确认后才会在已登录页面提交订单。观察模式确认后也不会实盘下单。
-6. 模型请求必须从桌面本机发出；API 服务器不应出现对天成 / DeepSeek 的直连。桌面离线时分析应失败为 `DESKTOP_AI_OFFLINE`。
+6. 模型请求必须从桌面本机发出；API 服务器不应出现对模型网关的直连。桌面离线时分析应失败为 `DESKTOP_AI_OFFLINE`。
 7. 「开始观察」多轮后，行情不变应跳过模型；「停止观察」后不再开新轮次。
 
 实盘必须弹窗确认。生产 Compose 设置 `AXIOM_REQUIRE_DESKTOP_AI=1`。
@@ -325,7 +324,7 @@ npm run release:win
 | 分析提示重新登录 | 在桌面连接器确认凭据，或在 API 主机上重新打开目标页 |
 | 账户权益为 `--` / 0 | 页面可见「可用资金」才会同步；确认采集的是当前登录页 |
 | 分析的品种和屏幕不一致 | 把目标页切到要看的合约再分析；以页面品种为准 |
-| 模型 404 / HTML | 天成 base URL 不要加 `/v1`，走 Responses 而不是 Chat Completions |
+| 模型 404 / HTML | 根地址走 Responses；带 `/v1` 的地址走 Chat Completions |
 | macOS 打不开安装包 | 未签名包；系统设置里允许，或走已签名 Release |
 
 升级：`git fetch && git checkout <tag> && npm ci --omit=dev && systemctl restart axiom-api`，后台静态页重新 `npm run build` 后覆盖 Nginx `root`。

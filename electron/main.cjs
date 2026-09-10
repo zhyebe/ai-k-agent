@@ -4,6 +4,7 @@ const http = require("node:http");
 const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
+const { autoUpdater } = require("electron-updater");
 const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
 
 let apiProcess;
@@ -256,6 +257,7 @@ function waitForApi(timeoutMs = 15000) {
 }
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
@@ -283,9 +285,30 @@ function createWindow() {
     if (url.startsWith("https://")) shell.openExternal(url);
     return { action: "deny" };
   });
+  return mainWindow;
+}
+
+function showMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return mainWindow;
+  }
+  return createWindow();
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    showMainWindow();
+  });
 }
 
 app.whenReady().then(async () => {
+  if (!gotTheLock) return;
   apiBaseUrl = initialApiBaseUrl();
   if (embeddedApiEnabled) {
     apiPort = await chooseApiPort();
@@ -294,11 +317,17 @@ app.whenReady().then(async () => {
     startApi();
     try { await waitForApi(); } catch (error) { console.error(error); }
   }
-  createWindow();
-  configureAutoUpdater();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
+  showMainWindow();
+  try {
+    configureAutoUpdater();
+  } catch (error) {
+    console.error("auto-update setup failed", error);
+  }
+});
+
+app.on("activate", () => {
+  if (!gotTheLock || !app.isReady()) return;
+  showMainWindow();
 });
 
 app.on("window-all-closed", () => {

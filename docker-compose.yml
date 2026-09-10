@@ -47,6 +47,7 @@ services:
       AXIOM_BROWSER_NO_SANDBOX: "1"
       ALLOW_MEMORY_FALLBACK: "0"
       AXIOM_REQUIRE_DESKTOP_AI: "1"
+      USER_SESSION_TTL_SEC: "2592000"
     volumes:
       - axiom_data:/var/lib/axiom-agent
     depends_on:

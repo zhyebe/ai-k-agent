@@ -73,26 +73,27 @@ export function publicProvider(provider) {
 
 export function publicProviderList(userId = "") {
   const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return [];
   return state.providers
-    .filter((provider) => !provider.ownerUserId || String(provider.ownerUserId) === normalizedUserId)
+    .filter((provider) => String(provider.ownerUserId || "") === normalizedUserId)
     .map(publicProvider);
 }
 
 export function findProviderForUser(providerId = "", userId = "") {
   const requestedId = String(providerId || "");
   const normalizedUserId = String(userId || "");
-  const exact = requestedId ? state.providers.find((provider) => String(provider.id) === requestedId) : null;
-  if (exact?.ownerUserId && String(exact.ownerUserId) !== normalizedUserId) return null;
-  const owned = requestedId ? state.providers.find((provider) =>
+  if (!requestedId) {
+    return state.providers.find((provider) =>
+      String(provider.ownerUserId || "") === normalizedUserId && providerIsReady(provider),
+    ) || null;
+  }
+  const owned = state.providers.find((provider) =>
     String(provider.ownerUserId || "") === normalizedUserId
     && (String(provider.id) === requestedId || String(provider.providerKey || "") === requestedId),
-  ) : null;
+  );
   if (owned) return owned;
-  if (requestedId) {
-    return state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === requestedId)
-      || null;
-  }
-  return null;
+  if (normalizedUserId) return null;
+  return state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === requestedId) || null;
 }
 
 function providerIsReady(provider) {
@@ -101,23 +102,14 @@ function providerIsReady(provider) {
 
 export function resolveDefaultProviderId(userId = "", preferredId = "") {
   const preferred = String(preferredId || "").trim();
+  const normalizedUserId = String(userId || "");
   if (preferred) {
     const found = findProviderForUser(preferred, userId);
     if (found) return found.id;
   }
-  const normalizedUserId = String(userId || "");
-  const candidates = state.providers.filter((provider) => {
-    if (!providerIsReady(provider)) return false;
-    const owner = String(provider.ownerUserId || "");
-    return !owner || owner === normalizedUserId;
-  });
-  const owned = candidates.find((provider) => String(provider.ownerUserId || "") === normalizedUserId && provider.id !== "provider_deepseek")
-    || candidates.find((provider) => String(provider.ownerUserId || "") === normalizedUserId);
+  const owned = state.providers.find((provider) => providerIsReady(provider) && String(provider.ownerUserId || "") === normalizedUserId);
   if (owned) return owned.id;
-  const shared = candidates.find((provider) => !provider.ownerUserId && provider.id !== "provider_deepseek")
-    || candidates.find((provider) => !provider.ownerUserId);
-  if (shared) return shared.id;
-  return preferred || "provider_deepseek";
+  return preferred;
 }
 
 export const state = {
@@ -223,10 +215,7 @@ export const state = {
       content: "单笔订单金额不得超过账户权益 8%，单日亏损达到 3% 时停止自动交易并通知人工。",
     },
   ],
-  providers: [
-    { id: "provider_deepseek", providerKey: "provider_deepseek", ownerUserId: "", name: "DeepSeek", model: "deepseek-v4-pro", baseUrl: "https://api.deepseek.com/v1", encryptedKey: "", keyPreview: "", status: "未配置" },
-    { id: "provider_custom", providerKey: "provider_custom", ownerUserId: "", name: "自定义 OpenAI Compatible", model: "未设置", baseUrl: "", encryptedKey: "", keyPreview: "", status: "未配置" },
-  ],
+  providers: [],
   events: [],
   runs: [],
   analyses: [],

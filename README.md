@@ -105,7 +105,7 @@ macOS 构建在 `release/` 生成 `dmg` / `zip`（本机已验证 arm64 目录�
 仓库使用 GitHub Release 分发桌面端。推送 `v*` 标签后，`.github/workflows/release.yml` 会分别构建 macOS universal 和 Windows x64，并发布安装包、portable 包及 `latest-mac.yml` / `latest.yml` 更新元数据：
 
 ```bash
-git tag v0.2.2
+git tag v0.2.3
 git push origin main --tags
 ```
 

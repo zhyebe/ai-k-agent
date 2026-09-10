@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",

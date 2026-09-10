@@ -50,7 +50,7 @@ require_deploy_target() {
 }
 
 ssh_base_opts() {
-  local opts=(-F /dev/null -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=20 -p "$DEPLOY_PORT")
+  local opts=(-F /dev/null -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -p "$DEPLOY_PORT")
   if [[ -n "${DEPLOY_IDENTITY:-}" ]]; then
     opts+=(-i "$DEPLOY_IDENTITY")
   fi
@@ -78,7 +78,7 @@ open_ssh_master() {
     -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile=/dev/null \
     -o GlobalKnownHostsFile=/dev/null \
-    -o ConnectTimeout=20 -p "$DEPLOY_PORT" \
+    -o ConnectTimeout=20 -o ServerAliveInterval=30 -o ServerAliveCountMax=20 -p "$DEPLOY_PORT" \
     "${DEPLOY_USER}@${DEPLOY_HOST}" true
   [[ -S "$SSH_CONTROL_PATH" ]] || die "failed to open SSH control master"
 }

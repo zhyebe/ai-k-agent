@@ -77,7 +77,9 @@ export function resolveProviderWireApi(provider = {}) {
   if (["openai_responses", "responses", "response"].includes(explicit)) return "responses";
   if (["openai_chat", "chat", "openai_chat_completions"].includes(explicit)) return "chat";
   try {
-    if (new URL(normalizeBaseUrl(provider.baseUrl)).hostname === "ai.tiancheng.tcyun.net") return "responses";
+    const path = new URL(normalizeBaseUrl(provider.baseUrl)).pathname.replace(/\/+$/, "") || "/";
+    if (path === "/") return "responses";
+    if (path === "/v1" || path.endsWith("/v1")) return "chat";
   } catch {}
   return "chat";
 }

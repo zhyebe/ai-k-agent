@@ -23,7 +23,6 @@ cp .env.example .env
 - `APP_SECRET`
 - `ADMIN_PASSWORD`
 - `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`（首次启动会创建桌面用户，并分配已有任务）
-- `DEEPSEEK_API_KEY`（可选。仅在数据库里还没有 DeepSeek 密钥时，加密写入 MySQL `providers.encrypted_key`。日常请在桌面端「连接器」保存 Provider，不要把业务密钥长期放在 `.env`）
 
 浏览器白名单需包含目标域名，例如：
 

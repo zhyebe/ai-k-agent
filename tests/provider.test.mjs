@@ -33,9 +33,9 @@ test("provider configuration rejects non-http endpoints", () => {
 
 test("desktop users can create an owned provider and keep the wire format", () => {
   const provider = createProvider({
-    name: "我的天成",
-    baseUrl: "https://ai.tiancheng.tcyun.net",
-    model: "gpt-6-astra",
+    name: "我的网关",
+    baseUrl: "https://gateway.example.test",
+    model: "your-model",
     apiKey: "sk-user-owned",
     apiFormat: "openai_responses",
   });
@@ -49,8 +49,8 @@ test("desktop users can create an owned provider and keep the wire format", () =
 });
 
 test("owned providers with the same name, model and URL share an identity", () => {
-  const first = { ownerUserId: "user_1", name: "tiancheng", model: "gpt-6-astra", baseUrl: "https://ai.tiancheng.tcyun.net/" };
-  const second = { ownerUserId: "user_1", name: "Tiancheng", model: "gpt-6-astra", baseUrl: "https://ai.tiancheng.tcyun.net" };
+  const first = { ownerUserId: "user_1", name: "gateway", model: "your-model", baseUrl: "https://gateway.example.test/" };
+  const second = { ownerUserId: "user_1", name: "Gateway", model: "your-model", baseUrl: "https://gateway.example.test" };
   assert.equal(providerIdentityKey(first), providerIdentityKey(second));
   assert.equal(publicProvider({ ...first, encryptedKey: "x" }).owned, true);
 });
@@ -141,8 +141,9 @@ test("provider reviews a complete market segment and binds the returned review t
   }
 });
 
-test("天成网关按 Codex/cc-switch 走 Responses API，不打 chat/completions", async () => {
-  assert.equal(resolveProviderWireApi({ baseUrl: "https://ai.tiancheng.tcyun.net" }), "responses");
+test("root gateway URLs use Responses API; /v1 uses Chat Completions", async () => {
+  assert.equal(resolveProviderWireApi({ baseUrl: "https://gateway.example.test" }), "responses");
+  assert.equal(resolveProviderWireApi({ baseUrl: "https://api.example.com/v1" }), "chat");
   let requestUrl = "";
   let received;
   const server = http.createServer(async (request, response) => {
@@ -155,10 +156,10 @@ test("天成网关按 Codex/cc-switch 走 Responses API，不打 chat/completion
   });
   const port = await listen(server);
   try {
-    const provider = createProvider({ name: "天成 AI", model: "gpt-6-astra", baseUrl: `http://127.0.0.1:${port}`, apiKey: "provider-secret", apiFormat: "responses" });
+    const provider = createProvider({ name: "Gateway", model: "your-model", baseUrl: `http://127.0.0.1:${port}`, apiKey: "provider-secret", apiFormat: "responses" });
     const result = await requestDecision(provider, { market: { trend: "up" }, evidenceIds: [] });
     assert.equal(requestUrl, "/responses");
-    assert.equal(received.model, "gpt-6-astra");
+    assert.equal(received.model, "your-model");
     assert.ok(Array.isArray(received.input));
     assert.equal(result.action, "HOLD");
   } finally {

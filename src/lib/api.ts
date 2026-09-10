@@ -21,20 +21,42 @@ export function getApiBaseUrl() {
   return apiBaseUrl;
 }
 
+const USER_TOKEN_KEY = "axiom.user.token";
+const ADMIN_TOKEN_KEY = "axiom.admin.token";
+
+export function getUserToken() {
+  return window.localStorage.getItem(USER_TOKEN_KEY) || window.sessionStorage.getItem(USER_TOKEN_KEY) || "";
+}
+
+export function setUserToken(token: string) {
+  const value = String(token || "").trim();
+  if (!value) {
+    clearUserToken();
+    return;
+  }
+  window.localStorage.setItem(USER_TOKEN_KEY, value);
+  window.sessionStorage.removeItem(USER_TOKEN_KEY);
+}
+
+export function clearUserToken() {
+  window.localStorage.removeItem(USER_TOKEN_KEY);
+  window.sessionStorage.removeItem(USER_TOKEN_KEY);
+}
+
 export async function configureApiBaseUrl(value: string) {
   const next = normalizeApiBaseUrl(value);
   if (window.axiomDesktop?.api?.setBaseUrl) await window.axiomDesktop.api.setBaseUrl(next);
   if (next !== apiBaseUrl) {
-    window.sessionStorage.removeItem("axiom.admin.token");
-    window.sessionStorage.removeItem("axiom.user.token");
+    window.sessionStorage.removeItem(ADMIN_TOKEN_KEY);
+    clearUserToken();
   }
   apiBaseUrl = next;
   return apiBaseUrl;
 }
 
 function authHeaders(): Record<string, string> {
-  const adminToken = window.sessionStorage.getItem("axiom.admin.token");
-  const userToken = window.sessionStorage.getItem("axiom.user.token");
+  const adminToken = window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
+  const userToken = getUserToken();
   return {
     ...(adminToken ? { "x-admin-token": adminToken } : {}),
     ...(userToken ? { "x-user-token": userToken } : {}),
@@ -203,7 +225,7 @@ export async function fetchAgentOutput(taskId: string, runId = "") {
 }
 
 export function agentStreamUrl(taskId: string, runId = "") {
-  const userToken = window.sessionStorage.getItem("axiom.user.token") || "";
+  const userToken = getUserToken();
   const params = new URLSearchParams();
   if (runId) params.set("runId", runId);
   if (userToken) params.set("userToken", userToken);

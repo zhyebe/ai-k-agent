@@ -5,7 +5,7 @@ const sessions = new Map();
 const assignments = new Map();
 let persistence = null;
 
-const sessionTtlMs = Math.max(5 * 60 * 1000, Number(process.env.USER_SESSION_TTL_SEC || 28800) * 1000);
+const sessionTtlMs = Math.max(5 * 60 * 1000, Number(process.env.USER_SESSION_TTL_SEC || 30 * 24 * 60 * 60) * 1000);
 
 function sameSecret(left, right) {
   const leftValue = Buffer.from(String(left || ""));
@@ -173,6 +173,10 @@ export function getUserSession(token) {
   }
   const user = getUser(session.userId);
   if (!user || user.status !== "ACTIVE") return null;
+  if (session.expiresAt - Date.now() < sessionTtlMs / 2) {
+    session.expiresAt = Date.now() + sessionTtlMs;
+    persistence?.saveUserSession?.(session).catch(() => {});
+  }
   return { user: publicUser(user), expiresAt: new Date(session.expiresAt).toISOString() };
 }
 

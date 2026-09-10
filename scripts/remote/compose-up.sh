@@ -115,6 +115,7 @@ ADMIN_SESSION_TTL_SEC=28800
 DESKTOP_USERNAME=operator
 DESKTOP_PASSWORD=${DESKTOP_PASSWORD}
 DESKTOP_DISPLAY_NAME=观察员
+USER_SESSION_TTL_SEC=2592000
 HAOHAN_ANALYSIS_TIMEFRAMES=1m,1h,1d,1mo
 HAOHAN_KLINE_COUNT=2000
 CORS_ALLOWED_ORIGINS=${CORS_ORIGINS}
@@ -148,14 +149,18 @@ fi
 if ! grep -q '^CLIENT_PORT=' .env; then
   echo "CLIENT_PORT=${CLIENT_PORT}" >> .env
 fi
+if ! grep -q '^USER_SESSION_TTL_SEC=' .env; then
+  echo "USER_SESSION_TTL_SEC=2592000" >> .env
+fi
 
 set -a
 # shellcheck disable=SC1091
 source .env
 set +a
 
-echo "Building images"
-docker compose build
+echo "Building images sequentially to avoid host OOM"
+docker compose build api
+docker compose build nginx
 echo "Starting MySQL/Mongo first"
 docker compose up -d mysql mongo
 
@@ -186,7 +191,7 @@ if [[ -f import/mysql.sql && ! -f import/.imported ]]; then
 fi
 
 echo "Starting API and admin"
-docker compose up -d --build
+docker compose up -d api nginx
 
 echo "Waiting for API health..."
 ok=0
