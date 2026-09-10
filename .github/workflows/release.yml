@@ -124,6 +124,12 @@ jobs:
         run: |
           test -s release/latest-mac.yml
           test -s release/latest.yml
+          grep -qE '\.zip' release/latest-mac.yml
+          grep -qE 'setup\.exe' release/latest.yml
+          if grep -qE 'portable\.exe' release/latest.yml; then
+            echo "latest.yml must point auto-update at the NSIS setup, not portable" >&2
+            exit 1
+          fi
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

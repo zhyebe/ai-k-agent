@@ -21,7 +21,7 @@ if [[ ! -d .git ]]; then
 fi
 
 export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -i /root/.ssh/axiom-github -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new}"
-git fetch --tags --prune origin
+git fetch --tags --force --prune origin
 if git rev-parse --verify "refs/remotes/origin/${REF}" >/dev/null 2>&1; then
   git checkout -f -B "$REF" "origin/${REF}"
 elif git rev-parse --verify "refs/tags/${REF}" >/dev/null 2>&1; then

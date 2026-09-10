@@ -219,7 +219,7 @@ function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateS
               : state.status === "not-available"
                 ? "已是最新"
                 : "检查更新";
-  const disabled = busy || ["checking", "downloading", "installing", "not-available"].includes(state.status);
+  const disabled = busy || ["checking", "downloading", "installing"].includes(state.status);
   const title = [`桌面版 v${state.currentVersion}`, canInstall && state.downloadedVersion ? `已下载 v${state.downloadedVersion}` : "", state.error || actionLabel].filter(Boolean).join(" · ");
   return <button type="button" className={`update-control update-${canInstall ? "downloaded" : state.status}`} onClick={onAction} disabled={disabled} title={title}><Download size={14} /><span>{actionLabel}</span></button>;
 }

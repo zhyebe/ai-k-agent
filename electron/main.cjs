@@ -6,7 +6,14 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
 const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
-const { emptyUpdateState, hasDownloadedPackage, reduceUpdateState } = require("./update-state.cjs");
+const {
+  emptyUpdateState,
+  hasDownloadedPackage,
+  shouldSkipUpdateCheck,
+  supportsDesktopAutoUpdate,
+  installForceQuitDelayMs,
+  reduceUpdateState,
+} = require("./update-state.cjs");
 
 let apiProcess;
 let mainWindow;
@@ -22,7 +29,11 @@ let resizeSession;
 const updateState = emptyUpdateState();
 
 function supportsAutoUpdate() {
-  return app.isPackaged && ["darwin", "win32"].includes(process.platform);
+  return supportsDesktopAutoUpdate({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    env: process.env,
+  });
 }
 
 function publishUpdateState(next) {
@@ -41,7 +52,7 @@ function checkForUpdates() {
     publishUpdateState({ status: app.isPackaged ? "unsupported" : "disabled", currentVersion: app.getVersion() });
     return Promise.resolve(currentUpdateState());
   }
-  if (updateState.status === "downloading" || updateState.status === "installing" || hasDownloadedPackage(updateState)) {
+  if (shouldSkipUpdateCheck(updateState)) {
     return Promise.resolve(currentUpdateState());
   }
   if (updateCheckPromise) return updateCheckPromise;
@@ -68,6 +79,7 @@ function configureAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.allowDowngrade = false;
+  autoUpdater.disableWebInstaller = true;
   autoUpdater.on("checking-for-update", () => publishUpdateState({ status: "checking", error: null }));
   autoUpdater.on("update-available", (info) => publishUpdateState({ status: "available", availableVersion: info.version, progress: 0, error: null }));
   autoUpdater.on("update-not-available", () => publishUpdateState({ status: "not-available", availableVersion: null, progress: 0, error: null }));
@@ -107,21 +119,22 @@ function installDownloadedUpdate() {
   }
   publishUpdateState({ status: "installing", error: null });
   prepareAppForUpdateQuit();
-  const install = () => {
-    try {
-      autoUpdater.quitAndInstall(false, true);
-    } catch (error) {
-      quittingForUpdate = false;
-      publishUpdateState({ status: "downloaded", error: error instanceof Error ? error.message : String(error) });
-    }
-  };
-  setImmediate(install);
-  if (installTimer) clearTimeout(installTimer);
-  installTimer = setTimeout(() => {
-    if (!quittingForUpdate) return;
-    install();
-    if (quittingForUpdate) app.quit();
-  }, 1200);
+  try {
+    // Windows NSIS: not silent, relaunch after setup. macOS ignores these args and
+    // uses Squirrel.Mac to apply the downloaded zip.
+    autoUpdater.quitAndInstall(false, true);
+  } catch (error) {
+    quittingForUpdate = false;
+    publishUpdateState({ status: "downloaded", error: error instanceof Error ? error.message : String(error) });
+    return currentUpdateState();
+  }
+  const forceQuitAfterMs = installForceQuitDelayMs(process.platform);
+  if (forceQuitAfterMs > 0) {
+    if (installTimer) clearTimeout(installTimer);
+    installTimer = setTimeout(() => {
+      if (quittingForUpdate) app.quit();
+    }, forceQuitAfterMs);
+  }
   return currentUpdateState();
 }
 
