@@ -251,6 +251,14 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   const raw = market.raw && typeof market.raw === "object" && !Array.isArray(market.raw)
     ? Object.fromEntries(Object.entries(market.raw).filter(([key]) => key !== "timeline"))
     : market.raw;
+  const layeredBooks = Array.isArray(market.books)
+    ? market.books.map((book) => {
+      if (!book || typeof book !== "object") return null;
+      const rest = { ...book };
+      delete rest.books;
+      return buildLayeredAnalysisMarket(rest, now);
+    }).filter(Boolean)
+    : [];
   return {
     ...market,
     timeframe: primary,
@@ -262,6 +270,8 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
     timeframes,
     availableTimeframes: ["1m", "1h", "1d", "1mo"],
     analysisLayers: { timezone: windows.timezone, now, layers },
+    books: layeredBooks,
+    bookCount: layeredBooks.length,
     raw,
   };
 }
@@ -440,6 +450,36 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     });
   }
 
+  const primarySymbol = String(market.symbol || "").trim().toLowerCase();
+  for (const book of Array.isArray(market.books) ? market.books : []) {
+    if (!book || typeof book !== "object") continue;
+    if (String(book.symbol || "").trim().toLowerCase() === primarySymbol) continue;
+    for (const [timeframeKey, rawSnapshot] of timeframeEntries(book)) {
+      const timeframe = String(rawSnapshot.timeframe || timeframeKey);
+      const snapshot = sanitizeReadOnlyValue(rawSnapshot);
+      const history = Array.isArray(rawSnapshot.history) ? rawSnapshot.history : [];
+      const rows = history.map(compactMarketCandle);
+      const chunks = history.length ? chunkRows(rows, maxRows, rowBudget) : [];
+      chunks.forEach((chunk, chunkIndex) => {
+        const start = chunks.slice(0, chunkIndex).reduce((sum, item) => sum + item.length, 0);
+        const sourceRows = history.slice(start, start + chunk.length);
+        segments.push(segmentBase({
+          fingerprint,
+          kind: "kline",
+          timeframe,
+          index: nextIndex++,
+          rowStart: start,
+          rowEnd: start + chunk.length,
+          rowCount: chunk.length,
+          firstTimestamp: sourceRows[0]?.timestamp || null,
+          lastTimestamp: sourceRows.at(-1)?.timestamp || null,
+          metadata: { ...timeframeMetadata(timeframe, snapshot, history), symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId || null },
+          rows: chunk,
+        }));
+      });
+    }
+  }
+
   const ticks = Array.isArray(market.ticks) ? market.ticks : [];
   let liveTickOffset = 0;
   if (ticks.length) {
@@ -556,6 +596,28 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     completeHistoryCount: market.completeHistoryCount || 0,
     timeframes,
     analysisLayers: market.analysisLayers || null,
+    bookCount: Array.isArray(market.books) ? market.books.length : 0,
+    books: (Array.isArray(market.books) ? market.books : []).map((book) => ({
+      symbol: book.symbol,
+      symbolName: book.symbolName,
+      instrumentId: book.instrumentId,
+      latest: book.latest || book.quote,
+      quote: book.quote || book.latest,
+      changePct: book.changePct,
+      trend: book.trend,
+      dataQuality: book.dataQuality,
+      missingFields: Array.isArray(book.missingFields) ? book.missingFields : [],
+      historyCount: book.historyCount || book.history?.length || 0,
+      completeHistoryCount: book.completeHistoryCount || 0,
+      timeframes: Object.fromEntries(Object.entries(book.timeframes || {}).map(([key, snapshot]) => [key, {
+        timeframe: snapshot.timeframe || key,
+        label: snapshot.label || key,
+        trend: snapshot.trend || "unknown",
+        historyCount: snapshot.historyCount ?? snapshot.history?.length ?? 0,
+        completeHistoryCount: snapshot.completeHistoryCount ?? 0,
+        recentHistory: recentRows(snapshot.history, recentRowsPerTimeframe, compactMarketCandle),
+      }])),
+    })),
     liveTicks: [],
     page: market.page ? {
       url: market.page.url || "",

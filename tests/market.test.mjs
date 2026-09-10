@@ -4,15 +4,18 @@ import {
   enrichReadOnlyMarket,
   fetchHaohanMarket,
   fetchHaohanKlineHistory,
+  fetchHaohanBoardMarkets,
   haohanPeriodForTimeframe,
   marketDataFingerprint,
   normalizeHaohanKlineRow,
   normalizeHaohanTimelineTick,
   normalizeHaohanTimeframe,
   observeMarket,
+  pickPrimaryBoard,
+  resolveBoardInstruments,
   resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
-import { extractHaohanPageInstrument, parseHaohanPageSnapshot } from "../server/haohan.mjs";
+import { extractHaohanPageInstrument, normalizeHqChartCandle, parseHaohanPageSnapshot, uniquePageInstruments } from "../server/haohan.mjs";
 
 test("浩瀚 K 线按真实列位解析 OHLC、成交量和库存", () => {
   const candle = normalizeHaohanKlineRow([1700000000000, 100, 101, 105, 99, 103, 200, 20600, 50]);
@@ -270,4 +273,130 @@ test("unreviewed adapters stay blocked", async () => {
   );
   assert.equal(result.ok, false);
   assert.equal(result.code, "MARKET_ADAPTER_REVIEW_REQUIRED");
+});
+
+test("HQChart 行按上海时区日期时间解析为完整 OHLC", () => {
+  const candle = normalizeHqChartCandle({ Date: 20260910, Time: 1500, Open: 1820, High: 1835, Low: 1810, Close: 1830, Vol: 12, YClose: 1815 });
+  assert.equal(candle.close, 1830);
+  assert.equal(candle.open, 1820);
+  assert.equal(candle.high, 1835);
+  assert.equal(candle.low, 1810);
+  assert.equal(candle.partial, false);
+  assert.equal(candle.timestamp, Date.parse("2026-09-10T15:00:00+08:00"));
+});
+
+test("页面 HQChart K 线优先于 tooltip 采样并保留整段历史", () => {
+  const klines = Array.from({ length: 40 }, (_, index) => ({
+    Date: 20260910,
+    Time: 900 + index,
+    Open: 1800 + index,
+    High: 1810 + index,
+    Low: 1790 + index,
+    Close: 1805 + index,
+    Vol: 10 + index,
+  }));
+  const parsed = parseHaohanPageSnapshot({
+    url: "https://smyw.haohandahan.cn/client/#/transcc",
+    visibleText: "最新价：1844",
+    klines,
+    chartSamples: ["开盘 1 最高 1 最低 1 收盘 1 数量 1"],
+    capturedAt: Date.parse("2026-09-10T15:00:00+08:00"),
+  });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.historyCount, 40);
+  assert.equal(parsed.history[0].close, 1805);
+  assert.equal(parsed.history.at(-1).close, 1844);
+  assert.ok(!parsed.missingFields.includes("HISTORY_INSUFFICIENT"));
+});
+
+test("页面下拉的多个盘口会匹配只读合约并全部纳入监测", () => {
+  const boards = resolveBoardInstruments({
+    pageInstruments: uniquePageInstruments([
+      { symbolName: "丹桂金尖（二期）" },
+      { symbolName: "丹桂康砖（二期）" },
+    ]),
+    marketDetails: [
+      { symbol: "DGJJ", symbolId: "536", name: "丹桂金尖（二期）", close: 1830 },
+      { symbol: "DGKZ", symbolId: "537", name: "丹桂康砖（二期）", close: 1168 },
+    ],
+  });
+  assert.equal(boards.length, 2);
+  assert.equal(boards[0].symbol, "DGJJ");
+  assert.equal(boards[0].instrumentId, "536");
+  assert.equal(boards[1].symbol, "DGKZ");
+  assert.equal(pickPrimaryBoard(boards.map((board) => ({ symbol: board.symbol, symbolName: board.symbolName })), { pageSymbol: "DGKZ" }).symbol, "DGKZ");
+});
+
+test("只读采集会并行拉取全部盘口历史 K 线", async () => {
+  const previousWebSocket = globalThis.WebSocket;
+  const previousTimeframes = process.env.HAOHAN_ANALYSIS_TIMEFRAMES;
+  const contractIds = new Set();
+  class FakeWebSocket {
+    constructor() {
+      this.listeners = new Map();
+      queueMicrotask(() => this.emit("open", {}));
+    }
+
+    addEventListener(type, listener) {
+      const listeners = this.listeners.get(type) || [];
+      listeners.push(listener);
+      this.listeners.set(type, listeners);
+    }
+
+    removeEventListener(type, listener) {
+      this.listeners.set(type, (this.listeners.get(type) || []).filter((item) => item !== listener));
+    }
+
+    emit(type, value) {
+      for (const listener of this.listeners.get(type) || []) listener(value);
+    }
+
+    send(message) {
+      const payload = JSON.parse(message);
+      if (payload.fid === "marketdetail-req") {
+        queueMicrotask(() => this.emit("message", {
+          data: JSON.stringify({
+            fid: "marketdetail-resp",
+            code: 0,
+            marketDetails: [
+              { symbol: "DGJJ", symbolId: "536", name: "丹桂金尖（二期）", close: 1830, open: 1820, high: 1840, low: 1810, amount: 12 },
+              { symbol: "DGKZ", symbolId: "537", name: "丹桂康砖（二期）", close: 1168, open: 1160, high: 1172, low: 1155, amount: 8 },
+            ],
+          }),
+        }));
+      }
+    }
+
+    close() {}
+  }
+  globalThis.WebSocket = FakeWebSocket;
+  process.env.HAOHAN_ANALYSIS_TIMEFRAMES = "1m,15m,1d";
+  try {
+    const result = await fetchHaohanBoardMarkets({
+      instruments: [{ symbolName: "丹桂金尖（二期）" }, { symbolName: "丹桂康砖（二期）" }],
+      timeframe: "15m",
+      timeoutMs: 1000,
+      httpBaseUrl: "https://readonly.example.test",
+      fetchImpl: async (url) => {
+        const parsed = new URL(url);
+        contractIds.add(String(parsed.searchParams.get("contractId") || parsed.searchParams.get("symbol") || ""));
+        const rows = Array.from({ length: 25 }, (_, index) => {
+          const close = 100 + index;
+          return [1700000000000 + index * 900000, close - 2, close - 1, close + 1, close - 2, close, 10 + index, 1000 + index, 20 + index];
+        });
+        return { ok: true, json: async () => ({ code: 0, data: rows }) };
+      },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.books.length, 2);
+    assert.equal(result.books[0].historyCount, 25);
+    assert.equal(result.books[1].historyCount, 25);
+    assert.equal(contractIds.has("536"), true);
+    assert.equal(contractIds.has("537"), true);
+  } finally {
+    if (previousWebSocket === undefined) delete globalThis.WebSocket;
+    else globalThis.WebSocket = previousWebSocket;
+    if (previousTimeframes === undefined) delete process.env.HAOHAN_ANALYSIS_TIMEFRAMES;
+    else process.env.HAOHAN_ANALYSIS_TIMEFRAMES = previousTimeframes;
+  }
 });

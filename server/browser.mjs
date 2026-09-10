@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
-import { extractHaohanPageInstrument } from "./haohan.mjs";
+import { extractHaohanPageInstrument, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const sessions = new Map();
 
@@ -106,6 +106,125 @@ async function collectTables(page) {
   });
 }
 
+async function collectHqChart(page) {
+  return page.evaluate(() => {
+    const serializeRow = (row) => {
+      if (!row || typeof row !== "object") return null;
+      const close = Number(row.Close ?? row.close);
+      if (!Number.isFinite(close) || close <= 0) return null;
+      return {
+        Date: row.Date ?? row.date ?? null,
+        Time: row.Time ?? row.time ?? 0,
+        Open: row.Open ?? row.open ?? null,
+        High: row.High ?? row.high ?? null,
+        Low: row.Low ?? row.low ?? null,
+        Close: close,
+        Vol: row.Vol ?? row.Volume ?? row.volume ?? 0,
+        Amount: row.Amount ?? row.amount ?? null,
+        YClose: row.YClose ?? row.yclose ?? null,
+        timestamp: Number(row.timestamp ?? row.DateTime ?? row.datetime) || null,
+      };
+    };
+    const looksLikeRows = (data) => Array.isArray(data) && data.length >= 2 && data.some((row) => row && typeof row === "object" && (row.Close != null || row.close != null) && (row.Date != null || row.date != null));
+    let best = [];
+    let symbol = "";
+    let period = "";
+    const take = (data, meta = {}) => {
+      if (!looksLikeRows(data) || data.length <= best.length) return;
+      const rows = data.map(serializeRow).filter(Boolean);
+      if (rows.length <= best.length) return;
+      best = rows;
+      if (meta.symbol) symbol = String(meta.symbol);
+      if (meta.period != null) period = String(meta.period);
+    };
+    const inspectChart = (chart) => {
+      if (!chart) return;
+      const container = chart.JSChartContainer || chart;
+      const meta = {
+        symbol: container?.Symbol || chart.Symbol || container?.Name || "",
+        period: container?.Period ?? chart.Period ?? "",
+      };
+      take(container?.SourceData?.Data, meta);
+      if (typeof container?.SourceData?.GetData === "function") {
+        try { take(container.SourceData.GetData(), meta); } catch {}
+      }
+      take(container?.HistoryData?.Data, meta);
+      take(container?.ChartData?.Data, meta);
+      take(container?.Data?.Data, meta);
+      const paints = Array.isArray(container?.ChartPaint) ? container.ChartPaint : [];
+      for (const paint of paints.slice(0, 8)) take(paint?.Data?.Data, meta);
+    };
+    const roots = [...document.querySelectorAll("#hqchart_kline, [id*='hqchart' i], [class*='hqchart' i], canvas")];
+    const JSChart = window.JSChart;
+    for (const element of roots) {
+      let chart = element.JSChart || element.jsChart || null;
+      if (!chart && JSChart && typeof JSChart.GetChart === "function") {
+        try { chart = JSChart.GetChart(element); } catch {}
+      }
+      inspectChart(chart);
+    }
+    if (!best.length && JSChart && typeof JSChart.GetChart === "function") {
+      try { inspectChart(JSChart.GetChart()); } catch {}
+    }
+    return { klines: best, symbol, period, klineCount: best.length };
+  }).catch(() => ({ klines: [], symbol: "", period: "", klineCount: 0 }));
+}
+
+function productOptionText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function extractInstrumentOption(text, fromMenu = false) {
+  const value = productOptionText(text);
+  if (!value || value === "F10" || value.length > 80) return null;
+  if (/登录|密码|可用资金|最新价|涨跌幅|持仓明细|销售|采购/.test(value)) return null;
+  const codeMatch = value.match(/^([A-Z][A-Z0-9_-]{1,15})\s+(.+)$/);
+  if (codeMatch) return { symbol: codeMatch[1], symbolName: codeMatch[2], instrumentId: "" };
+  if (/（二期）|一期|金尖|康砖/.test(value)) return { symbol: "", symbolName: value, instrumentId: "" };
+  if (fromMenu && value.length >= 2 && value.length <= 40 && !/[:：%]/.test(value) && !/\d{4,}/.test(value)) {
+    return { symbol: "", symbolName: value, instrumentId: "" };
+  }
+  return null;
+}
+
+async function readVisibleInstrumentOptions(page) {
+  const raw = await page.evaluate(() => {
+    const texts = [];
+    const selectors = ["[role='option']", ".el-select-dropdown__item", ".el-dropdown-menu__item", ".el-popper li", ".ant-select-item", "[class*='dropdown'] li", "[class*='select'] li"];
+    for (const node of selectors.flatMap((selector) => [...document.querySelectorAll(selector)])) {
+      const style = window.getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) continue;
+      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+      if (text) texts.push(text);
+    }
+    return texts;
+  }).catch(() => []);
+  return uniquePageInstruments(raw.map((text) => extractInstrumentOption(text, true)).filter(Boolean));
+}
+
+async function openProductMenu(page) {
+  const clicked = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll("span, div, p, button, a, h1, h2, h3")];
+    const f10 = nodes.find((el) => String(el.textContent || "").trim() === "F10" && el.children.length === 0);
+    const candidates = [];
+    if (f10) {
+      const root = f10.closest("header, section, nav, div") || f10.parentElement;
+      if (root) candidates.push(...root.querySelectorAll("span, div, p, button, a"));
+      if (f10.previousElementSibling) candidates.unshift(f10.previousElementSibling);
+    }
+    const trigger = [...candidates, ...nodes].find((el) => {
+      const text = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      return text.length >= 2 && text.length <= 40 && /（二期）|金尖|康砖/.test(text) && !/F10/.test(text) && (el.children?.length || 0) <= 3;
+    });
+    if (!trigger) return false;
+    trigger.click();
+    return true;
+  }).catch(() => false);
+  if (clicked) await page.waitForTimeout(280);
+  return clicked;
+}
+
 async function collectChartSamples(page) {
   const selector = await page.evaluate(() => {
     const candidates = ["#hqchart_kline", ".hqchart_kline", "[id*='hqchart']", "canvas", "svg"];
@@ -173,14 +292,26 @@ export async function readVisiblePage(sessionId = "default") {
       visibleText: document.body?.innerText || "",
     }));
     const tables = await collectTables(session.page);
-    const chartSamples = await collectChartSamples(session.page);
+    const chart = await collectHqChart(session.page);
+    const chartSamples = (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
+    const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });
+    const chartInstrument = chart.symbol
+      ? (/^\d+$/.test(String(chart.symbol))
+        ? { symbol: "", symbolName: "", instrumentId: String(chart.symbol) }
+        : { symbol: String(chart.symbol), symbolName: "", instrumentId: "" })
+      : null;
+    const instruments = uniquePageInstruments([instrument, chartInstrument, ...(await readVisibleInstrumentOptions(session.page))].filter(Boolean));
     return {
       ok: true,
       sessionId: String(sessionId || "default"),
       url: safeUrl(raw.url),
       title: String(raw.title || "").slice(0, 160),
       visibleText: redact(raw.visibleText),
-      instrument: extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title }),
+      instrument,
+      instruments,
+      klines: Array.isArray(chart.klines) ? chart.klines : [],
+      chartSymbol: String(chart.symbol || ""),
+      chartPeriod: String(chart.period || ""),
       tables,
       chartSamples: chartSamples.map(redact),
       capturedAt: Date.now(),
@@ -188,6 +319,78 @@ export async function readVisiblePage(sessionId = "default") {
   } catch (error) {
     return { ok: false, code: "BROWSER_READ_FAILED", message: error instanceof Error ? error.message : String(error) };
   }
+}
+
+export async function listPageBoardInstruments(sessionId = "default") {
+  const session = sessions.get(String(sessionId || "default"));
+  if (!session) return [];
+  const visible = await readVisibleInstrumentOptions(session.page);
+  if (visible.length >= 2) return visible;
+  await openProductMenu(session.page);
+  const opened = await readVisibleInstrumentOptions(session.page);
+  await session.page.keyboard.press("Escape").catch(() => {});
+  const current = extractHaohanPageInstrument({
+    visibleText: await session.page.evaluate(() => document.body?.innerText || "").catch(() => ""),
+    title: await session.page.title().catch(() => ""),
+  });
+  return uniquePageInstruments([current, ...opened, ...visible].filter((item) => item?.symbol || item?.symbolName));
+}
+
+export async function selectPageBoardInstrument(sessionId, instrument) {
+  const session = sessions.get(String(sessionId || "default"));
+  if (!session || !instrument) return false;
+  const currentText = await session.page.evaluate(() => document.body?.innerText || "").catch(() => "");
+  const current = extractHaohanPageInstrument({
+    visibleText: currentText,
+    title: await session.page.title().catch(() => ""),
+  });
+  if (samePageInstrument(current, instrument)) return true;
+  await openProductMenu(session.page);
+  const clicked = await session.page.evaluate(({ name, symbol }) => {
+    const nodes = [...document.querySelectorAll("[role='option'], .el-select-dropdown__item, .el-dropdown-menu__item, .el-popper li, .ant-select-item, li, div, span, p, button, a")];
+    const matches = [];
+    for (const node of nodes) {
+      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 80) continue;
+      const hit = (symbol && (text === symbol || text.startsWith(`${symbol} `) || text.includes(symbol)))
+        || (name && (text === name || text.includes(name)));
+      if (!hit) continue;
+      matches.push({ node, text });
+    }
+    matches.sort((left, right) => left.text.length - right.text.length);
+    if (!matches.length) return false;
+    matches[0].node.click();
+    return true;
+  }, { name: instrument.symbolName || "", symbol: instrument.symbol || "" }).catch(() => false);
+  if (!clicked) {
+    await session.page.keyboard.press("Escape").catch(() => {});
+    return false;
+  }
+  const expected = instrument.symbolName || instrument.symbol;
+  if (expected) {
+    await session.page.waitForFunction((value) => (document.body?.innerText || "").includes(value), expected, { timeout: 4000 }).catch(() => {});
+  }
+  await session.page.waitForTimeout(280);
+  return true;
+}
+
+export async function collectAllPageBoards(sessionId, instruments = []) {
+  const session = sessions.get(String(sessionId || "default"));
+  if (!session) return [];
+  const targets = uniquePageInstruments(instruments);
+  if (!targets.length) return [];
+  const original = extractHaohanPageInstrument({
+    visibleText: await session.page.evaluate(() => document.body?.innerText || "").catch(() => ""),
+    title: await session.page.title().catch(() => ""),
+  });
+  const snapshots = [];
+  for (const instrument of targets) {
+    const selected = await selectPageBoardInstrument(sessionId, instrument);
+    const snapshot = await readVisiblePage(sessionId);
+    snapshots.push({ instrument, selected, snapshot });
+  }
+  if (original.symbol || original.symbolName) await selectPageBoardInstrument(sessionId, original);
+  return snapshots;
 }
 
 export async function getBrowserPage(sessionId = "default") {

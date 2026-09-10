@@ -73,6 +73,104 @@ function validCandle(candle) {
     && Number.isFinite(candle.volume) && candle.volume >= 0;
 }
 
+function uniqueCandles(candles = []) {
+  const byTimestamp = new Map();
+  for (const candle of Array.isArray(candles) ? candles : []) {
+    if (!candle?.timestamp) continue;
+    byTimestamp.set(candle.timestamp, candle);
+  }
+  return [...byTimestamp.values()].sort((left, right) => left.timestamp - right.timestamp);
+}
+
+function hqChartTimestamp(date, time, fallback) {
+  const direct = finiteNumber(fallback);
+  if (direct !== null && direct > 946684800000 && direct < 4102444800000) return direct;
+  if (direct !== null && direct > 946684800 && direct < 4102444800) return direct * 1000;
+  const raw = String(Math.trunc(Math.abs(Number(date) || 0)));
+  if (raw.length < 8) return NaN;
+  const year = Number(raw.slice(0, 4));
+  const month = Number(raw.slice(4, 6));
+  const day = Number(raw.slice(6, 8));
+  if (![year, month, day].every((value) => Number.isFinite(value)) || month < 1 || month > 12 || day < 1 || day > 31) return NaN;
+  const t = Math.trunc(Math.abs(Number(time) || 0));
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  if (t >= 100000) {
+    hour = Math.floor(t / 10000);
+    minute = Math.floor((t % 10000) / 100);
+    second = t % 100;
+  } else if (t >= 100) {
+    hour = Math.floor(t / 100);
+    minute = t % 100;
+  } else if (t > 0 && t < 24) {
+    hour = t;
+  }
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(Math.min(23, hour)).padStart(2, "0")}:${String(Math.min(59, minute)).padStart(2, "0")}:${String(Math.min(59, second)).padStart(2, "0")}+08:00`;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+export function normalizeHqChartCandle(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const close = positiveNumber(row.Close ?? row.close);
+  if (close === null) return null;
+  const open = positiveNumber(row.Open ?? row.open);
+  const high = positiveNumber(row.High ?? row.high);
+  const low = positiveNumber(row.Low ?? row.low);
+  const volume = finiteNumber(row.Vol ?? row.Volume ?? row.volume) ?? 0;
+  const timestamp = hqChartTimestamp(row.Date ?? row.date, row.Time ?? row.time ?? 0, row.timestamp ?? row.DateTime ?? row.datetime);
+  if (!Number.isFinite(timestamp)) return null;
+  const candle = {
+    timestamp,
+    previousClose: positiveNumber(row.YClose ?? row.yclose ?? row.previousClose),
+    open,
+    high,
+    low,
+    close,
+    volume: volume < 0 ? 0 : volume,
+    amount: finiteNumber(row.Amount ?? row.amount),
+    partial: open === null || high === null || low === null,
+  };
+  return validCandle(candle) ? candle : null;
+}
+
+export function normalizePageInstrument(value) {
+  if (!value || typeof value !== "object") return null;
+  const symbol = String(value.symbol || value.symbolCode || value.code || "").trim();
+  const symbolName = String(value.symbolName || value.name || value.label || "").replace(/\s+/g, " ").trim();
+  const instrumentId = String(value.instrumentId || value.symbolId || value.contractId || "").trim();
+  if (!symbol && !symbolName && !instrumentId) return null;
+  if (symbolName === "F10") return symbol || instrumentId ? { symbol, symbolName: "", instrumentId } : null;
+  return { symbol, symbolName: symbolName.slice(0, 120), instrumentId };
+}
+
+export function uniquePageInstruments(values = []) {
+  const result = [];
+  const seen = new Set();
+  for (const item of Array.isArray(values) ? values : []) {
+    const instrument = normalizePageInstrument(item);
+    if (!instrument) continue;
+    const key = [instrument.symbol, instrument.symbolName, instrument.instrumentId]
+      .map((part) => normalize(part))
+      .filter(Boolean)
+      .join("|");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(instrument);
+  }
+  return result;
+}
+
+export function samePageInstrument(left, right) {
+  const a = normalizePageInstrument(left);
+  const b = normalizePageInstrument(right);
+  if (!a || !b) return false;
+  const keys = (value) => [value.symbol, value.symbolName, value.instrumentId].map((part) => normalize(part)).filter(Boolean);
+  const seen = new Set(keys(a));
+  return keys(b).some((key) => seen.has(key));
+}
+
 function parseCandleText(value, fallbackTimestamp) {
   const text = String(value?.text || value || "").replace(/\s+/g, " ").trim();
   if (!text) return null;
@@ -360,9 +458,11 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   const closed = /(?:^|\s)闭市(?:\s|$)/.test(visibleText);
   const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];
   const chartSamples = Array.isArray(snapshot.chartSamples) ? snapshot.chartSamples : [];
-  const candles = [...parseTableCandles(tables, capturedAt), ...chartSamples.map((sample, index) => parseCandleText(sample, capturedAt - (chartSamples.length - index) * 60 * 1000)).filter(Boolean)]
-    .sort((left, right) => left.timestamp - right.timestamp)
-    .filter((candle, index, list) => index === list.findIndex((item) => item.timestamp === candle.timestamp));
+  const pageChart = uniqueCandles((Array.isArray(snapshot.klines) ? snapshot.klines : []).map(normalizeHqChartCandle).filter(Boolean));
+  const hoverCandles = pageChart.length >= 20
+    ? []
+    : chartSamples.map((sample, index) => parseCandleText(sample, capturedAt - (chartSamples.length - index) * 60 * 1000)).filter(Boolean);
+  const candles = uniqueCandles([...parseTableCandles(tables, capturedAt), ...hoverCandles, ...pageChart]);
   const ticks = parseTicks(tables);
   const indicators = calculateIndicators(candles);
   const missingFields = [];
@@ -386,7 +486,14 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
     inventory: round(inventory, 4),
     positionChange: round(positionChange, 4),
   };
-  const contentFingerprint = crypto.createHash("sha256").update(JSON.stringify({ visibleText, tables, chartSamples })).digest("hex").slice(0, 24);
+  const contentFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+    visibleText,
+    tables,
+    chartSamples,
+    klineCount: pageChart.length,
+    firstKline: pageChart[0]?.timestamp || null,
+    lastKline: pageChart.at(-1)?.timestamp || null,
+  })).digest("hex").slice(0, 24);
   const evidenceMaterial = JSON.stringify({ pageUrl, symbol: resolvedSymbol, timeframe, latest, historyCount: candles.length, observedAt, missingFields, contentFingerprint });
   const evidenceId = `market:${crypto.createHash("sha256").update(evidenceMaterial).digest("hex").slice(0, 18)}`;
   return {
@@ -398,6 +505,7 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
     executionEnabled: false,
     page: { url: pageUrl, title, instrument },
     instrument,
+    instruments: uniquePageInstruments([instrument, ...(Array.isArray(snapshot.instruments) ? snapshot.instruments : [])]),
     symbol: resolvedSymbol,
     symbolName: resolvedSymbolName,
     timeframe,

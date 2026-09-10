@@ -798,6 +798,8 @@ function toTaskMarket(market) {
     pageView: market.pageView || market.page?.view || null,
     raw: market.raw || null,
     account: market.account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
+    books: Array.isArray(market.books) ? market.books : [],
+    bookCount: Number(market.bookCount || market.books?.length || 0),
   };
 }
 
@@ -1074,8 +1076,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       taskId,
       runId: run.id,
       stage: "collect",
-      message: `已采集 ${task.symbol} 最新价 ${task.market.latest.price}，趋势 ${market.trend}，来源 ${market.source}`,
-      data: { source: market.source, freshnessSec: market.freshnessSec, historyCount: task.market.historyCount, missingFields: market.missingFields || [] },
+      message: `已采集 ${market.bookCount || 1} 个盘 · ${task.symbol} 最新价 ${task.market.latest.price}，趋势 ${market.trend}，来源 ${market.source}`,
+      data: { source: market.source, freshnessSec: market.freshnessSec, historyCount: task.market.historyCount, bookCount: market.bookCount || 1, books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, historyCount: book.historyCount })), missingFields: market.missingFields || [] },
     });
     const marketUnchanged = Boolean(skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task));
     if (marketUnchanged) {
@@ -1110,7 +1112,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
       data: analysisMarket.analysisLayers,
     });
-    const knowledge = searchKnowledge(`${market.symbol || task.symbol} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: userId }, 4);
+    const knowledge = searchKnowledge(`${[market.symbol || task.symbol, ...(market.books || []).map((book) => book.symbol || book.symbolName)].filter(Boolean).join(" ")} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: userId }, 4);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,

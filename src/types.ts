@@ -208,6 +208,8 @@ export interface MarketSnapshot {
     positionEmpty?: boolean;
   };
   pageView?: Record<string, unknown> | null;
+  books?: MarketSnapshot[];
+  bookCount?: number;
 }
 
 export interface Task {

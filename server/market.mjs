@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import { openBrowserPage, readVisiblePage } from "./browser.mjs";
-import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, parseHaohanPageSnapshot } from "./haohan.mjs";
+import { collectAllPageBoards, listPageBoardInstruments, openBrowserPage, readVisiblePage } from "./browser.mjs";
+import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, normalizePageInstrument, parseHaohanPageSnapshot, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const DEFAULT_WS_URL = "wss://smyt.haohandahan.cn/wsfront_tq";
 const DEFAULT_MARKET_ID = 28;
@@ -503,6 +503,232 @@ function timeframeFingerprint(snapshot) {
   };
 }
 
+function bookFingerprint(book) {
+  const history = Array.isArray(book?.history) ? book.history : [];
+  const last = history.at(-1) || null;
+  return {
+    symbol: book?.symbol,
+    symbolName: book?.symbolName,
+    instrumentId: book?.instrumentId,
+    quote: book?.quote || book?.latest,
+    changePct: book?.changePct,
+    trend: book?.trend,
+    dataQuality: book?.dataQuality || "",
+    historyCount: book?.historyCount || history.length,
+    lastTimestamp: last?.timestamp || null,
+    lastClose: last?.close || null,
+  };
+}
+
+function serializeBoardBook(market) {
+  if (!market || typeof market !== "object") return null;
+  return {
+    ok: market.ok !== false,
+    source: market.source,
+    symbol: market.symbol,
+    symbolName: market.symbolName,
+    instrumentId: market.instrumentId || null,
+    timeframe: market.timeframe,
+    quote: market.quote || market.latest || null,
+    latest: market.quote || market.latest || null,
+    changePct: market.changePct ?? null,
+    indicators: market.indicators || null,
+    trend: market.trend || "unknown",
+    anomaly: Boolean(market.anomaly),
+    history: Array.isArray(market.history) ? market.history : [],
+    historyCount: market.historyCount || market.history?.length || 0,
+    completeHistoryCount: market.completeHistoryCount || 0,
+    timeframes: market.timeframes && typeof market.timeframes === "object" ? market.timeframes : {},
+    availableTimeframes: Array.isArray(market.availableTimeframes) ? market.availableTimeframes : [],
+    ticks: Array.isArray(market.ticks) ? market.ticks : [],
+    missingFields: Array.isArray(market.missingFields) ? market.missingFields : [],
+    dataQuality: market.dataQuality || "",
+    observedAt: market.observedAt || null,
+    dataAt: market.dataAt || null,
+    pageView: market.pageView || null,
+  };
+}
+
+function analysisTimeframes(primaryTimeframe) {
+  const requested = haohanTimeframeList(
+    process.env.HAOHAN_ANALYSIS_TIMEFRAMES
+      ? process.env.HAOHAN_ANALYSIS_TIMEFRAMES.split(",")
+      : DEFAULT_ANALYSIS_TIMEFRAMES,
+  );
+  const primary = normalizeHaohanTimeframe(primaryTimeframe || "15m");
+  if (primary !== "fs" && !requested.includes(primary)) requested.push(primary);
+  return { primary, requested };
+}
+
+function snapshotsFromKlineResults(requestedTimeframes, klineResults, klineCount) {
+  const klineSnapshots = {};
+  requestedTimeframes.forEach((requestedTimeframe, index) => {
+    const settled = klineResults[index];
+    const result = settled?.status === "fulfilled" ? settled.value : { ok: false, code: settled?.reason?.message || "HAOHAN_KLINE_UNAVAILABLE", message: "只读历史 K 线暂时不可用", timeframe: requestedTimeframe, period: haohanPeriodForTimeframe(requestedTimeframe) };
+    klineSnapshots[requestedTimeframe] = result.ok
+      ? buildTimeframeSnapshot({
+        timeframe: requestedTimeframe,
+        period: result.period,
+        history: result.history,
+        source: result.source,
+        rawData: result.rawData,
+        endpoint: result.endpoint,
+        responseCount: result.responseCount,
+        requestedCount: result.requestedCount,
+        dataAt: result.lastTimestamp ? new Date(result.lastTimestamp).toISOString() : null,
+        ok: true,
+        code: "KLINE_READ",
+      })
+      : buildTimeframeSnapshot({
+        timeframe: requestedTimeframe,
+        period: result.period,
+        source: "haohan-readonly-kline",
+        requestedCount: Number(klineCount) || DEFAULT_KLINE_COUNT,
+        ok: false,
+        code: result.code,
+        message: result.message,
+      });
+  });
+  return klineSnapshots;
+}
+
+async function fetchInstrumentKlineSnapshots({ instrumentId, requestedTimeframes, klineCount, httpBaseUrl, timeoutMs, fetchImpl }) {
+  if (!instrumentId) return {};
+  const klineResults = await Promise.allSettled(requestedTimeframes.map((requestedTimeframe) => fetchHaohanKlineHistory({
+    contractId: instrumentId,
+    timeframe: requestedTimeframe,
+    count: klineCount,
+    baseUrl: httpBaseUrl,
+    timeoutMs,
+    fetchImpl,
+  })));
+  return snapshotsFromKlineResults(requestedTimeframes, klineResults, klineCount);
+}
+
+function instrumentFromDetail(detail) {
+  return {
+    symbol: String(detail?.symbol || detail?.symbolCode || detail?.code || "").trim(),
+    symbolName: String(detail?.name || detail?.symbolName || detail?.shortName || "").slice(0, 120),
+    instrumentId: String(detail?.symbolId ?? detail?.contractId ?? detail?.code ?? "").trim(),
+    close: positiveNumber(detail?.close),
+    open: positiveNumber(detail?.open),
+    high: positiveNumber(detail?.high),
+    low: positiveNumber(detail?.low),
+    quoteChangePct: parsePercent(detail?.quotechange ?? detail?.quoteChange),
+    volume: number(detail?.amount),
+    settlement: positiveNumber(detail?.clearPrice ?? detail?.settlement),
+    inventory: number(detail?.holdQuantity ?? detail?.inventory),
+    positionChange: number(detail?.warehouseBad ?? detail?.positionChange),
+    amount: number(detail?.amount),
+    raw: detail,
+  };
+}
+
+export function resolveBoardInstruments({ pageInstruments = [], marketDetails = [], pageCurrent = null, configuredSymbol = "" } = {}) {
+  const details = Array.isArray(marketDetails) ? marketDetails : [];
+  const pageList = uniquePageInstruments(pageInstruments);
+  const current = normalizePageInstrument(pageCurrent);
+  const attachDetail = (instrument) => {
+    const detail = details.find((item) => matchesInstrument(item, instrument.symbol)
+      || matchesInstrument(item, instrument.symbolName)
+      || matchesInstrument(item, instrument.instrumentId));
+    const fromDetail = detail ? instrumentFromDetail(detail) : null;
+    return {
+      symbol: instrument.symbol || fromDetail?.symbol || "",
+      symbolName: instrument.symbolName || fromDetail?.symbolName || "",
+      instrumentId: instrument.instrumentId || fromDetail?.instrumentId || "",
+      detail: fromDetail || null,
+    };
+  };
+  const uniqueBoards = (items) => {
+    const result = [];
+    const seen = new Set();
+    for (const item of items) {
+      const key = [item.symbol, item.symbolName, item.instrumentId].map((part) => normalize(part)).filter(Boolean).join("|");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      result.push(item);
+    }
+    return result.filter((item) => item.symbol || item.symbolName || item.instrumentId);
+  };
+  if (pageList.length >= 2) return uniqueBoards(pageList.map(attachDetail));
+  if (details.length) return uniqueBoards(details.map((item) => {
+    const fromDetail = instrumentFromDetail(item);
+    return { symbol: fromDetail.symbol, symbolName: fromDetail.symbolName, instrumentId: fromDetail.instrumentId, detail: fromDetail };
+  }));
+  if (pageList.length) return uniqueBoards(pageList.map(attachDetail));
+  const fallback = attachDetail(current || { symbol: configuredSymbol, symbolName: "", instrumentId: "" });
+  return fallback.symbol || fallback.symbolName || fallback.instrumentId ? [fallback] : [];
+}
+
+export function pickPrimaryBoard(books = [], { configuredSymbol = "", pageSymbol = "" } = {}) {
+  if (!Array.isArray(books) || !books.length) return null;
+  const prefer = [pageSymbol, configuredSymbol].map((value) => normalize(value)).filter(Boolean);
+  return books.find((book) => prefer.includes(normalize(book.symbol)) || prefer.includes(normalize(book.symbolName))) || books[0];
+}
+
+function mergeBookHistories(pageBook, apiBook) {
+  const pageHistory = Array.isArray(pageBook?.history) ? pageBook.history : [];
+  const apiHistory = Array.isArray(apiBook?.history) ? apiBook.history : [];
+  return uniqueCandles([...pageHistory, ...apiHistory]);
+}
+
+function mergeBoardBook({ instrument, apiBook, pageBook, account, pageView, page, timeframe }) {
+  const symbol = instrument.symbol || apiBook?.symbol || pageBook?.symbol || "";
+  const symbolName = instrument.symbolName || apiBook?.symbolName || pageBook?.symbolName || "";
+  const instrumentId = instrument.instrumentId || apiBook?.instrumentId || pageBook?.instrumentId || null;
+  const mergedQuote = Object.fromEntries(Object.entries({ ...(apiBook?.quote || {}), ...(pageBook?.quote || {}) }).map(([key, value]) => [key, pageBook?.quote?.[key] ?? apiBook?.quote?.[key] ?? value]));
+  const history = mergeBookHistories(pageBook, apiBook);
+  const timeframes = { ...(apiBook?.timeframes || {}) };
+  const primary = normalizeHaohanTimeframe(timeframe || pageBook?.timeframe || apiBook?.timeframe || "15m");
+  if (history.length) {
+    timeframes[primary] = {
+      ...(timeframes[primary] || {}),
+      timeframe: primary,
+      history,
+      source: timeframes[primary]?.source || pageBook?.source || apiBook?.source,
+    };
+  }
+  const ticks = (Array.isArray(apiBook?.ticks) && apiBook.ticks.length ? apiBook.ticks : null) || pageBook?.ticks || [];
+  if (apiBook?.ok || (apiBook?.historyCount || apiBook?.history?.length)) {
+    return enrichReadOnlyMarket({
+      ...apiBook,
+      symbol,
+      symbolName,
+      instrumentId,
+      timeframe: primary,
+      history: history.length ? history : apiBook.history,
+      ticks,
+      timeframes,
+      quote: mergedQuote,
+      account,
+      pageView: pageBook?.pageView || pageView,
+      page,
+      source: apiBook.source || "haohan-readonly-api",
+      books: [],
+    });
+  }
+  if (pageBook?.ok) {
+    return enrichReadOnlyMarket({
+      ...pageBook,
+      symbol,
+      symbolName,
+      instrumentId,
+      timeframe: primary,
+      history: history.length ? history : pageBook.history,
+      ticks,
+      timeframes: Object.keys(timeframes).length ? timeframes : pageBook.timeframes,
+      quote: mergedQuote.price ? mergedQuote : pageBook.quote,
+      account,
+      pageView: pageBook.pageView || pageView,
+      page,
+      source: pageBook.source || "browser-dom",
+      books: [],
+    });
+  }
+  return null;
+}
+
 function normalizePageFingerprintText(value) {
   return String(value || "")
     .replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\b/g, "[date]")
@@ -555,6 +781,7 @@ export function marketDataFingerprint(market = {}) {
     dataQuality: market.dataQuality || "",
     missingFields: market.missingFields || [],
     marketClosed: Boolean(market.marketClosed),
+    books: Array.isArray(market.books) ? market.books.map(bookFingerprint) : [],
     page: market.page ? {
       url: market.page.url,
       instrument: market.page.instrument || null,
@@ -601,7 +828,7 @@ function buildTimeframeSnapshot({ timeframe, period = null, history = [], source
   };
 }
 
-export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, timeframe, history = [], ticks = [], quote = {}, observedAt, dataAt = null, source, marketClosed = false, timeframes = {}, raw = null, page = null, account = null, pageView = null }) {
+export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, timeframe, history = [], ticks = [], quote = {}, observedAt, dataAt = null, source, marketClosed = false, timeframes = {}, raw = null, page = null, account = null, pageView = null, books = [] } = {}) {
   const primaryTimeframe = normalizeHaohanTimeframe(timeframe || "15m");
   const timeframeEntries = new Map();
   for (const [key, value] of Object.entries(timeframes || {})) {
@@ -687,12 +914,17 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
     pageView: pageView || page?.view || null,
     historyCount: primary.historyCount,
     completeHistoryCount: primary.completeHistoryCount,
+    books: [],
+    bookCount: 0,
     evidenceId: "",
     fingerprint: "",
     observedAt: resolvedObservedAt,
     dataAt: resolvedDataAt,
     raw: safeReadOnlyPayload(raw),
   };
+  result.books = (Array.isArray(books) ? books : []).map(serializeBoardBook).filter(Boolean);
+  if (!result.books.length) result.books = [serializeBoardBook(result)].filter(Boolean);
+  result.bookCount = result.books.length;
   result.fingerprint = marketDataFingerprint(result);
   result.evidenceId = `market:${result.fingerprint.slice(0, 18)}`;
   return result;
@@ -817,6 +1049,74 @@ export async function fetchHaohanMarket({ symbol, timeframe = "15m", timeoutMs =
   }
 }
 
+export async function fetchHaohanBoardMarkets({ instruments = [], pageCurrent = null, configuredSymbol = "", timeframe = "15m", timeoutMs = 8000, websocketUrl = DEFAULT_WS_URL, marketId = DEFAULT_MARKET_ID, httpBaseUrl = DEFAULT_HTTP_BASE_URL, klineCount = DEFAULT_KLINE_COUNT, fetchImpl = globalThis.fetch } = {}) {
+  let socket;
+  let inbox;
+  let details = [];
+  try {
+    socket = await openSocket(websocketUrl, timeoutMs);
+    inbox = createResponseInbox(socket);
+    send(socket, { fid: "marketdetail-req", symbol: [], marketId });
+    const detailResponse = await inbox.waitFor((payload) => ["marketdetail-resp", "marketdetail-response"].includes(payload?.fid), timeoutMs);
+    if (Number(detailResponse?.code) === 0 && Array.isArray(detailResponse.marketDetails)) details = detailResponse.marketDetails;
+  } catch {
+    details = [];
+  } finally {
+    try { inbox?.close(); } catch {}
+    try { socket?.close(); } catch {}
+  }
+  const { primary, requested } = analysisTimeframes(timeframe);
+  const targets = resolveBoardInstruments({ pageInstruments: instruments, marketDetails: details, pageCurrent, configuredSymbol });
+  const books = [];
+  await Promise.all(targets.map(async (item) => {
+    if (!item.instrumentId) return;
+    const snapshots = await fetchInstrumentKlineSnapshots({
+      instrumentId: item.instrumentId,
+      requestedTimeframes: requested,
+      klineCount,
+      httpBaseUrl,
+      timeoutMs,
+      fetchImpl,
+    });
+    const primarySnapshot = snapshots[primary] || snapshots["15m"];
+    const history = primarySnapshot?.history || [];
+    const close = item.detail?.close || history.at(-1)?.close;
+    if (!close && !history.length) return;
+    books.push(enrichReadOnlyMarket({
+      symbol: item.symbol || item.instrumentId,
+      symbolName: item.symbolName,
+      instrumentId: item.instrumentId,
+      timeframe: primary,
+      history,
+      ticks: [],
+      timeframes: snapshots,
+      quote: {
+        price: close,
+        open: item.detail?.open,
+        high: item.detail?.high,
+        low: item.detail?.low,
+        quoteChangePct: item.detail?.quoteChangePct,
+        volume: item.detail?.volume || history.at(-1)?.volume,
+        settlement: item.detail?.settlement,
+        inventory: item.detail?.inventory,
+        positionChange: item.detail?.positionChange,
+      },
+      observedAt: new Date().toISOString(),
+      source: primarySnapshot?.ok ? "haohan-readonly-api" : "haohan-readonly-kline",
+      marketClosed: Number(item.detail?.amount || 0) === 0,
+      books: [],
+    }));
+  }));
+  return {
+    ok: books.some((book) => book.ok),
+    books,
+    details,
+    targets,
+    code: books.length ? "BOARD_MARKETS_READ" : "HAOHAN_BOARD_UNAVAILABLE",
+    message: books.length ? `已读取 ${books.length} 个盘口只读行情` : "只读行情未返回可监测盘口",
+  };
+}
+
 function connectorTarget(connector, task) {
   return String(task?.target?.url || connector?.target || "");
 }
@@ -864,42 +1164,98 @@ export async function observeMarket(task, connector) {
   const configuredSymbol = String(task.symbol || "").trim();
   const pageInstrument = extractHaohanPageInstrument(pageSnapshot);
   const observedSymbol = resolveObservedHaohanSymbol(pageInstrument, configuredSymbol) || "DGJJ";
-  const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe: task.timeframe || "15m" });
+  const timeframe = task.timeframe || "15m";
+  const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe });
   if (parsed.code === "REAUTH_REQUIRED") return parsed;
-  const apiResult = await fetchHaohanMarket({ symbol: observedSymbol, timeframe: task.timeframe || "15m" });
+  const pageInstruments = uniquePageInstruments([
+    ...(Array.isArray(pageSnapshot.instruments) ? pageSnapshot.instruments : []),
+    pageInstrument,
+    ...(await listPageBoardInstruments(sessionId)),
+  ]);
+  const apiBoard = await fetchHaohanBoardMarkets({
+    instruments: pageInstruments,
+    pageCurrent: pageInstrument,
+    configuredSymbol,
+    timeframe,
+  });
+  const cycleTargets = resolveBoardInstruments({
+    pageInstruments,
+    marketDetails: apiBoard.details,
+    pageCurrent: pageInstrument,
+    configuredSymbol,
+  });
+  const pageBooks = [];
+  const recordPageSnapshot = (snapshot, intended) => {
+    if (!snapshot?.ok) return null;
+    const actual = extractHaohanPageInstrument(snapshot);
+    let parsedPage = parseHaohanPageSnapshot(snapshot, { symbol: intended?.symbol || actual.symbol || observedSymbol, timeframe });
+    if (parsedPage.code === "REAUTH_REQUIRED") return parsedPage;
+    if (parsedPage.code === "PAGE_INSTRUMENT_MISMATCH" && actual.symbol) {
+      parsedPage = parseHaohanPageSnapshot(snapshot, { symbol: actual.symbol, timeframe });
+    }
+    if (!parsedPage.ok) return null;
+    if (intended && !samePageInstrument(parsedPage, intended) && !samePageInstrument(actual, intended) && !samePageInstrument(parsedPage.instrument, intended)) return null;
+    pageBooks.push(parsedPage);
+    return parsedPage;
+  };
+  recordPageSnapshot(pageSnapshot, pageInstrument);
+  if (cycleTargets.length > 1) {
+    const collected = await collectAllPageBoards(sessionId, cycleTargets);
+    for (const item of collected) {
+      const recorded = recordPageSnapshot(item.snapshot, item.instrument);
+      if (recorded?.code === "REAUTH_REQUIRED") return recorded;
+    }
+  }
   const page = {
     url: pageSnapshot.url,
     title: pageSnapshot.title,
     visibleText: pageSnapshot.visibleText,
     tables: pageSnapshot.tables,
     chartSamples: pageSnapshot.chartSamples,
+    klines: pageSnapshot.klines,
+    instruments: cycleTargets,
     instrument: pageInstrument.symbol ? pageInstrument : (pageSnapshot.instrument || parsed.instrument || null),
     view: parsed.pageView || null,
     capturedAt: pageSnapshot.capturedAt,
     contentFingerprint: parsed.contentFingerprint || "",
   };
-  if (apiResult.ok) {
-    const pageSymbol = page.instrument?.symbol || parsed.instrument?.symbol || observedSymbol;
-    const symbolMismatch = Boolean(configuredSymbol && pageSymbol && normalize(configuredSymbol) !== normalize(pageSymbol));
-    const mergedQuote = Object.fromEntries(Object.entries(apiResult.quote || {}).map(([key, value]) => [key, value ?? parsed.quote?.[key]]));
-    const enriched = enrichReadOnlyMarket({
-      ...apiResult,
+  const findPageBook = (instrument) => pageBooks.find((book) => samePageInstrument(book, instrument) || samePageInstrument(book.instrument, instrument));
+  const findApiBook = (instrument) => (apiBoard.books || []).find((book) => samePageInstrument(book, instrument) || normalize(book.instrumentId) === normalize(instrument.instrumentId));
+  const mergeTargets = cycleTargets.length ? cycleTargets : uniquePageInstruments([pageInstrument, { symbol: observedSymbol }]);
+  const mergedBooks = [];
+  for (const instrument of mergeTargets) {
+    const merged = mergeBoardBook({
+      instrument,
+      apiBook: findApiBook(instrument),
+      pageBook: findPageBook(instrument) || (samePageInstrument(instrument, pageInstrument) ? parsed : null),
+      account: parsed.account,
+      pageView: parsed.pageView,
       page,
-      pageView: parsed.pageView || null,
-      quote: mergedQuote,
-      account: Object.fromEntries(Object.entries({ ...(parsed.account || {}), ...(apiResult.account || {}) }).map(([key, value]) => [key, value ?? parsed.account?.[key]])),
-      raw: { ...apiResult.raw, page },
+      timeframe,
     });
-    if (symbolMismatch) {
-      enriched.missingFields = [...new Set([...(enriched.missingFields || []), "SYMBOL_PAGE_MISMATCH"])];
-      enriched.dataQuality = "LIMITED";
-    }
-    return enriched;
+    if (merged) mergedBooks.push(merged);
   }
-  if (parsed.ok) {
-    return enrichReadOnlyMarket({ ...parsed, page, raw: { page } });
+  if (!mergedBooks.length && parsed.ok) {
+    mergedBooks.push(enrichReadOnlyMarket({ ...parsed, page, raw: { page }, books: [] }));
   }
-  return { ok: false, code: apiResult.code || parsed.code || "MARKET_UNAVAILABLE", message: apiResult.message || parsed.message || "无法读取目标只读行情" };
+  const primary = pickPrimaryBoard(mergedBooks, { configuredSymbol, pageSymbol: pageInstrument.symbol || parsed.symbol }) || mergedBooks[0];
+  if (!primary) {
+    return { ok: false, code: apiBoard.code || parsed.code || "MARKET_UNAVAILABLE", message: apiBoard.message || parsed.message || "无法读取目标只读行情" };
+  }
+  const symbolMismatch = Boolean(configuredSymbol && primary.symbol && normalize(configuredSymbol) !== normalize(primary.symbol));
+  const enriched = enrichReadOnlyMarket({
+    ...primary,
+    page,
+    pageView: parsed.pageView || null,
+    account: parsed.account,
+    books: mergedBooks,
+    raw: { ...(primary.raw || {}), page, bookCount: mergedBooks.length, boards: apiBoard.targets },
+  });
+  if (symbolMismatch) {
+    enriched.missingFields = [...new Set([...(enriched.missingFields || []), "SYMBOL_PAGE_MISMATCH"])];
+    enriched.dataQuality = "LIMITED";
+  }
+  return enriched;
 }
 
 export const haohanMarketConfig = Object.freeze({
