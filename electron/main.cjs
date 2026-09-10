@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const http = require("node:http");
+const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
@@ -9,7 +10,11 @@ let apiProcess;
 let mainWindow;
 let updateCheckTimer;
 let updateCheckPromise;
-const apiPort = Number(process.env.AXIOM_API_PORT || 8787);
+let apiPort = Number(process.env.AXIOM_API_PORT || 8787);
+if (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535) apiPort = 8787;
+let apiBaseUrl = "";
+const embeddedApiEnabled = process.env.AXIOM_EMBEDDED_API === "1";
+let resizeSession;
 const updateState = {
   status: "disabled",
   currentVersion: "dev",
@@ -94,6 +99,115 @@ ipcMain.handle("update:install", () => {
   return currentUpdateState();
 });
 
+ipcMain.handle("window:minimize", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+});
+ipcMain.handle("window:maximize", () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+  return mainWindow.isMaximized();
+});
+ipcMain.handle("window:close", () => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+});
+ipcMain.handle("window:is-maximized", () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()));
+
+function normalizeApiBaseUrl(value) {
+  const input = String(value || "").trim();
+  if (!input) throw new Error("API_URL_REQUIRED");
+  let parsed;
+  try { parsed = new URL(input); } catch { throw new Error("API_URL_INVALID"); }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("API_URL_INVALID");
+  parsed.hash = "";
+  parsed.search = "";
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function connectionConfigPath() {
+  return path.join(app.getPath("userData"), "connection.json");
+}
+
+function readSavedApiBaseUrl() {
+  try {
+    const config = JSON.parse(fs.readFileSync(connectionConfigPath(), "utf8"));
+    return normalizeApiBaseUrl(config.apiBaseUrl);
+  } catch {
+    return "";
+  }
+}
+
+function initialApiBaseUrl() {
+  const configured = readSavedApiBaseUrl() || process.env.AXIOM_API_URL || `http://127.0.0.1:${apiPort}`;
+  return normalizeApiBaseUrl(configured);
+}
+
+function saveApiBaseUrl(value) {
+  const normalized = normalizeApiBaseUrl(value);
+  const target = connectionConfigPath();
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temporary = `${target}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify({ apiBaseUrl: normalized }, null, 2)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, target);
+  apiBaseUrl = normalized;
+  return apiBaseUrl;
+}
+
+ipcMain.on("api:get-base-url", (event) => { event.returnValue = apiBaseUrl || initialApiBaseUrl(); });
+ipcMain.handle("api:get-base-url", () => apiBaseUrl || initialApiBaseUrl());
+ipcMain.handle("api:set-base-url", (_event, value) => saveApiBaseUrl(value));
+
+function probePort(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once("error", () => resolve(null));
+    probe.listen({ host: "127.0.0.1", port }, () => {
+      const address = probe.address();
+      const selected = typeof address === "object" && address ? address.port : null;
+      probe.close(() => resolve(selected));
+    });
+  });
+}
+
+async function chooseApiPort() {
+  if (apiPort === 0) return probePort(0);
+  for (let offset = 0; offset < 32; offset += 1) {
+    const selected = await probePort(apiPort + offset);
+    if (selected) return selected;
+  }
+  return probePort(0);
+}
+
+function resizeWindowFromCursor() {
+  if (!mainWindow || mainWindow.isDestroyed() || !resizeSession || mainWindow.isMaximized()) return;
+  const cursor = screen.getCursorScreenPoint();
+  const deltaX = cursor.x - resizeSession.startCursor.x;
+  const deltaY = cursor.y - resizeSession.startCursor.y;
+  const { bounds, edge } = resizeSession;
+  let width = bounds.width;
+  let height = bounds.height;
+  let x = bounds.x;
+  let y = bounds.y;
+  if (edge.includes("e")) width = Math.max(1024, bounds.width + deltaX);
+  if (edge.includes("s")) height = Math.max(700, bounds.height + deltaY);
+  if (edge.includes("w")) {
+    width = Math.max(1024, bounds.width - deltaX);
+    x = bounds.x + bounds.width - width;
+  }
+  if (edge.includes("n")) {
+    height = Math.max(700, bounds.height - deltaY);
+    y = bounds.y + bounds.height - height;
+  }
+  mainWindow.setBounds({ x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }, false);
+}
+
+ipcMain.on("window:resize-start", (_event, edge) => {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMaximized() || !/^(n|s|e|w|ne|nw|se|sw)$/.test(String(edge || ""))) return;
+  resizeSession = { edge: String(edge), bounds: mainWindow.getBounds(), startCursor: screen.getCursorScreenPoint() };
+});
+ipcMain.on("window:resize-move", () => resizeWindowFromCursor());
+ipcMain.on("window:resize-end", () => { resizeSession = undefined; });
+
 function serverEntryPath() {
   const unpacked = path.join(process.resourcesPath, "app.asar.unpacked", "server", "index.mjs");
   if (app.isPackaged && fs.existsSync(unpacked)) return unpacked;
@@ -147,7 +261,12 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: "#0b0d10",
-    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+    frame: false,
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
+    trafficLightPosition: { x: 16, y: 18 },
+    resizable: true,
+    maximizable: true,
+    fullscreenable: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -166,8 +285,14 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  startApi();
-  try { await waitForApi(); } catch (error) { console.error(error); }
+  apiBaseUrl = initialApiBaseUrl();
+  if (embeddedApiEnabled) {
+    apiPort = await chooseApiPort();
+    if (!apiPort) throw new Error("API_PORT_UNAVAILABLE");
+    apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+    startApi();
+    try { await waitForApi(); } catch (error) { console.error(error); }
+  }
   createWindow();
   configureAutoUpdater();
   app.on("activate", () => {

@@ -10,6 +10,20 @@ let ready = false;
 let writeQueue = Promise.resolve();
 let persistence = null;
 
+function ownerIdOf(record) {
+  return String(record?.ownerUserId || record?.target?.ownerUserId || "");
+}
+
+function ownerAllowed(record, options = {}) {
+  const normalized = typeof options === "string" ? { ownerUserId: options } : options || {};
+  const ownerUserId = String(normalized.ownerUserId || "");
+  const ownerUserIds = Array.isArray(normalized.ownerUserIds) ? normalized.ownerUserIds.map((value) => String(value)) : [];
+  if (!ownerUserId && !ownerUserIds.length) return true;
+  const allowed = new Set([ownerUserId, ...ownerUserIds].filter(Boolean));
+  const recordOwner = ownerIdOf(record);
+  return Boolean(recordOwner && allowed.has(recordOwner));
+}
+
 export function setVaultPersistence(adapter) {
   persistence = adapter;
 }
@@ -53,7 +67,7 @@ async function ensureReady() {
   if (!ready) await initVault();
 }
 
-export async function storeCredential({ username, password, target = {}, label = "" }) {
+export async function storeCredential({ username, password, target = {}, label = "", ownerUserId = "" }) {
   await ensureReady();
   const normalizedUsername = String(username || "").trim();
   const normalizedPassword = String(password || "");
@@ -61,6 +75,7 @@ export async function storeCredential({ username, password, target = {}, label =
   const id = `cred_${crypto.randomUUID()}`;
   const record = {
     id,
+    ownerUserId: String(ownerUserId || ""),
     username: encryptSecret(normalizedUsername),
     password: encryptSecret(normalizedPassword),
     target: {
@@ -79,17 +94,17 @@ export async function storeCredential({ username, password, target = {}, label =
   return publicCredential(record);
 }
 
-export function getCredential(credentialRef) {
+export function getCredential(credentialRef, options = {}) {
   const record = records.get(String(credentialRef || ""));
-  if (!record) return null;
+  if (!record || !ownerAllowed(record, options)) return null;
   const username = decryptSecret(record.username);
   const password = decryptSecret(record.password);
   if (!username || !password) return null;
   return { credentialRef: record.id, username, password, target: record.target, label: record.label };
 }
 
-export function credentialExists(credentialRef) {
-  return Boolean(getCredential(credentialRef));
+export function credentialExists(credentialRef, options = {}) {
+  return Boolean(getCredential(credentialRef, options));
 }
 
 export function publicCredential(record) {
@@ -97,19 +112,21 @@ export function publicCredential(record) {
   return {
     credentialRef: record.id,
     accountLabel: maskSecret(username),
+    ownerUserId: ownerIdOf(record),
     target: record.target,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
 }
 
-export function listCredentials() {
-  return [...records.values()].map(publicCredential);
+export function listCredentials(options = {}) {
+  return [...records.values()].filter((record) => ownerAllowed(record, options)).map(publicCredential);
 }
 
-export async function removeCredential(credentialRef) {
+export async function removeCredential(credentialRef, options = {}) {
   await ensureReady();
-  const deleted = records.delete(String(credentialRef || ""));
+  const record = records.get(String(credentialRef || ""));
+  const deleted = Boolean(record && ownerAllowed(record, options) && records.delete(String(credentialRef || "")));
   if (deleted) await persist();
   return deleted;
 }

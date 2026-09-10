@@ -4,9 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
+import { getBrowserPage, openBrowserPage, readVisiblePage } from "./browser.mjs";
 import { getCredential, initVault } from "./vault.mjs";
-
-const browserSessions = new Map();
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -16,50 +15,162 @@ function valuesFromEnv(name, fallback) {
 function isAllowedDomain(value) {
   let hostname;
   try { hostname = new URL(value).hostname; } catch { return false; }
-  const domains = valuesFromEnv("BROWSER_ALLOWED_DOMAINS", ["localhost", "127.0.0.1"]);
+  const domains = valuesFromEnv("BROWSER_ALLOWED_DOMAINS", ["localhost", "127.0.0.1", "smyw.haohandahan.cn"]);
   return [...domains].some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
+}
+
+function isLoginUrl(value) {
+  return /#\/login(?:[/?#]|$)/i.test(String(value || ""));
+}
+
+function hostnameOf(value) {
+  try { return new URL(String(value || "")).hostname; } catch { return ""; }
+}
+
+async function pageHasSessionAuth(page, adapter) {
+  const keys = Array.isArray(adapter?.login?.sessionStorageKeys) ? adapter.login.sessionStorageKeys.map(String).filter(Boolean) : [];
+  if (!keys.length || typeof page.evaluate !== "function") return false;
+  try {
+    return await page.evaluate((requiredKeys) => requiredKeys.every((key) => String(sessionStorage.getItem(key) || "").trim()), keys);
+  } catch {
+    return false;
+  }
+}
+
+async function pageHasLoginSuccess(page, adapter) {
+  if (!page || !adapter?.login) return false;
+  const currentUrl = page.url();
+  if (isLoginUrl(currentUrl)) return false;
+  if (adapter.login.successUrlPattern && new RegExp(adapter.login.successUrlPattern, "i").test(currentUrl)) return true;
+  if (adapter.login.successSelector) {
+    try {
+      if (await page.locator(adapter.login.successSelector).first().isVisible({ timeout: 800 })) return true;
+    } catch {}
+  }
+  if (adapter.login.successTextPattern) {
+    try {
+      const text = await page.locator("body").innerText({ timeout: 800 });
+      if (new RegExp(adapter.login.successTextPattern, "i").test(text)) return true;
+    } catch {}
+  }
+  return pageHasSessionAuth(page, adapter);
+}
+
+async function prepareLoginForm(page, adapter) {
+  const selector = String(adapter?.login?.consentSelector || "").trim();
+  if (!selector) return;
+  const consent = page.locator(selector).first();
+  if (await consent.count() < 1) return;
+  let checked = false;
+  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
+  if (checked) return;
+  try {
+    await consent.evaluate((element) => element.click());
+  } catch {}
+  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
+  if (checked) return;
+  const visibleControl = consent.locator("xpath=ancestor::*[self::label or @role='checkbox'][1]").locator(".el-checkbox__inner, [role='checkbox']").first();
+  try {
+    if (await visibleControl.count() > 0) await visibleControl.click({ timeout: 1500 });
+  } catch {}
+  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
+  if (!checked) throw new Error("LOGIN_CONSENT_REQUIRED");
+}
+
+async function loginErrorText(page, adapter) {
+  const selectors = Array.isArray(adapter?.login?.errorSelectors) && adapter.login.errorSelectors.length
+    ? adapter.login.errorSelectors
+    : [".el-form-item__error", ".el-message", ".el-notification", '[role="alert"]'];
+  const messages = [];
+  for (const selector of selectors) {
+    try {
+      const values = await page.locator(selector).allTextContents();
+      for (const value of values) {
+        const normalized = String(value || "").replace(/\s+/g, " ").trim();
+        if (normalized && !messages.includes(normalized)) messages.push(normalized);
+      }
+    } catch {}
+  }
+  return messages.join("；").slice(0, 240);
+}
+
+function targetUrlForCredential(credential, requestedUrl = "") {
+  const value = String(requestedUrl || credential?.target?.url || "").trim();
+  if (!value || isLoginUrl(value)) return "";
+  try {
+    const parsed = new URL(value);
+    if (!isAllowedDomain(parsed.toString())) return "";
+    return parsed.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function navigateAfterLogin(page, adapter, credential, requestedUrl = "") {
+  const targetUrl = targetUrlForCredential(credential, requestedUrl);
+  if (!targetUrl || hostnameOf(targetUrl) !== hostnameOf(page.url())) return { targetUrl: "", targetReached: false };
+  await page.waitForTimeout(1200);
+  try { await page.waitForLoadState("domcontentloaded", { timeout: 3000 }); } catch {}
+  try {
+    if (safeUrl(page.url()) !== safeUrl(targetUrl)) {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await page.waitForTimeout(1500);
+    }
+  } catch {}
+  const entry = adapter?.login?.postLoginEntry;
+  const reachedPattern = entry?.urlPattern && new RegExp(entry.urlPattern, "i").test(page.url());
+  if (!reachedPattern && entry?.selector && entry?.text) {
+    const menu = page.locator(entry.selector).filter({ hasText: entry.text }).first();
+    try {
+      if (await menu.count() > 0) {
+        await menu.click({ force: true, timeout: 2500 });
+        await page.waitForTimeout(1200);
+      }
+    } catch {}
+  }
+  return { targetUrl, targetReached: Boolean(entry?.urlPattern ? new RegExp(entry.urlPattern, "i").test(page.url()) : safeUrl(page.url()) === safeUrl(targetUrl)) };
+}
+
+export async function browserLoginStatus({ sessionId = "default", adapterId = "" } = {}) {
+  const page = await getBrowserPage(sessionId);
+  const adapter = getConnectorAdapter(adapterId);
+  if (!page || !adapter) return { ok: false, authenticated: false, code: "BROWSER_SESSION_NOT_FOUND" };
+  let matchesTarget = false;
+  try { matchesTarget = Boolean(adapter.match({ type: adapter.type, url: page.url() })); } catch {}
+  if (!matchesTarget) return { ok: false, authenticated: false, code: "LOGIN_TARGET_MISMATCH", url: page.url() };
+  return { ok: true, authenticated: await pageHasLoginSuccess(page, adapter), url: page.url() };
 }
 
 export async function browserNavigate({ url, sessionId = "default" }) {
   if (!isAllowedDomain(url)) return { ok: false, code: "DOMAIN_NOT_ALLOWED", message: "目标域名不在浏览器白名单中" };
-  try {
-    const { chromium } = await import("playwright");
-    let session = browserSessions.get(sessionId);
-    if (!session) {
-      const browser = await chromium.launch({ headless: true });
-      const context = await browser.newContext();
-      session = { browser, page: await context.newPage() };
-      browserSessions.set(sessionId, session);
-    }
-    await session.page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-    return { ok: true, sessionId, url: session.page.url(), title: await session.page.title() };
-  } catch (error) {
-    return { ok: false, code: "BROWSER_RUNTIME_UNAVAILABLE", message: error.message, hint: "安装 Playwright 浏览器运行时后重试" };
-  }
+  return openBrowserPage({ url, sessionId });
 }
 
 export async function browserExtract({ sessionId = "default", selector = "body" }) {
-  const session = browserSessions.get(sessionId);
-  if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
+  const snapshot = await readVisiblePage(sessionId);
+  if (!snapshot.ok) return snapshot;
   try {
-    const text = await session.page.locator(selector).innerText({ timeout: 10000 });
-    return { ok: true, sessionId, selector, text: text.slice(0, 12000), capturedAt: new Date().toISOString() };
+    if (selector === "body") return { ...snapshot, selector, text: snapshot.visibleText.slice(0, 12000), capturedAt: new Date(snapshot.capturedAt).toISOString() };
+    const page = await getBrowserPage(sessionId);
+    if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
+    const text = await page.locator(selector).innerText({ timeout: 10000 });
+    return { ok: true, sessionId, selector, text: String(text).slice(0, 12000), capturedAt: new Date().toISOString() };
   } catch (error) {
     return { ok: false, code: "EXTRACT_FAILED", message: error.message };
   }
 }
 
-export async function browserLogin({ sessionId = "default", credentialRef, adapterId }) {
+export async function browserLogin({ sessionId = "default", credentialRef, adapterId, targetUrl = "", ownerUserId = "", ownerUserIds = [], automationAuthorized = true, submit = true }) {
   if (!credentialRef) return { ok: false, code: "CREDENTIAL_REF_REQUIRED", message: "登录必须引用托管凭据，不能传入明文密码" };
   await initVault();
-  const session = browserSessions.get(sessionId);
-  if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
-  const credential = getCredential(credentialRef);
-  if (!credential && credentialRef !== "credential:demo") return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND", message: "托管凭据不存在或无法解密" };
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
+  const credential = getCredential(credentialRef, { ownerUserId, ownerUserIds });
+  if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND", message: "托管凭据不存在或无法解密" };
   const resolvedAdapterId = adapterId || credential?.target?.adapterId;
   const adapter = getConnectorAdapter(resolvedAdapterId);
   if (!adapterCanLogin(resolvedAdapterId) || adapter.reviewStatus !== "APPROVED") return { ok: false, code: "LOGIN_FLOW_REQUIRES_TARGET_ADAPTER", message: "目标站点登录字段需要已审核的连接器适配器", adapterId: resolvedAdapterId || "" };
-  const currentUrl = session.page.url();
+  const currentUrl = page.url();
   let adapterMatchesCurrentPage = false;
   try { adapterMatchesCurrentPage = Boolean(adapter.match({ type: "website", url: currentUrl })); } catch {}
   if (!adapterMatchesCurrentPage) return { ok: false, code: "LOGIN_TARGET_MISMATCH", message: "当前浏览器页面与连接器适配器目标不一致", adapterId: adapter.id, url: currentUrl };
@@ -69,13 +180,24 @@ export async function browserLogin({ sessionId = "default", credentialRef, adapt
     } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
   }
   try {
-    const username = credential?.username || "demo";
-    const password = credential?.password || "demo";
-    await session.page.locator(adapter.login.usernameSelector).fill(username);
-    await session.page.locator(adapter.login.passwordSelector).fill(password);
-    await session.page.locator(adapter.login.submitSelector).click();
-    if (adapter.login.successSelector) await session.page.locator(adapter.login.successSelector).waitFor({ state: "visible", timeout: 10000 });
-    return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: session.page.url() };
+    await page.locator(adapter.login.usernameSelector).first().fill(credential.username);
+    await page.locator(adapter.login.passwordSelector).first().fill(credential.password);
+    await prepareLoginForm(page, adapter);
+    if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
+    await page.locator(adapter.login.submitSelector).first().click();
+    const deadline = Date.now() + Math.max(5000, Number(adapter.login.successTimeoutMs) || 20000);
+    let authenticated = false;
+    while (Date.now() < deadline) {
+      authenticated = await pageHasLoginSuccess(page, adapter);
+      if (authenticated) break;
+      await page.waitForTimeout(250);
+    }
+    if (!authenticated) {
+      const detail = await loginErrorText(page, adapter);
+      return { ok: false, code: "LOGIN_NOT_CONFIRMED", message: detail ? `登录提交后仍未确认：${detail}` : "登录提交后未确认进入目标页面", credentialRef, adapterId: adapter.id, url: page.url() };
+    }
+    const navigation = await navigateAfterLogin(page, adapter, credential, targetUrl);
+    return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: page.url(), ...navigation };
   } catch (error) {
     return { ok: false, code: "LOGIN_FAILED", message: error.message, credentialRef, adapterId: adapter.id };
   }
@@ -156,8 +278,8 @@ export const toolDefinitions = [
   },
   {
     name: "browser_login",
-    description: "Request a connector-specific login using a credential reference; never accepts plaintext passwords.",
-    inputSchema: { type: "object", required: ["credentialRef"], properties: { sessionId: { type: "string" }, credentialRef: { type: "string" }, adapterId: { type: "string" } } },
+    description: "Fill and submit a connector-specific login using a credential reference; never accepts plaintext passwords. Set submit=false for fill-only.",
+    inputSchema: { type: "object", required: ["credentialRef"], properties: { sessionId: { type: "string" }, credentialRef: { type: "string" }, adapterId: { type: "string" }, submit: { type: "boolean", default: true } } },
   },
   {
     name: "desktop_open_app",
@@ -176,10 +298,73 @@ export const toolDefinitions = [
   },
 ];
 
+export const FORBIDDEN_TRADE_CONTROL = /买入订立|卖出转让|确认买入|确认卖出|立即下单|提交委托|下单/;
+
+export function isForbiddenTradeControl(text) {
+  return FORBIDDEN_TRADE_CONTROL.test(String(text || "").replace(/\s+/g, ""));
+}
+
+export function suggestionFormLabels(action) {
+  return action === "SELL"
+    ? { price: "卖价", quantity: "卖量" }
+    : { price: "买价", quantity: "买量" };
+}
+
+export async function fillSuggestionForm({ sessionId = "default", action, price, quantity } = {}) {
+  if (action !== "BUY" && action !== "SELL") {
+    return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
+  }
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false, fields: [] };
+  const labels = suggestionFormLabels(action);
+  try {
+    const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, "");
+      const forbidden = /买入订立|卖出转让|确认买入|确认卖出|立即下单|提交委托/;
+      function findInput(labelText) {
+        const nodes = Array.from(document.querySelectorAll("label, span, div, p, th, td, strong, b"));
+        const match = nodes.find((node) => {
+          const text = normalize(node.textContent);
+          return text === normalize(labelText) || text.startsWith(normalize(labelText));
+        });
+        if (!match) return null;
+        const container = match.closest(".el-form-item, .el-input, li, tr, label, .form-item") || match.parentElement;
+        return container?.querySelector("input:not([type='checkbox']):not([type='radio']):not([type='hidden'])") || null;
+      }
+      function assignValue(input, value) {
+        if (!input || value == null) return false;
+        const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+        descriptor?.set?.call(input, String(value));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }
+      const filled = [];
+      if (assignValue(findInput(fieldLabels.price), priceValue)) filled.push(fieldLabels.price);
+      if (assignValue(findInput(fieldLabels.quantity), quantityValue)) filled.push(fieldLabels.quantity);
+      const forbiddenButtons = Array.from(document.querySelectorAll("button, [role='button'], a")).
+        filter((node) => forbidden.test(normalize(node.textContent))).
+        map((node) => normalize(node.textContent));
+      return { filled, forbiddenButtons, submitted: false };
+    }, { labels, priceValue: price, quantityValue: quantity });
+    return {
+      ok: result.filled.length > 0,
+      code: result.filled.length ? "FORM_FILLED_NOT_SUBMITTED" : "FORM_FIELDS_NOT_FOUND",
+      filled: result.filled.length > 0,
+      submitted: false,
+      fields: result.filled,
+      forbiddenButtons: result.forbiddenButtons || [],
+    };
+  } catch (error) {
+    return { ok: false, code: "FORM_FILL_FAILED", message: error.message, filled: false, submitted: false, fields: [] };
+  }
+}
+
 export async function callTool(name, input) {
   if (name === "browser_navigate") return browserNavigate(input || {});
   if (name === "browser_extract_text") return browserExtract(input || {});
   if (name === "browser_login") return browserLogin(input || {});
+  if (name === "browser_fill_suggestion") return fillSuggestionForm(input || {});
   if (name === "desktop_open_app") return openDesktopApp(input || {});
   if (name === "desktop_discover_app") return desktopDiscover(input || {});
   if (name === "shell_run") return runShell(input || {});

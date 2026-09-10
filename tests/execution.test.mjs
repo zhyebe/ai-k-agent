@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executeDecision } from "../server/execution.mjs";
+import { executeDecision, suggestOrderPreview } from "../server/execution.mjs";
 import { state } from "../server/store.mjs";
 
-test("paper execution is idempotent and live execution is blocked", () => {
+test("buy and sell stay suggestions even when automation is explicitly authorized", () => {
   const task = {
     id: `test-task-${Date.now()}`,
-    symbol: "BTC/USDT",
+    symbol: "DGJJ",
     mode: "PAPER",
     stopLocked: false,
+    automationAuthorized: false,
     metrics: { exposurePct: 0 },
   };
   const decision = {
@@ -17,19 +18,21 @@ test("paper execution is idempotent and live execution is blocked", () => {
     maxOrderValuePct: 4,
     createdAt: new Date().toISOString(),
   };
-  const connector = { adapterId: "northstar-web" };
+  const connector = { adapterId: "haohan-readonly" };
   const first = executeDecision(task, decision, connector);
-  const second = executeDecision(task, decision, connector);
-  assert.equal(first.ok, true);
-  assert.equal(first.order.status, "SIMULATED");
-  assert.equal(second.duplicate, true);
-  assert.equal(task.metrics.exposurePct, 12);
-  const live = executeDecision({ ...task, id: `${task.id}-live`, mode: "LIVE" }, decision, connector);
-  assert.equal(live.code, "LIVE_EXECUTION_DISABLED");
-  const riskyPosition = executeDecision({ ...task, id: `${task.id}-risky-position` }, { ...decision, targetPositionPct: 31 }, connector);
-  assert.equal(riskyPosition.code, "RISK_LIMIT_EXCEEDED");
-  const riskyOrder = executeDecision({ ...task, id: `${task.id}-risky-order` }, { ...decision, maxOrderValuePct: 9 }, connector);
-  assert.equal(riskyOrder.code, "RISK_LIMIT_EXCEEDED");
-  const matches = state.orders.filter((order) => order.taskId === task.id);
-  assert.equal(matches.length, 1);
+  assert.equal(first.ok, false);
+  assert.equal(first.code, "TRADING_DISABLED");
+  assert.equal(first.route, "SUGGESTION_PENDING");
+  const hold = executeDecision(task, { ...decision, action: "HOLD" }, connector);
+  assert.equal(hold.ok, true);
+  assert.equal(hold.reason, "HOLD");
+  const authorized = executeDecision({ ...task, id: `${task.id}-authorized`, automationAuthorized: true }, decision, connector);
+  assert.equal(authorized.code, "TRADING_DISABLED");
+  const live = executeDecision({ ...task, id: `${task.id}-live`, mode: "LIVE", automationAuthorized: true }, decision, connector);
+  assert.equal(live.code, "TRADING_DISABLED");
+  const matches = state.orders.filter((order) => order.taskId.startsWith(task.id));
+  assert.equal(matches.length, 0);
+  const preview = suggestOrderPreview({ ...task, market: { latest: { price: 100 }, account: { availableFunds: 5000 } }, metrics: { equity: 5000 } }, decision);
+  assert.equal(preview.suggestedQty, 2);
+  assert.equal(preview.formSubmitBlocked, true);
 });

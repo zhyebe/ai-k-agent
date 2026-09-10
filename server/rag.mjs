@@ -52,6 +52,7 @@ export function indexSkill(skill) {
       skillId: skill.id,
       version: skill.version,
       title: skill.title,
+      ownerUserId: String(skill.ownerUserId || ""),
       content,
       tags: skill.tags || [],
       status: skill.status,
@@ -66,6 +67,7 @@ export function searchKnowledge(query, filters = {}, limit = 5) {
   const matches = [];
   for (const chunk of chunks.values()) {
     if (chunk.status !== "APPROVED") continue;
+    if (filters.ownerUserId && chunk.ownerUserId && chunk.ownerUserId !== String(filters.ownerUserId)) continue;
     if (filters.skillId && filters.skillId !== chunk.skillId) continue;
     if (filters.tag && !chunk.tags.includes(filters.tag)) continue;
     let overlap = 0;

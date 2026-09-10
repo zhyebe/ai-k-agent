@@ -21,6 +21,40 @@ export function registerConnectorAdapter(adapter) {
 }
 
 registerConnectorAdapter({
+  id: "haohan-readonly",
+  version: "1.0.0",
+  type: "website",
+  displayName: "浩瀚数贸（网页只读）",
+  reviewStatus: "APPROVED",
+  match: ({ url }) => {
+    try { return new URL(url).hostname === "smyw.haohandahan.cn"; } catch { return false; }
+  },
+  capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account"],
+  executionModes: [],
+  dataSource: "browser-dom",
+  manualLoginOnly: true,
+  login: {
+    usernameSelector: 'input[placeholder="请输入手机号码"], input[placeholder*="手机"], input[type="tel"], input[type="text"]',
+    passwordSelector: 'input[placeholder="请输入密码"], input[type="password"]',
+    consentSelector: 'input.el-checkbox__original[type="checkbox"]',
+    submitSelector: 'button.el-button:has-text("登录"), button:has-text("登录")',
+    successSelector: "#v-content, .router-view",
+    successUrlPattern: "#/(?:quotationList|transcc)(?:[/?#]|$)",
+    successTextPattern: "行情|最新价|商品列表|报价",
+    sessionStorageKeys: ["sessionStr", "userId"],
+    postLoginEntry: { selector: ".headerTitle", text: "现货订单", urlPattern: "#/transcc" },
+    successTimeoutMs: 20000,
+  },
+  suggestionForm: {
+    buyPriceLabel: "买价",
+    buyQtyLabel: "买量",
+    sellPriceLabel: "卖价",
+    sellQtyLabel: "卖量",
+    forbiddenSubmit: ["买入订立", "卖出转让", "确认买入", "确认卖出"],
+  },
+});
+
+registerConnectorAdapter({
   id: "northstar-web",
   version: "1.0.0",
   type: "website",
@@ -36,6 +70,7 @@ registerConnectorAdapter({
     passwordSelector: 'input[type="password"]',
     submitSelector: 'button[type="submit"]',
     successSelector: '[data-authenticated="true"]',
+    successUrlPattern: "(dashboard|app|home)",
   },
 });
 
@@ -109,7 +144,7 @@ export function discoverConnector(input = {}) {
     adapterStatus: approved ? `${adapter.displayName} v${adapter.version}` : "通用适配器待审核",
     reviewStatus: adapter.reviewStatus,
     capabilities: adapter.capabilities,
-    actionMapping: canPaperTrade ? "模拟动作已映射" : "待目标适配器审核",
+    actionMapping: adapter.dataSource === "browser-dom" ? "只读建议，不提供动作映射" : canPaperTrade ? "模拟动作已映射" : "待目标适配器审核",
     executionModes: adapter.executionModes,
     liveExecution: false,
     pathStatus,

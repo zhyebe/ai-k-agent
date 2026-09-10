@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { adapterCanExecute, discoverConnector, getConnectorAdapter, listConnectorAdapters } from "../server/connectors.mjs";
 
+test("discovers approved haohan readonly website adapter", () => {
+  const profile = discoverConnector({ type: "website", url: "https://smyw.haohandahan.cn/client/#/transcc", name: "浩瀚数贸" });
+  assert.equal(profile.adapterId, "haohan-readonly");
+  assert.equal(profile.reviewStatus, "APPROVED");
+  assert.deepEqual(profile.executionModes, []);
+  assert.equal(adapterCanExecute(profile.adapterId, "PAPER"), false);
+  assert.ok(profile.capabilities.includes("read_visible_market"));
+});
+
 test("discovers approved demo website adapter", () => {
   const profile = discoverConnector({ type: "website", url: "https://demo.exchange.local", name: "Demo" });
   assert.equal(profile.adapterId, "northstar-web");

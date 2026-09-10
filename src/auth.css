@@ -1,0 +1,377 @@
+.auth-screen {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-height: 460px;
+  padding: 72px 24px 36px;
+  overflow: auto;
+  background: #080a0d;
+}
+
+.auth-screen::before {
+  position: absolute;
+  inset: 24px;
+  border: 1px solid rgba(111, 219, 138, 0.08);
+  border-radius: 12px;
+  content: "";
+  pointer-events: none;
+}
+
+.auth-window-drag-region {
+  position: fixed;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 46px;
+  -webkit-app-region: drag;
+}
+
+.auth-window-controls {
+  position: fixed;
+  z-index: 6;
+  top: 9px;
+  right: 14px;
+  -webkit-app-region: no-drag;
+}
+
+.auth-panel {
+  position: relative;
+  z-index: 2;
+  width: min(460px, 100%);
+  padding: 34px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 26px 72px rgba(0, 0, 0, 0.42);
+  -webkit-app-region: no-drag;
+}
+
+.auth-panel::before {
+  position: absolute;
+  top: 0;
+  right: 34px;
+  left: 34px;
+  height: 2px;
+  background: var(--green);
+  content: "";
+}
+
+.auth-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.auth-panel .brand-lockup {
+  gap: 12px;
+  padding: 0;
+}
+
+.auth-panel .brand-mark {
+  width: 25px;
+  height: 25px;
+  grid-template-columns: repeat(2, 10px);
+  grid-auto-rows: 10px;
+  gap: 3px;
+}
+
+.auth-panel .brand-lockup strong {
+  font-size: 20px;
+}
+
+.auth-panel .brand-lockup small {
+  margin-top: 3px;
+  font-size: 9px;
+}
+
+.auth-environment {
+  padding-top: 4px;
+  color: #687580;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+.auth-heading {
+  margin-top: 48px;
+}
+
+.auth-heading .eyebrow {
+  margin-bottom: 12px;
+}
+
+.auth-heading h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 28px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.auth-heading p {
+  max-width: 360px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.auth-safety {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  padding: 11px 12px;
+  color: var(--green);
+  background: var(--green-soft);
+  border: 1px solid rgba(111, 219, 138, 0.2);
+  border-radius: 6px;
+}
+
+.auth-safety svg {
+  flex: 0 0 auto;
+}
+
+.auth-safety-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.auth-safety-copy strong,
+.auth-safety-copy span {
+  display: block;
+}
+
+.auth-safety-copy strong {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.auth-safety-copy span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.auth-safety code {
+  color: var(--green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.auth-service-settings {
+  margin-top: 14px;
+  padding: 9px 10px;
+  background: rgba(126, 185, 238, 0.045);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
+.auth-service-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.auth-service-summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  color: var(--muted-strong);
+}
+
+.auth-service-summary > code {
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  color: var(--muted);
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.auth-service-summary .text-button {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+
+.auth-service-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.auth-service-editor input {
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: 0;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.auth-service-editor input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(126, 185, 238, 0.1);
+}
+
+.auth-service-editor > span {
+  grid-column: 1 / -1;
+  font-size: 9px;
+}
+
+.service-ok { color: var(--green); }
+.service-error { color: var(--red); }
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 26px;
+}
+
+.auth-field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.auth-input-shell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 13px;
+  color: #687580;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  transition: border-color var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.auth-input-shell:focus-within {
+  background: #171d23;
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(126, 185, 238, 0.11);
+}
+
+.auth-input-shell svg {
+  flex: 0 0 auto;
+}
+
+.auth-input-shell input {
+  width: 100%;
+  min-width: 0;
+  height: 44px;
+  padding: 0;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 13px;
+}
+
+.auth-input-shell input::placeholder {
+  color: #5f6b76;
+}
+
+.auth-submit {
+  width: 100%;
+  min-height: 46px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.auth-error {
+  margin: -2px 0 0;
+}
+
+.auth-footer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 24px;
+  padding-top: 17px;
+  color: var(--muted);
+  border-top: 1px solid var(--border-soft);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.auth-footer svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--blue);
+}
+
+.auth-loading-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 92px;
+  color: var(--muted-strong);
+}
+
+.auth-loading-panel svg {
+  color: var(--blue);
+}
+
+@media (max-width: 560px) {
+  .auth-screen {
+    min-height: 100%;
+    padding: 64px 16px 24px;
+  }
+
+  .auth-screen::before {
+    inset: 12px;
+    border-radius: 9px;
+  }
+
+  .auth-panel {
+    padding: 27px 22px 24px;
+    border-radius: 10px;
+  }
+
+  .auth-panel::before {
+    right: 22px;
+    left: 22px;
+  }
+
+  .auth-heading {
+    margin-top: 40px;
+  }
+
+  .auth-heading h1 {
+    font-size: 25px;
+  }
+
+  .auth-environment {
+    display: none;
+  }
+
+  .auth-service-editor {
+    grid-template-columns: 1fr;
+  }
+}

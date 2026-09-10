@@ -4,7 +4,7 @@ Axiom 是一个面向网站与桌面 App 的工作流 Agent。用户在桌面端
 
 目标接入支持两种入口：网站填写 URL，桌面 App 填安装路径。系统可先自动发现目标档案和只读能力，再进入登录、历史数据采集、趋势追踪、规则裁决和动作执行链。真实网站/App 仍需对应 Connector Adapter 提供字段与动作映射，适配器版本需要审核。
 
-用户端使用 Electron，覆盖 macOS 和 Windows。后台管理账号使用浏览器访问独立的 B/S 页面，审核专家经验、规则和红线，管理 AI Provider 与审计记录。
+用户端使用 Electron，覆盖 macOS 和 Windows。后台管理账号使用浏览器访问独立的 B/S 页面，只负责桌面端账号、密码、任务分配和审计日志；连接器、Provider、Skills 与分析工作流属于用户端。
 
 ## 本地启动
 
@@ -24,7 +24,11 @@ npm run dev
 npm run dev:desktop
 ```
 
-`npm run dev` 同时启动 Vite（5173）与 Node API（8787）。未配置数据库时使用内存演示仓储，页面仍可操作；服务端状态重启后会重置为演示数据。复制 `.env.example` 后请至少替换 `ADMIN_PASSWORD` 和 `APP_SECRET`。
+`npm run dev` 同时启动 Vite（5173）与 Node API（8787）。未配置数据库时使用内存演示仓储，页面仍可操作；服务端状态重启后会重置为演示数据。复制 `.env.example` 后请至少替换 `ADMIN_PASSWORD`、`APP_SECRET` 和 `DESKTOP_PASSWORD`。桌面端必须登录；若配置了 `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`，首次启动会创建该用户并分配已有任务。
+
+当前版本默认只给出买卖建议，不会自动下单。部署、登录恢复和只读 Adapter 限制见 [docs/install.md](docs/install.md)。
+
+「开始观察」启动的是服务端持续控制循环：首轮立即执行，之后按周期读取网页和只读行情。每轮都保留完整配置周期的历史 K 线、逐笔数据、页面字段和账户只读字段；规范化行情未变化时跳过 AI，变化、首轮或上轮失败时开启新的分析轮次，并把最近轮次作为多轮上下文。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可覆盖轮询频率，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读数据范围。即使模型给出 `BUY` / `SELL`，执行层仍全局禁止交易写请求和买卖控件点击。
 
 后台默认入口：`http://127.0.0.1:5173/admin.html`。使用 `.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录；未加载 `.env` 时开发回退值为 `admin` / `local-admin`，不要用于共享环境。
 
@@ -53,11 +57,11 @@ MONGO_DB=axiom_agent
 
 ## AI Provider
 
-连接器页面和后台页面支持任意 OpenAI Compatible Endpoint（例如自建服务、DeepSeek、OpenAI-compatible 网关）。API Key 只提交给本地 Node 服务，服务端使用 `APP_SECRET` 加密保存，前端只收到脱敏预览。Provider 的“验证”会在服务端请求 `<endpoint>/models`，只返回状态，不返回响应正文。没有 Key 时使用安全的演示决策；真实模型请求需要配置 Provider 并由服务端发起。
+连接器页面支持任意 OpenAI Compatible Endpoint（例如自建服务、DeepSeek、OpenAI-compatible 网关）。API Key 只提交给本地 Node 服务，服务端使用 `APP_SECRET` 加密保存，前端只收到脱敏预览。Provider 的“验证”会在服务端请求 `<endpoint>/models`，只返回状态，不返回响应正文。没有 Key 时模型阶段会返回 HOLD，并带上 `PROVIDER_NOT_CONFIGURED`；真实分析需要配置 Provider 并由服务端发起。
 
 ## RAG 与初始化 Skill
 
-管理后台或用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿，审核发布后切片进入 RAG 索引。检索结果保留 Skill 版本、chunk ID 和 evidence ID；草稿不会进入自动决策上下文。
+用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿，审核发布后切片进入 RAG 索引。检索结果保留 Skill 版本、chunk ID 和 evidence ID；草稿不会进入自动决策上下文。
 
 项目内置 Skill：
 
@@ -77,13 +81,13 @@ npm run mcp
 
 暴露工具：浏览器导航/提取/连接器登录请求、白名单桌面 App 发现/启动、白名单 Shell 命令（包括 `bash` / `sh`）。Shell 和桌面动作没有明确 `approved: true` 时只返回审批要求；命令使用参数数组执行，不拼接自由格式 Shell 字符串。交易下单、提现、修改风控和扩大资金权限不在 MCP 工具列表中。
 
-管理接口（Provider、Skill 审核、凭据列表）要求登录后由 `x-admin-token` 会话访问；API CORS 默认只允许本地页面和 Electron 的 `null` 来源，可用 `CORS_ALLOWED_ORIGINS` 增加明确来源。
+管理接口（账号、任务分配、审计摘要）要求登录后由 `x-admin-token` 会话访问；管理令牌不能访问 `/api/workspace`、任务控制、连接器、凭据、Provider 或 Skills 接口。上述客户端能力只接受桌面用户的 `x-user-token`，Provider、凭据和用户上传的 Skills 按桌面账号隔离；API CORS 默认只允许本地页面和 Electron 的 `null` 来源，可用 `CORS_ALLOWED_ORIGINS` 增加明确来源。Provider、连接器和 Skills 的操作不在后台页面提供。
 
 ## 当前适配边界
 
 网站或 App 的登录字段、历史数据位置和买卖按钮因目标而异。创建任务时输入 URL/安装路径会自动生成目标档案并发现 Connector Adapter；已审核目标可继续进入凭据托管、监控、趋势分析、规则裁决和模拟动作链。通用网站/App 会保持 `REVIEW_REQUIRED`，不会猜测字段或自动点击交易控件。接入真实目标时，需要为目标增加一个 Connector Adapter（字段定位、数据映射、动作映射），通过模拟盘验证后再申请实盘权限。
 
-当前唯一内置已审核示例是 `https://demo.exchange.local` 的 `northstar-web`，市场数据是本地 OHLCV 回放。默认只允许 `PAPER` / `SHADOW`；`LIVE` 会被服务端返回 `LIVE_EXECUTION_DISABLED`。停止由服务端写入停止锁，禁止新决策/订单并切换人工接管，不会未经确认自动平仓。控制器在后台续租和心跳，桌面端关闭不会让服务端自动恢复订单权限。
+当前唯一内置已审核示例包括 `https://demo.exchange.local` 的 `northstar-web`，以及 `https://smyw.haohandahan.cn` 的 `haohan-readonly`。后者只允许浏览、读取可见行情/历史/账户；买卖写接口被硬阻断。停止由服务端写入停止锁，禁止新决策/订单并切换人工接管，不会未经确认自动平仓。
 
 ## 打包
 
@@ -99,7 +103,7 @@ macOS 构建在 `release/` 生成 `dmg` / `zip`（本机已验证 arm64 目录�
 仓库使用 GitHub Release 分发桌面端。推送 `v*` 标签后，`.github/workflows/release.yml` 会分别构建 macOS universal 和 Windows x64，并发布安装包、portable 包及 `latest-mac.yml` / `latest.yml` 更新元数据：
 
 ```bash
-git tag v0.1.0
+git tag v0.2.0
 git push origin main --tags
 ```
 
