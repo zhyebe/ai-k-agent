@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { openBrowserPage, readVisiblePage } from "./browser.mjs";
-import { HAO_HAN_HOST, isHaohanTarget, parseHaohanPageSnapshot } from "./haohan.mjs";
+import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, parseHaohanPageSnapshot } from "./haohan.mjs";
 
 const DEFAULT_WS_URL = "wss://smyt.haohandahan.cn/wsfront_tq";
 const DEFAULT_MARKET_ID = 28;
@@ -9,16 +9,8 @@ const DEFAULT_HTTP_BASE_URL = "https://smyt.haohandahan.cn";
 const DEFAULT_KLINE_COUNT = 2000;
 const DEFAULT_ANALYSIS_TIMEFRAMES = Object.freeze([
   "1m",
-  "3m",
-  "5m",
-  "10m",
-  "15m",
-  "30m",
   "1h",
-  "2h",
-  "4h",
   "1d",
-  "1w",
   "1mo",
 ]);
 const KLINE_PERIODS = Object.freeze({
@@ -609,7 +601,7 @@ function buildTimeframeSnapshot({ timeframe, period = null, history = [], source
   };
 }
 
-export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, timeframe, history = [], ticks = [], quote = {}, observedAt, dataAt = null, source, marketClosed = false, timeframes = {}, raw = null, page = null, account = null }) {
+export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, timeframe, history = [], ticks = [], quote = {}, observedAt, dataAt = null, source, marketClosed = false, timeframes = {}, raw = null, page = null, account = null, pageView = null }) {
   const primaryTimeframe = normalizeHaohanTimeframe(timeframe || "15m");
   const timeframeEntries = new Map();
   for (const [key, value] of Object.entries(timeframes || {})) {
@@ -691,7 +683,8 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
     dataQuality: missingFields.length ? "LIMITED" : "VERIFIED",
     missingFields: [...new Set(missingFields)],
     marketClosed: Boolean(marketClosed),
-    account: account || { availableFunds: null, riskRate: null },
+    account: account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
+    pageView: pageView || page?.view || null,
     historyCount: primary.historyCount,
     completeHistoryCount: primary.completeHistoryCount,
     evidenceId: "",
@@ -849,6 +842,12 @@ export async function openMarketBrowser(task, connector) {
   return openBrowserPage({ sessionId, url, expectedHostname });
 }
 
+export function resolveObservedHaohanSymbol(pageInstrument, taskSymbol) {
+  const pageSymbol = String(pageInstrument?.symbol || "").trim();
+  const configured = String(taskSymbol || "").trim();
+  return pageSymbol || configured;
+}
+
 export async function observeMarket(task, connector) {
   if (!connector || connector.reviewStatus !== "APPROVED") return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED", message: "目标适配器未审核，无法读取可验证行情" };
   if (!connector.capabilities.includes("read_visible_market") || connector.adapterId !== "haohan-readonly") {
@@ -863,10 +862,10 @@ export async function observeMarket(task, connector) {
   }
   if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
   const configuredSymbol = String(task.symbol || "").trim();
-  const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: configuredSymbol || "", timeframe: task.timeframe || "15m" });
+  const pageInstrument = extractHaohanPageInstrument(pageSnapshot);
+  const observedSymbol = resolveObservedHaohanSymbol(pageInstrument, configuredSymbol) || "DGJJ";
+  const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe: task.timeframe || "15m" });
   if (parsed.code === "REAUTH_REQUIRED") return parsed;
-  if (parsed.code === "PAGE_INSTRUMENT_MISMATCH") return parsed;
-  const observedSymbol = String(parsed.symbol || parsed.instrument?.symbol || configuredSymbol || "DGJJ").trim();
   const apiResult = await fetchHaohanMarket({ symbol: observedSymbol, timeframe: task.timeframe || "15m" });
   const page = {
     url: pageSnapshot.url,
@@ -874,28 +873,28 @@ export async function observeMarket(task, connector) {
     visibleText: pageSnapshot.visibleText,
     tables: pageSnapshot.tables,
     chartSamples: pageSnapshot.chartSamples,
-    instrument: pageSnapshot.instrument || parsed.instrument || null,
+    instrument: pageInstrument.symbol ? pageInstrument : (pageSnapshot.instrument || parsed.instrument || null),
+    view: parsed.pageView || null,
     capturedAt: pageSnapshot.capturedAt,
     contentFingerprint: parsed.contentFingerprint || "",
   };
   if (apiResult.ok) {
-    if (page.instrument?.symbol && normalize(page.instrument.symbol) !== normalize(apiResult.symbol)) {
-      return {
-        ok: false,
-        code: "MARKET_INSTRUMENT_MISMATCH",
-        message: `网页当前品种 ${page.instrument.symbol} 与只读行情 ${apiResult.symbol} 不一致`,
-        page,
-        instrument: page.instrument,
-        apiSymbol: apiResult.symbol,
-      };
-    }
-    return enrichReadOnlyMarket({
+    const pageSymbol = page.instrument?.symbol || parsed.instrument?.symbol || observedSymbol;
+    const symbolMismatch = Boolean(configuredSymbol && pageSymbol && normalize(configuredSymbol) !== normalize(pageSymbol));
+    const mergedQuote = Object.fromEntries(Object.entries(apiResult.quote || {}).map(([key, value]) => [key, value ?? parsed.quote?.[key]]));
+    const enriched = enrichReadOnlyMarket({
       ...apiResult,
       page,
-      quote: Object.fromEntries(Object.entries(apiResult.quote || {}).map(([key, value]) => [key, value ?? parsed.quote?.[key]])),
+      pageView: parsed.pageView || null,
+      quote: mergedQuote,
       account: Object.fromEntries(Object.entries({ ...(parsed.account || {}), ...(apiResult.account || {}) }).map(([key, value]) => [key, value ?? parsed.account?.[key]])),
       raw: { ...apiResult.raw, page },
     });
+    if (symbolMismatch) {
+      enriched.missingFields = [...new Set([...(enriched.missingFields || []), "SYMBOL_PAGE_MISMATCH"])];
+      enriched.dataQuality = "LIMITED";
+    }
+    return enriched;
   }
   if (parsed.ok) {
     return enrichReadOnlyMarket({ ...parsed, page, raw: { page } });

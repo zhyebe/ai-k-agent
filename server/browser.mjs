@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
+import { extractHaohanPageInstrument } from "./haohan.mjs";
 
 const sessions = new Map();
 
@@ -37,20 +38,6 @@ function redact(text) {
     .replace(/(sessionStr|session|password|passwd|token|access_token)\s*[=:：]\s*[^\s&]+/gi, "$1=[redacted]")
     .replace(/\b1\d{2}\d{4}\d{4}\b/g, (value) => `${value.slice(0, 3)}****${value.slice(-4)}`)
     .slice(0, 30000);
-}
-
-function extractVisibleInstrument(text) {
-  const lines = String(text || "")
-    .split(/\r?\n+/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-  for (const line of lines) {
-    const pipeMatch = line.match(/(?:^|\s)([A-Z][A-Z0-9_-]{1,15})\s*\|\s*([^|]{2,100})/);
-    if (pipeMatch) return { symbol: pipeMatch[1], symbolName: pipeMatch[2].trim() };
-    const productMatch = line.match(/(?:^|\s)商品\s+([A-Z][A-Z0-9_-]{1,15})\s+(.{2,100}?)(?=\s+(?:订立|转让|买价|买量|买入|卖出)\b|$)/);
-    if (productMatch) return { symbol: productMatch[1], symbolName: productMatch[2].trim() };
-  }
-  return { symbol: "", symbolName: "" };
 }
 
 function chromePath() {
@@ -188,7 +175,7 @@ export async function readVisiblePage(sessionId = "default") {
       url: safeUrl(raw.url),
       title: String(raw.title || "").slice(0, 160),
       visibleText: redact(raw.visibleText),
-      instrument: extractVisibleInstrument(raw.visibleText),
+      instrument: extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title }),
       tables,
       chartSamples: chartSamples.map(redact),
       capturedAt: Date.now(),

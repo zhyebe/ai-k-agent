@@ -10,6 +10,7 @@ import {
   normalizeHaohanTimelineTick,
   normalizeHaohanTimeframe,
   observeMarket,
+  resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
 import { extractHaohanPageInstrument, parseHaohanPageSnapshot } from "../server/haohan.mjs";
 
@@ -120,6 +121,62 @@ test("页面当前品种从可见文本提取，并拒绝与任务品种拼接",
   const match = parseHaohanPageSnapshot(snapshot, { symbol: "DGKZ" });
   assert.equal(match.symbol, "DGKZ");
   assert.equal(match.symbolName, "丹桂康砖（二期）");
+  assert.equal(mismatch.account.availableFunds, null);
+});
+
+test("页面资金、盘口和换行品种会结构化解析并保留给分析", () => {
+  const snapshot = {
+    url: "https://smyw.haohandahan.cn/client/#/transcc",
+    title: "1140 丹桂康砖（二期） 浩瀚数贸",
+    visibleText: `DGKZ
+|
+F10
+最新价
+1140
+涨跌幅
+-1.64%
+昨收价
+1159
+外盘
+348.82万
+登录账号
+182****6105
+可用资金
+5143.09元
+风险率
+9999.99%
+实时货值变化
+0元
+货值变化
+0元
+最大下单量：
+404
+持仓明细
+暂无数据
+销售②
+1142
+5622
+采购①
+1140
+4974`,
+  };
+  assert.deepEqual(extractHaohanPageInstrument(snapshot), { symbol: "DGKZ", symbolName: "丹桂康砖（二期）" });
+  const parsed = parseHaohanPageSnapshot(snapshot, { symbol: "DGKZ" });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.account.availableFunds, 5143.09);
+  assert.equal(parsed.account.equity, 5143.09);
+  assert.equal(parsed.account.dayPnl, 0);
+  assert.equal(parsed.account.positionEmpty, true);
+  assert.equal(parsed.pageView.quote.prevClose, 1159);
+  assert.equal(parsed.pageView.quote.outerVolume, 3488200);
+  assert.equal(parsed.pageView.orderBook.asks[0].price, 1142);
+  assert.equal(parsed.pageView.orderBook.bids[0].price, 1140);
+  const mismatch = parseHaohanPageSnapshot(snapshot, { symbol: "DGJJ" });
+  assert.equal(mismatch.code, "PAGE_INSTRUMENT_MISMATCH");
+  assert.equal(mismatch.account.availableFunds, 5143.09);
+  assert.equal(mismatch.pageView.orderBook.bids.length, 1);
+  assert.equal(resolveObservedHaohanSymbol({ symbol: "DGKZ" }, "DGJJ"), "DGKZ");
+  assert.equal(resolveObservedHaohanSymbol({ symbol: "" }, "DGJJ"), "DGJJ");
 });
 
 test("浩瀚只读采集并行保留全部分析周期历史", async () => {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
+import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
 
 test("风险上限只阻断执行路由，不把真实 BUY 意图改成 HOLD", () => {
@@ -146,9 +147,10 @@ test("持续监控在单轮连接失败后继续轮询，停止后不再创建�
 });
 
 function testMarketSnapshot(fingerprint, price) {
+  const now = Date.now();
   const history = Array.from({ length: 25 }, (_, index) => {
     const close = price - 12 + index;
-    return { timestamp: 1700000000000 + index * 900000, open: close - 1, high: close + 1, low: close - 2, close, volume: 100 + index, partial: false };
+    return { timestamp: now - (24 - index) * 60000, open: close - 1, high: close + 1, low: close - 2, close, volume: 100 + index, partial: false };
   });
   return {
     ok: true,
@@ -157,14 +159,14 @@ function testMarketSnapshot(fingerprint, price) {
     symbol: "BTC/USDT",
     symbolName: "测试品种",
     instrumentId: "test-contract",
-    timeframe: "15m",
+    timeframe: "1m",
     history,
     historyCount: history.length,
     completeHistoryCount: history.length,
-    ticks: [{ timestamp: history.at(-1).timestamp, price, volume: 3 }],
-    timeframes: { "15m": { timeframe: "15m", period: 2, history, historyCount: history.length, completeHistoryCount: history.length, ticks: [], missingFields: [], dataQuality: "VERIFIED", ok: true } },
-    availableTimeframes: ["15m"],
-    timeline: { kind: "timeline", ticks: [], tickCount: 0 },
+    ticks: [{ timestamp: now, price, volume: 3 }],
+    timeframes: { "1m": { timeframe: "1m", period: 0, history, historyCount: history.length, completeHistoryCount: history.length, ticks: [], missingFields: [], dataQuality: "VERIFIED", ok: true } },
+    availableTimeframes: ["1m"],
+    timeline: { kind: "timeline", ticks: [{ timestamp: now, price, volume: 3 }], tickCount: 1 },
     quote: { price, open: price - 1, high: price + 1, low: price - 2, volume: 200 },
     latest: { price, open: price - 1, high: price + 1, low: price - 2, volume: 200 },
     changePct: 1.2,
@@ -178,9 +180,9 @@ function testMarketSnapshot(fingerprint, price) {
     account: { availableFunds: 1000, riskRate: 0.1 },
     evidenceId: `market:${fingerprint}`,
     fingerprint,
-    observedAt: new Date().toISOString(),
-    dataAt: new Date().toISOString(),
-    raw: { source: "test" },
+    observedAt: new Date(now).toISOString(),
+    dataAt: new Date(now).toISOString(),
+    raw: { source: "test", timeline: { ticks: [{ timestamp: now, price }] } },
   };
 }
 
@@ -204,6 +206,14 @@ test("成功监控轮次持续运行，未变行情不请求模型，变化后�
   const first = await runMonitoringCycle(taskId, { runtime });
   assert.equal(first.analysisTriggered, true);
   assert.equal(requests.length, 1);
+  assert.equal(task.metrics.equity, 1000);
+  assert.equal(requests[0].account.availableFunds, 1000);
+  assert.equal(requests[0].account.equity, 1000);
+  assert.equal(requests[0].market.ticks.length, 0);
+  assert.deepEqual(requests[0].market.availableTimeframes, ["1m", "1h", "1d", "1mo"]);
+  assert.ok(requests[0].market.timeframes["1m"].historyCount >= 20);
+  assert.equal(requests[0].market.analysisLayers.timezone, "Asia/Shanghai");
+  assert.equal(requests[0].market.raw?.timeline, undefined);
   assert.equal(task.monitoringRound, 1);
   assert.equal(task.lastAnalyzedFingerprint, "fingerprint-a");
   assert.equal(state.orders.filter((order) => order.taskId === taskId).length, 0);
@@ -315,10 +325,44 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
   state.providers.push(provider);
   const previousThreshold = process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES;
   process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES = "20000";
-  const makeHistory = (count, offset) => Array.from({ length: count }, (_, index) => ({ timestamp: 1700000000000 + offset + index * 900000, open: 100 + index, high: 102 + index, low: 99 + index, close: 101 + index, volume: 100 + index, amount: 1000 + index, inventory: 10, partial: false }));
-  const primary = makeHistory(180, 0);
-  const secondary = makeHistory(160, 900000000);
-  const market = { ...testMarketSnapshot("hierarchical-fingerprint", 280), symbol: "BTC/USDT", history: primary, historyCount: primary.length, completeHistoryCount: primary.length, timeframes: { "1m": { timeframe: "1m", history: secondary, historyCount: secondary.length, completeHistoryCount: secondary.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true }, "15m": { timeframe: "15m", history: primary, historyCount: primary.length, completeHistoryCount: primary.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true } }, page: { url: "https://demo.exchange.local", visibleText: "readonly page" }, raw: { source: "readonly" } };
+  const now = Date.now();
+  const windows = analysisLayerWindows(now);
+  const layer = (timeframe) => windows.layers.find((item) => item.timeframe === timeframe);
+  const candle = (timestamp, close) => ({ timestamp, previousClose: close, open: close - 1, high: close + 1, low: close - 2, close, volume: 100, amount: 1000, inventory: 10, partial: false });
+  const fillLayer = (timeframe, step, count, baseClose) => {
+    const window = layer(timeframe);
+    const last = window.includeEnd ? window.end : window.end - 1;
+    const rows = [];
+    for (let index = 0; index < count; index += 1) {
+      const timestamp = last - index * step;
+      if (timestamp < window.start) break;
+      rows.push(candle(timestamp, baseClose + index));
+    }
+    return rows.reverse();
+  };
+  const minuteHistory = fillLayer("1m", 60_000, 50, 200);
+  const hourHistory = fillLayer("1h", 3_600_000, 30, 180);
+  const dayHistory = fillLayer("1d", 86_400_000, 28, 160);
+  const monthHistory = fillLayer("1mo", 30 * 86_400_000, 36, 120);
+  const market = {
+    ...testMarketSnapshot("hierarchical-fingerprint", 280),
+    symbol: "BTC/USDT",
+    dataAt: new Date(now).toISOString(),
+    observedAt: new Date(now).toISOString(),
+    history: minuteHistory,
+    historyCount: minuteHistory.length,
+    completeHistoryCount: minuteHistory.length,
+    ticks: Array.from({ length: 40 }, (_, index) => ({ timestamp: now - index * 1000, price: 280, volume: 1 })),
+    timeframes: {
+      "1m": { timeframe: "1m", history: minuteHistory, historyCount: minuteHistory.length, completeHistoryCount: minuteHistory.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true },
+      "1h": { timeframe: "1h", history: hourHistory, historyCount: hourHistory.length, completeHistoryCount: hourHistory.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true },
+      "1d": { timeframe: "1d", history: dayHistory, historyCount: dayHistory.length, completeHistoryCount: dayHistory.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true },
+      "1mo": { timeframe: "1mo", history: monthHistory, historyCount: monthHistory.length, completeHistoryCount: monthHistory.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true },
+      "15m": { timeframe: "15m", history: minuteHistory, historyCount: minuteHistory.length, completeHistoryCount: minuteHistory.length, indicators: {}, trend: "up", anomaly: false, missingFields: [], dataQuality: "VERIFIED", ok: true },
+    },
+    page: { url: "https://demo.exchange.local", visibleText: `readonly page ${"x".repeat(40000)}` },
+    raw: { source: "readonly", timeline: { ticks: [1, 2, 3] } },
+  };
   let segmentCalls = 0;
   let finalContext;
   const runtime = {
@@ -342,7 +386,13 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     assert.equal(segmentCalls, result.task.analysisCoverage.totalSegments);
     assert.equal(finalContext.analysisMode, "hierarchical_full_coverage");
     assert.equal(finalContext.segmentReviews.length, segmentCalls);
-    assert.equal(result.execution.code, "TRADING_DISABLED");
+    assert.equal(finalContext.market.liveTicks.length, 0);
+    assert.ok(!finalContext.market.timeframes["15m"]);
+    assert.ok(finalContext.market.timeframes["1m"].historyCount > 0);
+    assert.ok(finalContext.market.timeframes["1h"].historyCount > 0);
+    assert.ok(finalContext.market.timeframes["1d"].historyCount > 0);
+    assert.ok(finalContext.market.timeframes["1mo"].historyCount > 0);
+    assert.equal(result.execution.code, "SUGGESTION_PENDING");
     assert.equal(state.orders.filter((order) => order.taskId === taskId).length, 0);
   } finally {
     state.tasks = state.tasks.filter((item) => item.id !== taskId);

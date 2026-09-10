@@ -6,8 +6,8 @@ import { createPersistence } from "./persistence.mjs";
 import { createProvider, publicProvider, verifyProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
-import { autoJudge, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, startController, startTask, stopAllControllers, stopTask, takeoverPendingAction } from "./engine.mjs";
+import { addEvent, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
+import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskProvider, startController, startTask, stopAllControllers, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { openMarketBrowser, observeMarket } from "./market.mjs";
 import { browserLogin, browserLoginStatus } from "./tools.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
@@ -234,20 +234,29 @@ async function bootstrapDesktopUser() {
   addEvent("user_bootstrapped", `已创建桌面用户 ${user.username}`, { userId: user.id });
 }
 
-async function bootstrapDeepseekProvider() {
-  const existing = state.providers.find((item) => item.id === "provider_deepseek");
-  if (!existing) return;
-  const model = String(process.env.DEEPSEEK_MODEL || existing.model || "deepseek-v4-pro");
-  const baseUrl = String(process.env.DEEPSEEK_BASE_URL || existing.baseUrl || "https://api.deepseek.com/v1");
-  const apiKey = String(process.env.DEEPSEEK_API_KEY || "").trim();
-  existing.model = model;
-  existing.baseUrl = baseUrl;
+function applyProviderFromEnv(id, { name, model, baseUrl, apiKey }) {
+  const existing = state.providers.find((item) => item.id === id);
+  if (!existing) return null;
+  existing.model = model || existing.model;
+  existing.baseUrl = baseUrl || existing.baseUrl;
   if (apiKey && !existing.encryptedKey) {
-    const next = createProvider({ id: existing.id, name: existing.name || "DeepSeek", model, baseUrl, apiKey }, existing);
+    const next = createProvider({ id: existing.id, name: existing.name || name, model: existing.model, baseUrl: existing.baseUrl, apiKey }, existing);
     Object.assign(existing, next);
-    await persistProvider(existing);
-    addEvent("provider_bootstrapped", "已从本地环境加载 DeepSeek Provider（密钥仅服务端保存）", { providerId: existing.id });
+    return existing;
   }
+  return null;
+}
+
+async function bootstrapDeepseekProvider() {
+  const seeded = applyProviderFromEnv("provider_deepseek", {
+    name: "DeepSeek",
+    model: String(process.env.DEEPSEEK_MODEL || "deepseek-v4-pro"),
+    baseUrl: String(process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com/v1"),
+    apiKey: String(process.env.DEEPSEEK_API_KEY || "").trim(),
+  });
+  if (!seeded) return;
+  await persistProvider(seeded);
+  addEvent("provider_bootstrapped", "已将 DeepSeek 密钥加密写入数据库（明文不入库）", { providerId: seeded.id });
 }
 
 await persistHydratedDefaults();
@@ -354,12 +363,13 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: String(body.name || "新建观察任务"),
     status: "READY",
-    mode: body.mode === "SHADOW" ? "SHADOW" : "PAPER",
+    mode: body.mode === "LIVE" ? "LIVE" : body.mode === "SHADOW" ? "SHADOW" : "PAPER",
     symbol: String(body.symbol || "DGJJ"),
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
     autoDecisionEnabled: false,
     autoDecisionCountdownSec: 30,
+    providerId: "",
     pendingAction: null,
     target: {
       type: targetType,
@@ -427,15 +437,27 @@ app.post("/api/tasks/:taskId/auto-decision", { preHandler: requireTaskAccess }, 
     return reply.code(400).send({ error: error.message });
   }
 });
+app.post("/api/tasks/:taskId/provider", { preHandler: requireTaskAccess }, async (request, reply) => {
+  try {
+    const task = setTaskProvider(request.params.taskId, request.body?.providerId, request.auth.user.id);
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) {
+    return reply.code(400).send({ error: error.message });
+  }
+});
 app.post("/api/tasks/:taskId/pending-action/confirm", { preHandler: requireTaskAccess }, async (request, reply) => {
-  try { const task = confirmPendingAction(request.params.taskId, { source: "manual_confirm" }); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
+  try { const task = await confirmPendingAction(request.params.taskId, { source: "manual_confirm" }); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
+});
+app.post("/api/tasks/:taskId/pending-action/cancel", { preHandler: requireTaskAccess }, async (request, reply) => {
+  try { const task = cancelPendingAction(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/pending-action/takeover", { preHandler: requireTaskAccess }, async (request, reply) => {
   try { const task = takeoverPendingAction(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/analyze", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
-    const result = await runAnalysis(request.params.taskId, request.body?.providerId || "provider_deepseek", { trigger: "manual", userId: request.auth.user.id });
+    const result = await runAnalysis(request.params.taskId, request.body?.providerId || resolveDefaultProviderId(request.auth.user.id), { trigger: "manual", userId: request.auth.user.id });
     broadcast();
     return { ...result, task: publicTask(result.task), output: getAgentOutput(request.params.taskId, result.run?.id, 400) };
   } catch (error) {
@@ -652,7 +674,7 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
     }
     addEvent("connector_test", `${profile.name} 连接检查：${message}`, { taskId: task?.id, userId: request.auth.type === "user" ? request.auth.user.id : undefined, connectorId: profile.connectorId, adapterId: profile.adapterId, loginStatus, connectionStatus, code });
     broadcast();
-    return { ok, code, message, connectorId: profile.connectorId, type: profile.type, name: profile.name, target: profile.target, adapterId: profile.adapterId, adapterVersion: profile.adapterVersion, connectionStatus, loginStatus, credentialStatus: hasCredential ? "已托管" : "未配置", credentialRef, accountLabel, observedUrl, browserMode, liveExecution: false, capabilities: profile.capabilities, executionModes: profile.executionModes };
+    return { ok, code, message, connectorId: profile.connectorId, type: profile.type, name: profile.name, target: profile.target, adapterId: profile.adapterId, adapterVersion: profile.adapterVersion, connectionStatus, loginStatus, credentialStatus: hasCredential ? "已托管" : "未配置", credentialRef, accountLabel, observedUrl, browserMode, liveExecution: profile.liveExecution === true, capabilities: profile.capabilities, executionModes: profile.executionModes };
   } catch (error) {
     return reply.code(400).send({ error: error.message || "CONNECTOR_TEST_FAILED" });
   }

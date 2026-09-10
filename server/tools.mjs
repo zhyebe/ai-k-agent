@@ -360,6 +360,81 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
   }
 }
 
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity } = {}) {
+  if (action !== "BUY" && action !== "SELL") {
+    return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
+  }
+  if (price == null || quantity == null || !Number(quantity)) {
+    return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
+  }
+  const filled = await fillSuggestionForm({ sessionId, action, price, quantity });
+  if (!filled.ok) return { ...filled, submitted: false };
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };
+  const submitLabel = action === "SELL" ? "卖出转让" : "买入订立";
+  try {
+    const writeWait = page.waitForResponse((response) => {
+      try {
+        return /\/intraday-trade\/trade\/(make|marketTake)/.test(response.url());
+      } catch {
+        return false;
+      }
+    }, { timeout: 12000 }).catch(() => null);
+    const clicked = await page.evaluate(({ buttonLabel }) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, "");
+      function acceptAgreement() {
+        const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
+        const match = nodes.find((node) => /订单商品销售协议|我已同意签署/.test(node.textContent || ""));
+        if (!match) return false;
+        const root = match.closest("label") || match.closest(".el-checkbox") || match;
+        const input = root.querySelector?.("input[type='checkbox']") || root.parentElement?.querySelector?.("input[type='checkbox']");
+        if (input && !input.checked) {
+          input.click();
+          if (typeof root.click === "function") root.click();
+          return true;
+        }
+        if (input?.checked) return true;
+        if (typeof root.click === "function") root.click();
+        return true;
+      }
+      acceptAgreement();
+      const button = Array.from(document.querySelectorAll("button, [role='button'], a")).find((node) => {
+        const text = normalize(node.textContent);
+        return text.includes(normalize(buttonLabel)) && !node.disabled;
+      });
+      if (!button) return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND" };
+      button.click();
+      return { clicked: true, label: normalize(button.textContent) };
+    }, { buttonLabel: submitLabel });
+    if (!clicked.clicked) {
+      return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: "目标页未找到下单按钮", filled: true, submitted: false };
+    }
+    const response = await writeWait;
+    let responseOk = null;
+    if (response) {
+      responseOk = response.ok();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const pageHint = await page.evaluate(() => {
+      const toast = document.querySelector(".el-message, .el-notification__content, .el-message-box__message");
+      return String(toast?.textContent || "").trim();
+    });
+    if (responseOk === false || /失败|不足|错误|拒绝/.test(pageHint)) {
+      return { ok: false, code: "TRADE_REJECTED", message: pageHint || "交易所拒绝下单", filled: true, submitted: true, responseOk };
+    }
+    return {
+      ok: true,
+      code: response ? "TRADE_SUBMITTED" : "TRADE_CLICKED",
+      message: pageHint || (response ? "已提交交易请求" : "已点击下单按钮"),
+      filled: true,
+      submitted: true,
+      responseOk,
+    };
+  } catch (error) {
+    return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, filled: true, submitted: false };
+  }
+}
+
 export async function callTool(name, input) {
   if (name === "browser_navigate") return browserNavigate(input || {});
   if (name === "browser_extract_text") return browserExtract(input || {});

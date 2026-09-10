@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, publicProvider, requestDecision, requestSegmentReview, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -29,6 +29,22 @@ test("provider verification checks an OpenAI-compatible models endpoint", async 
 
 test("provider configuration rejects non-http endpoints", () => {
   assert.throws(() => createProvider({ baseUrl: "javascript:alert(1)", model: "demo" }), /PROVIDER_URL_INVALID/);
+});
+
+test("desktop users can create an owned provider and keep the wire format", () => {
+  const provider = createProvider({
+    name: "我的天成",
+    baseUrl: "https://ai.tiancheng.tcyun.net",
+    model: "gpt-6-astra",
+    apiKey: "sk-user-owned",
+    apiFormat: "openai_responses",
+  });
+  provider.ownerUserId = "user_desktop_1";
+  const published = publicProvider(provider);
+  assert.equal(published.configured, true);
+  assert.equal(published.apiFormat, "responses");
+  assert.equal("encryptedKey" in published, false);
+  assert.equal("apiKey" in published, false);
 });
 
 test("provider decision receives bounded evidence context", async () => {
@@ -112,6 +128,31 @@ test("provider reviews a complete market segment and binds the returned review t
     assert.equal(result.rowCount, segment.rowCount);
     assert.equal(received.messages[0].role, "system");
     assert.equal(JSON.parse(received.messages[1].content).segment.segmentId, segment.segmentId);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("天成网关按 Codex/cc-switch 走 Responses API，不打 chat/completions", async () => {
+  assert.equal(resolveProviderWireApi({ baseUrl: "https://ai.tiancheng.tcyun.net" }), "responses");
+  let requestUrl = "";
+  let received;
+  const server = http.createServer(async (request, response) => {
+    requestUrl = request.url;
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    received = JSON.parse(body);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ output_text: JSON.stringify({ action: "HOLD", confidence: 0.3 }) }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ name: "天成 AI", model: "gpt-6-astra", baseUrl: `http://127.0.0.1:${port}`, apiKey: "provider-secret", apiFormat: "responses" });
+    const result = await requestDecision(provider, { market: { trend: "up" }, evidenceIds: [] });
+    assert.equal(requestUrl, "/responses");
+    assert.equal(received.model, "gpt-6-astra");
+    assert.ok(Array.isArray(received.input));
+    assert.equal(result.action, "HOLD");
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

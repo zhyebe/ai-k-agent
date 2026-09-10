@@ -53,6 +53,7 @@ import {
   autoJudge,
   agentStreamUrl,
   claimManual,
+  cancelPendingAction,
   confirmPendingAction,
   createTask,
   configureApiBaseUrl,
@@ -64,6 +65,7 @@ import {
   saveProvider,
   saveSkill,
   setAutoDecision,
+  setTaskProvider,
   startTask,
   stopTask,
   takeoverPendingAction,
@@ -102,11 +104,11 @@ const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { m
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买入", SELL: "卖出", HOLD: "观望" };
 const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买入", SELL: "建议卖出", HOLD: "保持观望" };
-const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（交易已锁定）" };
+const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（确认后下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
 const stageLabels: Record<string, string> = { connect: "连接目标", login: "登录验证", collect: "数据采集", analyze: "趋势分析", rules: "规则裁决", action: "动作建议", system: "系统" };
 const routeLabels: Record<string, string> = {
-  SUGGESTION_PENDING: "建议待处理",
+  SUGGESTION_PENDING: "建议待确认",
   SUGGESTION_ONLY: "仅输出建议",
   BLOCKED: "已阻断",
   HOLD: "保持观望",
@@ -214,6 +216,20 @@ function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateS
 
 const emptyWorkspace: Workspace = { tasks: [], skills: [], providers: [], events: [], runs: [], connectors: [], orders: [], agentRuns: [] };
 
+function preferredProviderId(providers: Provider[]) {
+  return providers.find((item) => item.configured && item.id !== "provider_deepseek")?.id
+    || providers.find((item) => item.configured)?.id;
+}
+
+function configuredProviders(providers: Provider[]) {
+  return providers.filter((item) => item.configured);
+}
+
+function selectedProviderId(task: Task, providers: Provider[]) {
+  if (task.providerId && providers.some((item) => item.id === task.providerId)) return task.providerId;
+  return preferredProviderId(providers) || "";
+}
+
 function WindowControls() {
   const bridge = window.axiomDesktop?.window;
   if (!bridge || window.axiomDesktop?.platform === "darwin") return null;
@@ -313,12 +329,12 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
           <div className="auth-heading">
           <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
           <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用管理后台分配的账号登录。Agent 只给出买卖建议，不会自动下单。</p>
+          <p>使用管理后台分配的账号登录。出现买卖建议时会弹窗确认，确认后才会下单。</p>
           </div>
           <div className="auth-safety">
             <ShieldCheck size={17} />
-            <div className="auth-safety-copy"><strong>只读建议模式</strong><span>仅采集、分析并输出决策，交易动作保持锁定。</span></div>
-            <code>LOCKED</code>
+            <div className="auth-safety-copy"><strong>确认后下单</strong><span>分析只出建议。实盘任务需你在弹窗里确认，才会在已登录页面提交订单。</span></div>
+            <code>CONFIRM</code>
           </div>
           {window.axiomDesktop && <div className="auth-service-settings">
             <div className="auth-service-summary"><span><ServerCog size={14} />服务地址</span><code>{serviceUrl}</code><button type="button" className="text-button" onClick={() => setServiceSettingsOpen((current) => !current)}>{serviceSettingsOpen ? "收起" : "设置"}</button></div>
@@ -330,7 +346,7 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
             {error && <div className="login-error auth-error"><AlertTriangle size={14} />{error}</div>}
             <button className="button button-primary auth-submit" type="submit" disabled={busy}><LogIn size={15} />{busy ? "验证中" : "登录任务工作台"}</button>
           </form>
-          <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台分配。API Key 仅保存在本地服务端。</span></div>
+          <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台分配。Provider 密钥加密后写入服务端数据库。</span></div>
         </section>
       </div>
     </>
@@ -449,7 +465,7 @@ function App() {
     try {
       const next = await startTask(task.id);
       replaceTask(next);
-      notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察（不会自动下单）" : "启动未通过，自动动作保持锁定");
+      notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察；出现建议时会弹窗确认" : "启动未通过，自动动作保持锁定");
     } catch (error) {
       notify(`启动失败：${error instanceof Error ? error.message : "请检查任务配置"}`);
     } finally { setBusyAction(null); }
@@ -463,7 +479,7 @@ function App() {
       replaceTask(next);
       notify("已停止自动控制，任务进入人工接管");
     } catch (error) {
-      notify(`停止失败：${error instanceof Error ? error.message : "服务端仍保持禁止下单"}`);
+      notify(`停止失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -491,13 +507,26 @@ function App() {
     } finally { setBusyAction(null); }
   }
 
+  async function handleSelectProvider(providerId: string) {
+    if (!task || !providerId) return;
+    setBusyAction("provider");
+    try {
+      const next = await setTaskProvider(task.id, providerId);
+      replaceTask(next);
+      const provider = workspace.providers.find((item) => item.id === next.providerId);
+      notify(provider ? `已切换到 ${provider.name}（${provider.model}）` : "已切换分析模型");
+    } catch (error) {
+      notify(`切换模型失败：${error instanceof Error ? error.message : "请选择已配置的 Provider"}`);
+    } finally { setBusyAction(null); }
+  }
+
   async function handleAutoDecisionToggle(enabled: boolean) {
     if (!task) return;
     setBusyAction("auto-decision");
     try {
       const next = await setAutoDecision(task.id, enabled, task.autoDecisionCountdownSec || 30);
       replaceTask(next);
-      notify(enabled ? `已打开自动决策：${next.autoDecisionCountdownSec || 30} 秒内可接管，超时后自动确认建议` : "已关闭自动决策，买入/卖出建议需你确认");
+      notify(enabled ? `已打开自动决策：${next.autoDecisionCountdownSec || 30} 秒内可接管，超时后自动确认建议（实盘仍需弹窗）` : "已关闭自动决策，买入/卖出建议需弹窗确认");
     } catch (error) {
       notify(`自动决策切换失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
@@ -509,9 +538,21 @@ function App() {
     try {
       const next = await confirmPendingAction(task.id);
       replaceTask(next);
-      notify(next.pendingAction?.message || "已确认建议，未提交交易单");
+      notify(next.pendingAction?.message || (next.mode === "LIVE" ? "已确认并提交订单" : "已确认建议"));
     } catch (error) {
       notify(`确认失败：${error instanceof Error ? error.message : "没有待确认建议"}`);
+    } finally { setBusyAction(null); }
+  }
+
+  async function handleCancelAction() {
+    if (!task) return;
+    setBusyAction("cancel");
+    try {
+      const next = await cancelPendingAction(task.id);
+      replaceTask(next);
+      notify(next.pendingAction?.message || "已取消本次建议，未下单");
+    } catch (error) {
+      notify(`取消失败：${error instanceof Error ? error.message : "没有待确认建议"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -532,15 +573,15 @@ function App() {
     setBusyAction("analyze");
     setStreamOpen(true);
     try {
-      const result = await analyzeTask(task.id);
+      const result = await analyzeTask(task.id, selectedProviderId(task, workspace.providers));
       replaceTask(result.task);
       if (result.output) setAgentLines(result.output);
       if (result.run) setAgentRuns((current) => [result.run!, ...current.filter((item) => item.id !== result.run!.id)]);
       const flags = result.task.decision.riskFlags || [];
       if (result.skipped) notify("上一轮分析仍在进行，已跳过本次触发");
-      else if (result.route === "SUGGESTION_PENDING") notify("分析完成：已给出建议，未执行买卖");
+      else if (result.route === "SUGGESTION_PENDING") notify(result.task.mode === "LIVE" ? "分析完成：请在弹窗中确认后才会下单" : "分析完成：已给出建议，观察模式不会下单");
       else if (result.task.status === "PAUSED" || result.task.status === "BLOCKED") notify(`分析暂停：${displayLabel(flags[0] || result.route || result.task.status, { ...riskLabels, ...routeLabels, ...statusMetaLabels }, "需要处理")}`);
-      else notify(`分析完成：${displaySuggestion(result.task.decision.action)}（未下单）`);
+      else notify(`分析完成：${displaySuggestion(result.task.decision.action)}`);
     } catch (error) {
       notify(`分析失败：${error instanceof Error ? error.message : "请检查目标连接与模型配置"}`);
     } finally { setBusyAction(null); }
@@ -610,9 +651,13 @@ function App() {
       const provider = await saveProvider(payload);
       setWorkspace((current) => ({ ...current, providers: [...current.providers.filter((item) => item.id !== provider.id), provider] }));
       setModal(null);
-      notify("Provider 已保存，密钥仅在服务端保存");
+      if (task) {
+        const next = await setTaskProvider(task.id, provider.id);
+        replaceTask(next);
+      }
+      notify(task ? `${provider.name} 已保存，并设为当前分析模型` : "Provider 已加密保存到你的桌面账号");
     } catch (error) {
-      notify(`保存失败：${error instanceof Error ? error.message : "需要管理后台权限"}`);
+      notify(`保存失败：${error instanceof Error ? error.message : "请检查接口地址、模型和密钥"}`);
     }
   }
 
@@ -622,7 +667,7 @@ function App() {
       setWorkspace((current) => ({ ...current, providers: current.providers.map((item) => item.id === next.id ? next : item) }));
       notify(`${next.name}：${displayLabel(next.status, providerStatusLabels, "待确认")}`);
     } catch (error) {
-      notify(`验证失败：${error instanceof Error ? error.message : "需要管理后台权限"}`);
+      notify(`验证失败：${error instanceof Error ? error.message : "请检查接口地址和密钥"}`);
     }
   }
 
@@ -681,15 +726,18 @@ function App() {
 
         <div className="content-scroll">
           {loadError && <div className="login-error page-error"><AlertTriangle size={14} />{loadError}</div>}
-          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={() => setStreamOpen(true)} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={() => setStreamOpen(true)} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView task={task} onCreate={() => setModal("task")} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} />}
-          {view === "connectors" && (task ? <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => setModal("provider")} onProviderTest={handleProviderTest} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
-          {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} />}
+          {view === "connectors" && (task ? <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => setModal("provider")} onProviderTest={handleProviderTest} onSelectProvider={handleSelectProvider} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
         </div>
       </main>
 
       {streamOpen && task && <AgentOutputDrawer task={task} lines={agentLines} runs={agentRuns} onClose={() => setStreamOpen(false)} />}
+      {task?.pendingAction && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
+        <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
+      )}
       {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} />}
       {modal === "skill" && <SkillModal onClose={() => setModal(null)} onSave={handleSkillSave} />}
       {modal === "provider" && <ProviderModal onClose={() => setModal(null)} onSave={handleProviderSave} />}
@@ -698,12 +746,14 @@ function App() {
   );
 }
 
-function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onManual, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onConfirmAction, onTakeoverAction }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onManual: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onConfirmAction: () => void; onTakeoverAction: () => void }) {
+function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onManual, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onSelectProvider, onConfirmAction, onTakeoverAction }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onManual: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onConfirmAction: () => void; onTakeoverAction: () => void }) {
   const pendingReview = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
+  const providers = configuredProviders(workspace.providers);
+  const currentProviderId = selectedProviderId(task, workspace.providers);
   return <>
     <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>观察与建议</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BarChart3 size={15} />{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><Play size={15} />{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
-    <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{task.monitoringEnabled && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{task.monitoringEnabled ? (task.status === "MONITORING" ? "Agent 正在持续读取行情，数据变化后启动新一轮分析" : "本轮出现问题，Agent 将继续重试，不会因单轮失败结束") : task.status === "MANUAL_CONTROL" ? "Agent 已释放控制权，账户由人工操作" : (task.decision.riskFlags || []).includes("REAUTH_REQUIRED") ? "登录态失效，需要重新登录" : "当前任务需要你的注意"}</span></div><div className="status-meta"><label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>自动决策 {task.autoDecisionEnabled ? "开" : "关"}</span></label><span><LockKeyhole size={13} />下单 已禁止</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.indexedChunks || 0} 个索引切片</span></div></section>
-    <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail="以目标页面为准" change={task.metrics.dayPnlPct ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.dayPnl ? formatCurrency(task.metrics.dayPnl) : "--"} detail="只读" change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change="观察" tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
+    <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{task.monitoringEnabled && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{task.monitoringEnabled ? (task.status === "MONITORING" ? "Agent 正在持续读取行情，数据变化后启动新一轮分析" : "本轮出现问题，Agent 将继续重试，不会因单轮失败结束") : task.status === "MANUAL_CONTROL" ? "Agent 已释放控制权，账户由人工操作" : (task.decision.riskFlags || []).includes("REAUTH_REQUIRED") ? "登录态失效，需要重新登录" : "当前任务需要你的注意"}</span></div><div className="status-meta"><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label>{task.mode !== "LIVE" && <label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>自动决策 {task.autoDecisionEnabled ? "开" : "关"}</span></label>}<span><LockKeyhole size={13} />{task.mode === "LIVE" ? "下单 确认后" : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.indexedChunks || 0} 个索引切片</span></div></section>
+    <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail="只读" change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change="观察" tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
     <div className="console-grid"><MarketPanel task={task} /><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} onManual={onManual} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} busyAction={busyAction} /></div>
     <WorkflowPanel task={task} onConnectorTest={onConnectorTest} busyAction={busyAction} />
     <RulesPanel rules={task.rules} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
@@ -765,7 +815,7 @@ function remainingSeconds(deadlineAt?: string | null) {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function PendingActionCard({ pending, busyAction, onConfirmAction, onTakeoverAction }: { pending: PendingAction; busyAction: string | null; onConfirmAction: () => void; onTakeoverAction: () => void }) {
+function PendingActionCard({ pending }: { pending: PendingAction }) {
   const [remain, setRemain] = useState(() => remainingSeconds(pending.deadlineAt));
   useEffect(() => {
     setRemain(remainingSeconds(pending.deadlineAt));
@@ -787,12 +837,7 @@ function PendingActionCard({ pending, busyAction, onConfirmAction, onTakeoverAct
         <span>建议量 {pending.suggestedQty ?? "--"}</span>
         <span>{pending.formFilled ? "表单已填写" : "表单未填写"}</span>
       </div>
-      {waiting ? (
-        <div className="decision-actions">
-          <button className="button button-primary button-full" onClick={onConfirmAction} disabled={busyAction !== null}><Check size={15} />{busyAction === "confirm" ? "确认中" : `确认${actionText}建议`}</button>
-          <button className="button button-quiet button-full" onClick={onTakeoverAction} disabled={busyAction !== null}><Hand size={15} />{busyAction === "takeover" ? "接管中" : "人工接管"}</button>
-        </div>
-      ) : null}
+      {waiting ? <p className="pending-action-hint">确认窗口已弹出，确认后才会下单。</p> : null}
     </div>
   );
 }
@@ -820,7 +865,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
       </div>
       <div className="invalidation"><AlertTriangle size={14} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
-      {pending ? <PendingActionCard pending={pending} busyAction={busyAction} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><Check size={15} />{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>买卖建议待处理，服务端不会创建订单或点击交易按钮</span></div>}
+      {pending ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><Check size={15} />{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.mode === "LIVE" ? "出现买卖建议时会弹窗确认，确认后才会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
     </section>
   );
 }
@@ -887,7 +932,7 @@ function WorkflowsView({ task, onCreate, onRun, onStop, busyAction }: { task: Ta
         <div className="large-flow">{task.workflow.map((step, index) => <div className={`large-step ${step.status}`} key={step.key}><div className="large-step-number">{step.status === "complete" ? <Check size={15} /> : index + 1}</div><div><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className="large-step-line" />}</div>)}</div>
         <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><Play size={15} />{busyAction === "start" ? "检查中" : "运行任务"}</>}</button></div>
       </div>
-      <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>服务端不会下单</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>只给出买卖建议，不点击交易控件</span></div></div></aside>
+      <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>{task.mode === "LIVE" ? "确认后下单" : "观察模式不下单"}</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>{task.mode === "LIVE" ? "分析不会自动下单，必须弹窗确认" : "只给出买卖建议，不提交实盘"}</span></div></div></aside>
     </section>
   </>;
 }
@@ -905,8 +950,8 @@ function SkillsView({ skills, rag, onCreate, onApprove }: { skills: Skill[]; rag
 function SummaryTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: string }) { return <article className="summary-tile"><span className={`summary-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong className="tabular">{value}</strong></div></article>; }
 function SkillRow({ skill, onApprove }: { skill: Skill; onApprove: (skill: Skill) => void }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{skill.chunks} 个切片</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div></div>; }
 
-function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderTest, busyAction }: { task: Task; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderTest: (provider: Provider) => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>网站、桌面 App 与 AI Provider 的凭据和权限边界。</p></div><button className="button button-primary" onClick={onProviderCreate}><Plus size={16} />添加 Provider</button></section><div className="connector-grid"><TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /><section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.map((provider) => <ProviderRow key={provider.id} provider={provider} onTest={onProviderTest} />)}</div><div className="provider-note"><ShieldCheck size={15} /><span>模型只能提出结构化意图，不能直接调用下单、提现或修改风控工具。</span></div></section></div><section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">模拟盘模式</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="直接提交订单" status="禁止" tone="red" /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section></>;
+function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderTest, onSelectProvider, busyAction }: { task: Task; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderTest: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; busyAction: string | null }) {
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号自己添加 Provider 和目标凭据。后台只管账号分配，看不到密钥。</p></div><button className="button button-primary" onClick={onProviderCreate}><Plus size={16} />添加 Provider</button></section><div className="connector-grid"><TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /><section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onSelect={onSelectProvider} busy={busyAction !== null} />)}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见。保存后可点「使用」作为本任务分析模型。</span></div></section></div><section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section></>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
@@ -923,19 +968,58 @@ function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task;
   return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={task.target.credentialStatus === "已托管" ? "已托管，留空以复用" : "只写入安全托管，不展示"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>密码写入本地加密 Vault；日志和模型上下文只使用 credentialRef。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><RefreshCw size={15} />{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
 }
 
-function ProviderRow({ provider, onTest }: { provider: Provider; onTest: (provider: Provider) => void }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className="provider-row"><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.configured ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><button className="button button-small button-quiet" onClick={() => onTest(provider)}><RefreshCw size={13} />验证</button></div>; }
+function ProviderRow({ provider, selected, onTest, onSelect, busy }: { provider: Provider; selected: boolean; onTest: (provider: Provider) => void; onSelect: (providerId: string) => void; busy: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.configured ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button className="button button-small button-quiet" onClick={() => onTest(provider)}><RefreshCw size={13} />验证</button></div></div>; }
 function PermissionItem({ icon, label, status, tone }: { icon: React.ReactNode; label: string; status: string; tone: string }) { return <div className="permission-item"><span className={`permission-icon ${tone}`}>{icon}</span><span>{label}</span><b className={`text-${tone}`}>{status}</b></div>; }
 function EyeIcon() { return <Eye size={16} />; }
 
-function RunsView({ runs, agentRuns }: { runs: Workspace["runs"]; agentRuns: AgentRun[] }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />可观测性</div><h1>运行记录</h1><p>每一轮分析、规则裁决和建议结果均可回放。</p></div></section><div className="run-summary"><SummaryTile label="Agent 运行" value={String(agentRuns.length)} icon={<Activity size={17} />} tone="green" /><SummaryTile label="总决策" value={runs.reduce((sum, run) => sum + run.decisions, 0).toString()} icon={<Bot size={17} />} tone="blue" /><SummaryTile label="交易订单" value="0" icon={<BarChart3 size={17} />} tone="muted" /><SummaryTile label="规则拦截" value={runs.reduce((sum, run) => sum + run.blocked, 0).toString()} icon={<ShieldCheck size={17} />} tone="amber" /></div><section className="panel runs-panel"><div className="panel-header"><div><div className="panel-kicker"><History size={14} />任务运行</div><h2>运行实例</h2></div></div><div className="run-table"><div className="table-head"><span>运行 ID</span><span>阶段</span><span>开始时间</span><span>建议</span><span>路由</span><span>状态</span></div>{agentRuns.length ? agentRuns.map((run) => <div className="run-row" key={run.id}><span className="run-id tabular">{run.id}</span><span>{displayLabel(run.currentStage, stageLabels, "其他阶段")}</span><span className="tabular">{formatTime(run.startedAt)}</span><span className="tabular">{run.finalAction ? displaySuggestion(run.finalAction) : "--"}</span><span className="tabular">{displayLabel(run.route, routeLabels, "仅输出建议")}</span><span className="approval-label">{displayLabel(run.status, runStatusLabels, "待确认")}</span></div>) : <div className="empty-state"><CircleDashed size={16} />还没有分析运行</div>}</div></section></>;
+function RunsView({ runs, agentRuns, orders = [] }: { runs: Workspace["runs"]; agentRuns: AgentRun[]; orders?: Workspace["orders"] }) {
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />可观测性</div><h1>运行记录</h1><p>每一轮分析、规则裁决和建议结果均可回放。</p></div></section><div className="run-summary"><SummaryTile label="Agent 运行" value={String(agentRuns.length)} icon={<Activity size={17} />} tone="green" /><SummaryTile label="总决策" value={runs.reduce((sum, run) => sum + run.decisions, 0).toString()} icon={<Bot size={17} />} tone="blue" /><SummaryTile label="交易订单" value={String(orders?.length || 0)} icon={<BarChart3 size={17} />} tone="muted" /><SummaryTile label="规则拦截" value={runs.reduce((sum, run) => sum + run.blocked, 0).toString()} icon={<ShieldCheck size={17} />} tone="amber" /></div><section className="panel runs-panel"><div className="panel-header"><div><div className="panel-kicker"><History size={14} />任务运行</div><h2>运行实例</h2></div></div><div className="run-table"><div className="table-head"><span>运行 ID</span><span>阶段</span><span>开始时间</span><span>建议</span><span>路由</span><span>状态</span></div>{agentRuns.length ? agentRuns.map((run) => <div className="run-row" key={run.id}><span className="run-id tabular">{run.id}</span><span>{displayLabel(run.currentStage, stageLabels, "其他阶段")}</span><span className="tabular">{formatTime(run.startedAt)}</span><span className="tabular">{run.finalAction ? displaySuggestion(run.finalAction) : "--"}</span><span className="tabular">{displayLabel(run.route, routeLabels, "仅输出建议")}</span><span className="approval-label">{displayLabel(run.status, runStatusLabels, "待确认")}</span></div>) : <div className="empty-state"><CircleDashed size={16} />还没有分析运行</div>}</div></section></>;
 }
 
-function TaskModal({ onClose, onCreate }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => void }) { const [name, setName] = useState("浩瀚数贸观察任务"); const [targetType, setTargetType] = useState("website"); const [targetName, setTargetName] = useState("浩瀚数贸"); const [url, setUrl] = useState("https://smyw.haohandahan.cn/client/#/transcc"); const [installPath, setInstallPath] = useState(""); const [appId, setAppId] = useState(""); const [accountLabel, setAccountLabel] = useState(""); const [symbol, setSymbol] = useState("DGJJ"); const [timeframe, setTimeframe] = useState("15m"); const [mode, setMode] = useState("PAPER"); return <ModalShell title="创建任务" subtitle="先保存配置，再执行启动前检查。当前版本只给出建议，不自动下单。" onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onCreate({ name, targetType, targetName, url, installPath, appId, accountLabel, symbol, timeframe, mode }); }}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><div className="form-row"><label>目标类型<select value={targetType} onChange={(event) => setTargetType(event.target.value)}><option value="website">网站</option><option value="app">桌面 App</option></select></label><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（当前仍禁止下单）</option></select></label></div><label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>{targetType === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label> : <><label>App 安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>账号标识<input value={accountLabel} onChange={(event) => setAccountLabel(event.target.value)} placeholder="登录后将脱敏显示" autoComplete="username" /></label><div className="modal-footnote"><LockKeyhole size={14} />密码和 API Key 在连接器页面托管，创建任务不会把明文写入任务配置。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose}>取消</button><button type="submit" className="button button-primary"><Plus size={15} />创建任务</button></div></form></ModalShell>; }
+function TaskModal({ onClose, onCreate }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => void }) { const [name, setName] = useState("浩瀚数贸观察任务"); const [targetType, setTargetType] = useState("website"); const [targetName, setTargetName] = useState("浩瀚数贸"); const [url, setUrl] = useState("https://smyw.haohandahan.cn/client/#/transcc"); const [installPath, setInstallPath] = useState(""); const [appId, setAppId] = useState(""); const [accountLabel, setAccountLabel] = useState(""); const [symbol, setSymbol] = useState("DGJJ"); const [timeframe, setTimeframe] = useState("15m"); const [mode, setMode] = useState("PAPER"); return <ModalShell title="创建任务" subtitle="先保存配置，再执行启动前检查。实盘任务出现建议时会弹窗，确认后才会下单。" onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onCreate({ name, targetType, targetName, url, installPath, appId, accountLabel, symbol, timeframe, mode }); }}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><div className="form-row"><label>目标类型<select value={targetType} onChange={(event) => setTargetType(event.target.value)}><option value="website">网站</option><option value="app">桌面 App</option></select></label><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label></div><label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>{targetType === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label> : <><label>App 安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>账号标识<input value={accountLabel} onChange={(event) => setAccountLabel(event.target.value)} placeholder="登录后将脱敏显示" autoComplete="username" /></label><div className="modal-footnote"><LockKeyhole size={14} />密码和 API Key 在连接器页面托管，创建任务不会把明文写入任务配置。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose}>取消</button><button type="submit" className="button button-primary"><Plus size={15} />创建任务</button></div></form></ModalShell>; }
 
 function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => void }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSave({ title: title || filename, kind, tags, content, filename }); }}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose}>取消</button><button type="submit" className="button button-primary" disabled={!content.trim()}><FileText size={15} />保存草稿</button></div></form></ModalShell>; }
 
-function ProviderModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => void }) { const [name, setName] = useState("自定义 OpenAI Compatible"); const [baseUrl, setBaseUrl] = useState(""); const [model, setModel] = useState(""); const [apiKey, setApiKey] = useState(""); return <ModalShell title="添加 AI Provider" subtitle="兼容 OpenAI Chat Completions 的服务均可接入。" onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSave({ name, baseUrl, model, apiKey }); }}><label>Provider 名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><label>Endpoint<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" type="url" /></label><div className="form-row"><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="model-name" /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="sk-..." type="password" autoComplete="new-password" /></label></div><div className="modal-footnote"><LockKeyhole size={14} />密钥只发送到本地 API 服务端，前端只显示脱敏预览。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose}>取消</button><button type="submit" className="button button-primary"><KeyRound size={15} />保存 Provider</button></div></form></ModalShell>; }
+function ProviderModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => void }) {
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [apiFormat, setApiFormat] = useState("auto");
+  return <ModalShell title="添加自己的 AI Provider" subtitle="每个桌面账号独立保存。密钥加密进数据库，后台管理员看不到明文。" onClose={onClose}><form className="modal-form" onSubmit={(event) => { event.preventDefault(); onSave({ name: name.trim() || "我的 Provider", baseUrl, model, apiKey, apiFormat: apiFormat === "auto" ? undefined : apiFormat }); }}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：天成 / DeepSeek / 自建网关" /></label><label>接口地址<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://ai.tiancheng.tcyun.net 或 https://api.deepseek.com/v1" type="url" required /></label><div className="form-row"><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-6-astra" required /></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)}><option value="auto">自动识别</option><option value="openai_responses">OpenAI Responses</option><option value="openai_chat">Chat Completions</option></select></label></div><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只保存在服务端" type="password" autoComplete="new-password" required /></label><div className="modal-footnote"><LockKeyhole size={14} />天成网关不要加 /v1，协议选 Responses。DeepSeek 等兼容接口用 Chat Completions，地址带 /v1。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose}>取消</button><button type="submit" className="button button-primary"><KeyRound size={15} />保存到我的账号</button></div></form></ModalShell>;
+}
+
+function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {
+  const live = task.mode === "LIVE";
+  const actionText = pending.action === "BUY" ? "买入" : "卖出";
+  const submitting = pending.status === "SUBMITTING" || busyAction === "confirm";
+  return (
+    <div className="modal-backdrop trade-confirm-backdrop" role="presentation">
+      <section className="modal-shell trade-confirm-shell" role="alertdialog" aria-modal="true" aria-labelledby="trade-confirm-title">
+        <div className="modal-header">
+          <div>
+            <h2 id="trade-confirm-title">确认{actionText}建议</h2>
+            <p>{live ? "确认后将在已登录的目标页面提交订单，分析过程不会自动下单。" : "观察模式只确认这条建议，不会提交实盘订单。"}</p>
+          </div>
+        </div>
+        <div className="trade-confirm-facts">
+          <div><span>品种</span><b>{task.market?.symbol || task.symbol}</b></div>
+          <div><span>方向</span><b>{actionText}</b></div>
+          <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
+          <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>
+        </div>
+        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{pending.action === "BUY" ? "买入订立" : "卖出转让"}。</span></div> : null}
+        <p className="trade-confirm-message">{pending.message}</p>
+        <div className="modal-actions trade-confirm-actions">
+          <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction !== null}>暂不下单</button>
+          <button type="button" className="button button-primary" onClick={onConfirm} disabled={busyAction !== null}>
+            <Check size={15} />{submitting ? "提交中" : live ? "确认并下单" : `确认${actionText}建议`}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
 
 function ModalShell({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) { return <div className="modal-backdrop" role="presentation"><section className="modal-shell" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-header"><div><h2 id="modal-title">{title}</h2><p>{subtitle}</p></div><IconButton label="关闭" onClick={onClose}><X size={17} /></IconButton></div>{children}</section></div>; }
 

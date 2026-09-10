@@ -1,0 +1,16 @@
+[Unit]
+Description=Axiom Agent API
+After=network.target mysql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/axiom-agent
+EnvironmentFile=/opt/axiom-agent/.env
+ExecStart=/usr/bin/node server/index.mjs
+Restart=on-failure
+RestartSec=3
+User=axiom
+Group=axiom
+
+[Install]
+WantedBy=multi-user.target

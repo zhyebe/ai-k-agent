@@ -5,6 +5,7 @@ release/
 .env
 .env.*
 !.env.example
+scripts/deploy.env
 *.vault.json
 .axiom-secret
 task_plan.md

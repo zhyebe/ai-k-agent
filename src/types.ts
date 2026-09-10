@@ -79,8 +79,8 @@ export interface Rule {
 export interface PendingAction {
   id: string;
   action: "BUY" | "SELL";
-  status: "WAITING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
-  source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | null;
+  status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
+  source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
   suggestedPrice: number | null;
   formFilled: boolean;
@@ -192,7 +192,16 @@ export interface MarketSnapshot {
   timeline?: { kind: string; source?: string; ticks: MarketTick[]; tickCount: number; dataAt?: string | null };
   page?: Record<string, unknown> | null;
   raw?: unknown;
-  account?: { availableFunds?: number | null; riskRate?: number | null };
+  account?: {
+    availableFunds?: number | null;
+    equity?: number | null;
+    riskRate?: number | null;
+    dayPnl?: number | null;
+    maxOrderQty?: number | null;
+    exposurePct?: number | null;
+    positionEmpty?: boolean;
+  };
+  pageView?: Record<string, unknown> | null;
 }
 
 export interface Task {
@@ -224,6 +233,7 @@ export interface Task {
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
   autoDecisionCountdownSec?: number;
+  providerId?: string;
   pendingAction?: PendingAction | null;
   activeRunId?: string | null;
   riskProfile: string;
@@ -281,6 +291,7 @@ export interface Provider {
   name: string;
   model: string;
   baseUrl: string;
+  apiFormat?: string;
   configured: boolean;
   keyPreview: string;
   status: string;

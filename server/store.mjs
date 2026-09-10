@@ -48,6 +48,7 @@ export function publicTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
+    providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
     target,
   };
@@ -77,20 +78,46 @@ export function publicProviderList(userId = "") {
     .map(publicProvider);
 }
 
-export function findProviderForUser(providerId = "provider_deepseek", userId = "") {
-  const requestedId = String(providerId || "provider_deepseek");
+export function findProviderForUser(providerId = "", userId = "") {
+  const requestedId = String(providerId || "");
   const normalizedUserId = String(userId || "");
-  const exact = state.providers.find((provider) => String(provider.id) === requestedId);
+  const exact = requestedId ? state.providers.find((provider) => String(provider.id) === requestedId) : null;
   if (exact?.ownerUserId && String(exact.ownerUserId) !== normalizedUserId) return null;
-  const owned = state.providers.find((provider) =>
+  const owned = requestedId ? state.providers.find((provider) =>
     String(provider.ownerUserId || "") === normalizedUserId
     && (String(provider.id) === requestedId || String(provider.providerKey || "") === requestedId),
-  );
+  ) : null;
   if (owned) return owned;
-  return state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === requestedId)
-    || state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === "provider_deepseek")
-    || state.providers.find((provider) => String(provider.ownerUserId || "") === normalizedUserId)
-    || null;
+  if (requestedId) {
+    return state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === requestedId)
+      || null;
+  }
+  return null;
+}
+
+function providerIsReady(provider) {
+  return Boolean(provider?.encryptedKey && provider?.baseUrl);
+}
+
+export function resolveDefaultProviderId(userId = "", preferredId = "") {
+  const preferred = String(preferredId || "").trim();
+  if (preferred) {
+    const found = findProviderForUser(preferred, userId);
+    if (found) return found.id;
+  }
+  const normalizedUserId = String(userId || "");
+  const candidates = state.providers.filter((provider) => {
+    if (!providerIsReady(provider)) return false;
+    const owner = String(provider.ownerUserId || "");
+    return !owner || owner === normalizedUserId;
+  });
+  const owned = candidates.find((provider) => String(provider.ownerUserId || "") === normalizedUserId && provider.id !== "provider_deepseek")
+    || candidates.find((provider) => String(provider.ownerUserId || "") === normalizedUserId);
+  if (owned) return owned.id;
+  const shared = candidates.find((provider) => !provider.ownerUserId && provider.id !== "provider_deepseek")
+    || candidates.find((provider) => !provider.ownerUserId);
+  if (shared) return shared.id;
+  return preferred || "provider_deepseek";
 }
 
 export const state = {
@@ -113,7 +140,7 @@ export const state = {
         accountLabel: "未配置",
         credentialStatus: "未配置",
         connectionStatus: "disconnected",
-        adapterStatus: "浩瀚数贸（网页只读） v1.0.0",
+        adapterStatus: "浩瀚数贸（网页） v1.0.0",
         discoveryStatus: "已发现",
       },
       riskProfile: "Balanced",
@@ -123,7 +150,7 @@ export const state = {
         { key: "collect", label: "数据采集", status: "pending", detail: "等待只读行情" },
         { key: "analyze", label: "趋势分析", status: "pending", detail: "等待触发" },
         { key: "rules", label: "规则裁决", status: "pending", detail: "等待当前轮次" },
-        { key: "action", label: "执行动作", status: "pending", detail: "默认只给出建议" },
+        { key: "action", label: "执行动作", status: "pending", detail: "建议需弹窗确认后才会下单" },
       ],
       rules: [
         { id: "rule_01", order: 1, name: "数据新鲜度 < 5 秒", mode: "AUTO", status: "standby", detail: "等待实时数据" },
@@ -150,6 +177,7 @@ export const state = {
       automationAuthorized: false,
       autoDecisionEnabled: false,
       autoDecisionCountdownSec: 30,
+      providerId: "",
       pendingAction: null,
       activeRunId: null,
       monitoringEnabled: false,
@@ -232,12 +260,12 @@ export const state = {
       adapterVersion: "1.0.0",
       status: "DISCOVERED",
       discoveryStatus: "已发现",
-      adapterStatus: "浩瀚数贸（网页只读） v1.0.0",
+      adapterStatus: "浩瀚数贸（网页） v1.0.0",
       reviewStatus: "APPROVED",
-      capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account"],
-      actionMapping: "只读建议，不提供动作映射",
-      executionModes: [],
-      liveExecution: false,
+      capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account", "submit_confirmed_trade"],
+      actionMapping: "确认后提交已登录会话订单",
+      executionModes: ["PAPER", "SHADOW", "LIVE"],
+      liveExecution: true,
       pathStatus: "unknown",
       discoveredAt: isoNow(),
     },
@@ -275,6 +303,7 @@ function sanitizeHydratedTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
+    providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
     monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : Boolean(task.monitoringEnabled),
     monitorGeneration: Number(task.monitorGeneration || 0),
@@ -355,12 +384,12 @@ export function hydrateState(snapshot) {
         adapterVersion: "1.0.0",
         status: "DISCOVERED",
         discoveryStatus: "已发现",
-        adapterStatus: "浩瀚数贸（网页只读） v1.0.0",
+        adapterStatus: "浩瀚数贸（网页） v1.0.0",
         reviewStatus: "APPROVED",
-        capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account"],
-        actionMapping: "只读建议，不提供动作映射",
-        executionModes: [],
-        liveExecution: false,
+        capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account", "submit_confirmed_trade"],
+        actionMapping: "确认后提交已登录会话订单",
+        executionModes: ["PAPER", "SHADOW", "LIVE"],
+        liveExecution: true,
         pathStatus: "unknown",
         discoveredAt: isoNow(),
       },

@@ -152,8 +152,16 @@ export async function setAutoDecision(taskId: string, enabled: boolean, countdow
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/auto-decision`, { method: "POST", body: JSON.stringify({ enabled, countdownSec }) })).task;
 }
 
+export async function setTaskProvider(taskId: string, providerId: string): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/provider`, { method: "POST", body: JSON.stringify({ providerId }) })).task;
+}
+
 export async function confirmPendingAction(taskId: string): Promise<Task> {
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/pending-action/confirm`, { method: "POST", body: "{}" })).task;
+}
+
+export async function cancelPendingAction(taskId: string): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/pending-action/cancel`, { method: "POST", body: "{}" })).task;
 }
 
 export async function takeoverPendingAction(taskId: string): Promise<Task> {
@@ -161,7 +169,7 @@ export async function takeoverPendingAction(taskId: string): Promise<Task> {
 }
 
 export async function analyzeTask(taskId: string, providerId?: string) {
-  return request<{ task: Task; run?: AgentRun; route?: string; output?: AgentOutputLine[]; skipped?: boolean }>(`/api/tasks/${taskId}/analyze`, { method: "POST", body: JSON.stringify({ providerId }) });
+  return request<{ task: Task; run?: AgentRun; route?: string; output?: AgentOutputLine[]; skipped?: boolean }>(`/api/tasks/${taskId}/analyze`, { method: "POST", body: JSON.stringify(providerId ? { providerId } : {}) });
 }
 
 export async function fetchAgentOutput(taskId: string, runId = "") {

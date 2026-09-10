@@ -24,13 +24,13 @@ registerConnectorAdapter({
   id: "haohan-readonly",
   version: "1.0.0",
   type: "website",
-  displayName: "浩瀚数贸（网页只读）",
+  displayName: "浩瀚数贸（网页）",
   reviewStatus: "APPROVED",
   match: ({ url }) => {
     try { return new URL(url).hostname === "smyw.haohandahan.cn"; } catch { return false; }
   },
-  capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account"],
-  executionModes: [],
+  capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account", "submit_confirmed_trade"],
+  executionModes: ["PAPER", "SHADOW", "LIVE"],
   dataSource: "browser-dom",
   manualLoginOnly: true,
   login: {
@@ -132,6 +132,7 @@ export function discoverConnector(input = {}) {
   if (!adapter) throw new Error("CONNECTOR_NOT_FOUND");
   const approved = adapter.reviewStatus === "APPROVED";
   const canPaperTrade = adapter.executionModes.includes("PAPER");
+  const canLiveTrade = adapter.executionModes.includes("LIVE");
   return {
     connectorId: `connector_${targetKey({ type, url: type === "website" ? target : "", installPath: type === "app" ? target : "" })}`,
     type,
@@ -144,9 +145,9 @@ export function discoverConnector(input = {}) {
     adapterStatus: approved ? `${adapter.displayName} v${adapter.version}` : "通用适配器待审核",
     reviewStatus: adapter.reviewStatus,
     capabilities: adapter.capabilities,
-    actionMapping: adapter.dataSource === "browser-dom" ? "只读建议，不提供动作映射" : canPaperTrade ? "模拟动作已映射" : "待目标适配器审核",
+    actionMapping: canLiveTrade ? "确认后提交已登录会话订单" : canPaperTrade ? "模拟动作已映射" : adapter.dataSource === "browser-dom" ? "只读建议，不提供动作映射" : "待目标适配器审核",
     executionModes: adapter.executionModes,
-    liveExecution: false,
+    liveExecution: canLiveTrade,
     pathStatus,
     discoveredAt: new Date().toISOString(),
   };

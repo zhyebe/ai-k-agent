@@ -6,9 +6,11 @@ test("discovers approved haohan readonly website adapter", () => {
   const profile = discoverConnector({ type: "website", url: "https://smyw.haohandahan.cn/client/#/transcc", name: "浩瀚数贸" });
   assert.equal(profile.adapterId, "haohan-readonly");
   assert.equal(profile.reviewStatus, "APPROVED");
-  assert.deepEqual(profile.executionModes, []);
-  assert.equal(adapterCanExecute(profile.adapterId, "PAPER"), false);
+  assert.deepEqual(profile.executionModes, ["PAPER", "SHADOW", "LIVE"]);
+  assert.equal(adapterCanExecute(profile.adapterId, "LIVE"), true);
+  assert.equal(profile.liveExecution, true);
   assert.ok(profile.capabilities.includes("read_visible_market"));
+  assert.ok(profile.capabilities.includes("submit_confirmed_trade"));
 });
 
 test("discovers approved demo website adapter", () => {

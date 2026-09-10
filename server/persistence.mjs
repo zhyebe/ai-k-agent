@@ -75,6 +75,7 @@ async function createMySqlAdapter() {
   await pool.query("ALTER TABLE skills ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN provider_key VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("ALTER TABLE providers ADD COLUMN api_format VARCHAR(32) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS connectors (
     connector_id VARCHAR(96) PRIMARY KEY,
     type VARCHAR(16) NOT NULL,
@@ -204,6 +205,7 @@ async function createMySqlAdapter() {
         analysisCoverage: task.analysisCoverage || null,
         autoDecisionEnabled: task.autoDecisionEnabled === true,
         autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
+        providerId: String(task.providerId || ""),
         pendingAction: task.pendingAction || null,
         market: task.market || null,
         activeRunId: task.activeRunId || null,
@@ -227,10 +229,10 @@ async function createMySqlAdapter() {
     },
     async saveProvider(provider) {
       await pool.execute(
-        `INSERT INTO providers (id, owner_user_id, provider_key, name, model, base_url, encrypted_key, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), provider_key=VALUES(provider_key), name=VALUES(name), model=VALUES(model), base_url=VALUES(base_url), encrypted_key=VALUES(encrypted_key), status=VALUES(status), updated_at=NOW()`,
-        [provider.id, provider.ownerUserId || "", provider.providerKey || provider.id, provider.name, provider.model, provider.baseUrl, provider.encryptedKey || "", provider.status || "未验证"],
+        `INSERT INTO providers (id, owner_user_id, provider_key, name, model, base_url, api_format, encrypted_key, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), provider_key=VALUES(provider_key), name=VALUES(name), model=VALUES(model), base_url=VALUES(base_url), api_format=VALUES(api_format), encrypted_key=VALUES(encrypted_key), status=VALUES(status), updated_at=NOW()`,
+        [provider.id, provider.ownerUserId || "", provider.providerKey || provider.id, provider.name, provider.model, provider.baseUrl, provider.apiFormat || "", provider.encryptedKey || "", provider.status || "未验证"],
       );
     },
     async saveConnector(connector) {
@@ -353,6 +355,7 @@ async function createMySqlAdapter() {
             analysisCoverage: runtime.analysisCoverage || null,
             autoDecisionEnabled: runtime.autoDecisionEnabled === true,
             autoDecisionCountdownSec: Number(runtime.autoDecisionCountdownSec || 30),
+            providerId: String(runtime.providerId || ""),
             pendingAction: runtime.pendingAction || null,
             market: runtime.market,
             activeRunId: runtime.activeRunId,
@@ -360,7 +363,7 @@ async function createMySqlAdapter() {
           };
         }),
         skills: skillRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", title: row.title, kind: row.kind, source: row.source, status: row.status, version: row.version, tags: parse(row.tags_json, []), chunks: row.chunk_count || 0, updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || new Date().toISOString()), summary: String(row.content || "").slice(0, 120), content: row.content })),
-        providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, baseUrl: row.base_url, encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
+        providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, baseUrl: row.base_url, apiFormat: row.api_format || "", encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
         connectors: connectorRows.map((row) => parse(row.profile_json, { connectorId: row.connector_id, type: row.type, target: row.target_value, name: row.name, adapterId: row.adapter_id, adapterVersion: row.adapter_version, status: row.status })),
         orders: orderRows.map((row) => parse(row.order_json, { id: row.id, idempotencyKey: row.idempotency_key, taskId: row.task_id, symbol: row.symbol, action: row.action, mode: row.mode, status: row.status })),
         events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean),

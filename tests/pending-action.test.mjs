@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
-import { buildPendingAction, confirmPendingAction, setAutoDecision, takeoverPendingAction } from "../server/engine.mjs";
+import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, takeoverPendingAction } from "../server/engine.mjs";
 import { isForbiddenTradeControl, suggestionFormLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
 
@@ -50,12 +50,12 @@ test("forbidden trade controls stay blocked for submit labels", () => {
   assert.deepEqual(suggestionFormLabels("SELL"), { price: "卖价", quantity: "卖量" });
 });
 
-test("pending buy waits for confirm, confirm does not create an order", () => {
+test("pending buy waits for confirm, paper confirm does not create an order", async () => {
   const task = insertTask(`task_pending_${Date.now()}`);
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(task.pendingAction.deadlineAt, null);
-  const confirmed = confirmPendingAction(task.id, { source: "manual_confirm" });
+  const confirmed = await confirmPendingAction(task.id, { source: "manual_confirm" });
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
   assert.equal(confirmed.pendingAction.source, "manual_confirm");
   assert.equal(confirmed.pendingAction.formSubmitBlocked, true);
@@ -68,7 +68,7 @@ test("auto decision countdown confirms suggestion without submitting a trade", a
   task.pendingAction = buildPendingAction(task, task.decision, { now: Date.now() - 6000 });
   assert.equal(task.pendingAction.status, "WAITING");
   assert.ok(task.pendingAction.deadlineAt);
-  const confirmed = confirmPendingAction(task.id, { source: "auto_timeout" });
+  const confirmed = await confirmPendingAction(task.id, { source: "auto_timeout" });
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
   assert.equal(confirmed.pendingAction.source, "auto_timeout");
   assert.match(confirmed.pendingAction.message, /未提交交易单/);
@@ -83,5 +83,53 @@ test("takeover cancels pending auto confirm and locks trading", () => {
   assert.equal(next.pendingAction.status, "TAKEN_OVER");
   assert.equal(next.status, "MANUAL_CONTROL");
   assert.equal(next.stopLocked, true);
+  assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});
+
+test("live suggestion waits for the confirm dialog and does not auto-submit", () => {
+  const task = insertTask(`task_live_wait_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  assert.equal(task.pendingAction.status, "WAITING");
+  assert.equal(task.pendingAction.deadlineAt, null);
+  assert.match(task.pendingAction.message, /弹窗/);
+});
+
+test("live confirm submits only after the user confirms", async () => {
+  const task = insertTask(`task_live_confirm_${Date.now()}`, { mode: "LIVE" });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let submitted = 0;
+  const confirmed = await confirmPendingAction(task.id, {
+    source: "manual_confirm",
+    runtime: {
+      submitSuggestionForm: async () => {
+        submitted += 1;
+        return { ok: true, submitted: true, code: "TRADE_SUBMITTED", message: "已提交交易请求" };
+      },
+    },
+  });
+  assert.equal(submitted, 1);
+  assert.equal(confirmed.pendingAction.status, "CONFIRMED");
+  assert.equal(confirmed.pendingAction.formSubmitBlocked, false);
+  assert.match(confirmed.pendingAction.message, /已确认并提交/);
+  const orders = state.orders.filter((order) => order.taskId === task.id);
+  assert.equal(orders.length, 1);
+  assert.equal(orders[0].status, "submitted");
+  assert.equal(orders[0].action, "BUY");
+});
+
+test("live auto timeout cannot skip the confirm dialog", async () => {
+  const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /LIVE_REQUIRES_MANUAL_CONFIRM/);
+  assert.equal(task.pendingAction.status, "WAITING");
+  assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});
+
+test("cancel pending keeps monitoring and does not create an order", () => {
+  const task = insertTask(`task_cancel_${Date.now()}`, { mode: "LIVE" });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  const next = cancelPendingAction(task.id);
+  assert.equal(next.pendingAction.status, "CANCELLED");
+  assert.equal(next.stopLocked, false);
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });

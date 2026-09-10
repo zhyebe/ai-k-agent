@@ -33,8 +33,11 @@ function escapeRegExp(value) {
 
 function labeledValue(text, labels) {
   for (const label of labels) {
-    const match = String(text || "").match(new RegExp(`${escapeRegExp(label)}\\s*[:：]?\\s*(--|[-+]?\\d[\\d,]*(?:\\.\\d+)?%?)`, "i"));
-    if (match && match[1] !== "--") return finiteNumber(match[1]);
+    const match = String(text || "").match(new RegExp(`${escapeRegExp(label)}\\s*[:：]?\\s*(--|[-+]?\\d[\\d,]*(?:\\.\\d+)?)\\s*(万|元|%)?`, "i"));
+    if (!match || match[1] === "--") continue;
+    const parsed = finiteNumber(match[1]);
+    if (parsed === null) continue;
+    return match[2] === "万" ? parsed * 10000 : parsed;
   }
   return null;
 }
@@ -215,18 +218,103 @@ export function extractHaohanPageInstrument(snapshot = {}) {
   for (const line of lines) {
     const pipeMatch = line.match(/(?:^|\s)([A-Z][A-Z0-9_-]{1,15})\s*\|\s*([^|]{2,100})/);
     if (pipeMatch) {
-      detected = { symbol: pipeMatch[1], symbolName: pipeMatch[2].trim() };
-      break;
+      const symbolName = pipeMatch[2].trim();
+      detected = { symbol: pipeMatch[1], symbolName: symbolName === "F10" ? detected.symbolName : symbolName };
+      if (symbolName !== "F10") break;
     }
-    const productMatch = line.match(/(?:^|\s)商品\s+([A-Z][A-Z0-9_-]{1,15})\s+(.{2,100}?)(?=\s+(?:订立|转让|买价|买量|买入|卖出)\b|$)/);
+    const productMatch = line.match(/(?:^|\s)商品\s+([A-Z][A-Z0-9_-]{1,15})\s+(.{2,100}?)(?=\s+(?:订立|转让|买价|买量|买入|卖出|F10)\b|$)/);
     if (productMatch) {
       detected = { symbol: productMatch[1], symbolName: productMatch[2].trim() };
       break;
     }
   }
+  const collapsed = String(source).replace(/\s+/g, " ");
+  if (!detected.symbol) {
+    const f10Match = collapsed.match(/\b([A-Z][A-Z0-9_-]{1,15})\s*\|\s*F10\b/);
+    if (f10Match) detected.symbol = f10Match[1];
+  }
+  if (!detected.symbolName) {
+    const titleName = String(snapshot.title || "").match(/\d+(?:\.\d+)?\s+([^\s].+?)\s+浩瀚/);
+    if (titleName) detected.symbolName = titleName[1].trim();
+  }
   return {
     symbol: detected.symbol,
     symbolName: detected.symbolName,
+  };
+}
+
+export function parseHaohanAccount(visibleText) {
+  const availableFunds = labeledValue(visibleText, ["可用资金"]);
+  const equity = labeledValue(visibleText, ["账户权益", "客户权益", "动态权益"]) ?? availableFunds;
+  const realtimeValueChange = labeledValue(visibleText, ["实时货值变化"]);
+  const valueChange = labeledValue(visibleText, ["货值变化"]);
+  const dayPnl = labeledValue(visibleText, ["今日盈亏", "当日盈亏"]) ?? valueChange ?? realtimeValueChange;
+  const riskRate = labeledValue(visibleText, ["风险率"]);
+  const positionEmpty = /持仓明细/.test(visibleText) && /暂无数据/.test(visibleText);
+  return {
+    availableFunds: round(availableFunds, 2),
+    equity: round(equity, 2),
+    riskRate: round(riskRate, 4),
+    dayPnl: round(dayPnl, 2),
+    realtimeValueChange: round(realtimeValueChange, 2),
+    valueChange: round(valueChange, 2),
+    maxOrderQty: round(labeledValue(visibleText, ["最大下单量"]), 4),
+    deposit: round(labeledValue(visibleText, ["订金"]), 2),
+    positionEmpty,
+    exposurePct: positionEmpty ? 0 : null,
+  };
+}
+
+function parseHaohanPageQuote(visibleText) {
+  return {
+    price: round(labeledValue(visibleText, ["最新价", "当前价", "现价"]), 6),
+    changePct: round(labeledValue(visibleText, ["涨跌幅"]), 4),
+    change: round(labeledValue(visibleText, ["涨跌"]), 6),
+    open: round(labeledValue(visibleText, ["开盘价", "开盘"]), 6),
+    high: round(labeledValue(visibleText, ["最高价", "最高"]), 6),
+    low: round(labeledValue(visibleText, ["最低价", "最低"]), 6),
+    settlement: round(labeledValue(visibleText, ["结算价"]), 6),
+    prevClose: round(labeledValue(visibleText, ["昨收价", "昨收"]), 6),
+    prevSettle: round(labeledValue(visibleText, ["昨结价", "昨结"]), 6),
+    limitUp: round(labeledValue(visibleText, ["涨停价"]), 6),
+    limitDown: round(labeledValue(visibleText, ["跌停价"]), 6),
+    inventory: round(labeledValue(visibleText, ["存货量"]), 4),
+    positionChange: round(labeledValue(visibleText, ["仓差"]), 4),
+    outerVolume: round(labeledValue(visibleText, ["外盘"]), 4),
+    innerVolume: round(labeledValue(visibleText, ["内盘"]), 4),
+    currentVolume: round(labeledValue(visibleText, ["现量"]), 4),
+    amplitude: round(labeledValue(visibleText, ["振幅"]), 4),
+    avgPrice: round(labeledValue(visibleText, ["均价"]), 6),
+  };
+}
+
+const ORDER_BOOK_LEVELS = Object.freeze({ "①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6 });
+
+export function parseHaohanOrderBook(visibleText) {
+  const asks = [];
+  const bids = [];
+  const pattern = /(销售|采购)([①②③④⑤⑥1-6])\s+(\d+(?:\.\d+)?)\s+(\d+)/g;
+  for (const match of String(visibleText || "").matchAll(pattern)) {
+    const level = { level: ORDER_BOOK_LEVELS[match[2]] || Number(match[2]), price: Number(match[3]), volume: Number(match[4]) };
+    if (match[1] === "销售") asks.push(level);
+    else bids.push(level);
+  }
+  asks.sort((left, right) => left.level - right.level);
+  bids.sort((left, right) => left.level - right.level);
+  return { asks, bids };
+}
+
+export function accountMetricsFromMarket(account = {}, current = {}) {
+  const availableFunds = finiteNumber(account.availableFunds);
+  const equity = finiteNumber(account.equity) ?? availableFunds ?? finiteNumber(current.equity) ?? 0;
+  const dayPnl = finiteNumber(account.dayPnl ?? account.valueChange) ?? finiteNumber(current.dayPnl) ?? 0;
+  const exposurePct = finiteNumber(account.exposurePct) ?? finiteNumber(current.exposurePct) ?? 0;
+  return {
+    equity,
+    dayPnl,
+    dayPnlPct: equity ? Number(((dayPnl / equity) * 100).toFixed(4)) : finiteNumber(current.dayPnlPct) ?? 0,
+    exposurePct,
+    riskBudgetPct: finiteNumber(current.riskBudgetPct) ?? 100,
   };
 }
 
@@ -240,6 +328,10 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   if (/#\/login(?:\?|$)/.test(String(snapshot.url || "")) || (!/最新价/.test(visibleText) && /登录|密码登录/.test(visibleText))) {
     return { ok: false, code: "REAUTH_REQUIRED", message: "目标网页登录态已失效，需要重新登录", page: { url: pageUrl, title, instrument }, instrument, observedAt: new Date(capturedAt).toISOString(), executionEnabled: false };
   }
+  const account = parseHaohanAccount(visibleText);
+  const pageQuote = parseHaohanPageQuote(visibleText);
+  const orderBook = parseHaohanOrderBook(visibleText);
+  const pageView = { quote: pageQuote, orderBook, account };
   if (instrument.symbol && symbol && normalize(instrument.symbol) !== normalize(symbol)) {
     return {
       ok: false,
@@ -249,21 +341,22 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
       instrument,
       requestedSymbol: String(symbol),
       executionEnabled: false,
+      account,
+      pageView,
+      quote: pageQuote,
     };
   }
   const resolvedSymbol = instrument.symbol || String(symbol || "");
   const resolvedSymbolName = instrument.symbolName || String(snapshot.symbolName || "").slice(0, 120);
 
-  const price = positiveNumber(labeledValue(visibleText, ["最新价", "当前价", "现价"]));
-  const changePct = labeledValue(visibleText, ["涨跌幅"]);
-  const open = positiveNumber(labeledValue(visibleText, ["开盘价", "开盘"]));
-  const high = positiveNumber(labeledValue(visibleText, ["最高价", "最高"]));
-  const low = positiveNumber(labeledValue(visibleText, ["最低价", "最低"]));
-  const settlement = labeledValue(visibleText, ["结算价"]);
-  const inventory = labeledValue(visibleText, ["存货量"]);
-  const positionChange = labeledValue(visibleText, ["仓差"]);
-  const availableFunds = labeledValue(visibleText, ["可用资金"]);
-  const riskRate = labeledValue(visibleText, ["风险率"]);
+  const price = positiveNumber(pageQuote.price);
+  const changePct = pageQuote.changePct;
+  const open = positiveNumber(pageQuote.open);
+  const high = positiveNumber(pageQuote.high);
+  const low = positiveNumber(pageQuote.low);
+  const settlement = pageQuote.settlement;
+  const inventory = pageQuote.inventory;
+  const positionChange = pageQuote.positionChange;
   const closed = /(?:^|\s)闭市(?:\s|$)/.test(visibleText);
   const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];
   const chartSamples = Array.isArray(snapshot.chartSamples) ? snapshot.chartSamples : [];
@@ -324,7 +417,8 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
     dataQuality: missingFields.length ? "LIMITED" : "VERIFIED",
     missingFields,
     marketClosed: closed,
-    account: { availableFunds: round(availableFunds, 2), riskRate: round(riskRate, 4) },
+    account,
+    pageView,
     historyCount: candles.length,
     contentFingerprint,
     evidenceId,

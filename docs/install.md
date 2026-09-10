@@ -1,4 +1,6 @@
-# 部署与安装
+# 本地安装与试运行
+
+生产上线（拓扑、环境变量、MySQL、systemd、Nginx、桌面端对接、发布与排障）见 [deploy.md](./deploy.md)。
 
 Axiom 用户端是 Electron 桌面应用，后台管理是浏览器访问的 B/S 页面。当前版本只做到浏览目标、采集数据、分析趋势并给出买卖建议；服务端全局禁止创建订单、撤单、提现和点击目标网站的买入/卖出按钮。
 
@@ -21,7 +23,7 @@ cp .env.example .env
 - `APP_SECRET`
 - `ADMIN_PASSWORD`
 - `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`（首次启动会创建桌面用户，并分配已有任务）
-- `DEEPSEEK_API_KEY`（或在桌面端连接器页面保存任意 OpenAI Compatible Provider）
+- `DEEPSEEK_API_KEY`（可选。仅在数据库里还没有 DeepSeek 密钥时，加密写入 MySQL `providers.encrypted_key`。日常请在桌面端「连接器」保存 Provider，不要把业务密钥长期放在 `.env`）
 
 浏览器白名单需包含目标域名，例如：
 
@@ -50,13 +52,15 @@ MongoDB 执行 `db/mongo/indexes.js`，并设置 `DB_MODE=mongo`。
 
 登录态保存在 `user_sessions`。会话过期后，桌面端需要重新登录；分析过程若发现目标网站回到登录页，会使用托管凭据自动填充并提交登录，但不会提交买卖表单。
 
+AI Provider 保存在 `providers` 表：API Key 用 `APP_SECRET` 做 AES-256-GCM 加密后写入 `encrypted_key`，接口只返回脱敏预览。不要把业务密钥提交到 Git。
+
 ## 3.1 持续监控生命周期
 
 「开始观察」只创建后台监控控制器，不代表只执行一次。服务端在任务进程中持续运行，直到用户点击「停止观察」或任务被明确切换为人工接管：
 
 1. 启动后立即执行首轮连接、登录、只读采集和分析。
 2. 首轮完成后按轮询间隔再次读取目标页面和只读行情；浏览器会话复用，不因每轮检查主动刷新登录态。
-3. 每次采集包含主周期历史 K 线、配置的全部分钟/小时/日/周/月周期、实时逐笔数据、页面可见字段和账户只读字段。周期由 `HAOHAN_ANALYSIS_TIMEFRAMES` 控制，历史根数由 `HAOHAN_KLINE_COUNT` 控制。
+3. 每次采集包含主周期历史 K 线、配置周期（默认 `1m,1h,1d,1mo`）、实时逐笔、页面可见字段和账户只读字段。周期由 `HAOHAN_ANALYSIS_TIMEFRAMES` 控制，历史根数由 `HAOHAN_KLINE_COUNT` 控制。交给模型前会按上海时区再分层：近 1 小时用分钟 K，1 小时前至昨天 00:00 用小时 K，昨天之前至上个月用日 K，上月以前用月 K；秒级逐笔不会进入模型上下文。
 4. 服务端对规范化行情计算指纹。行情未变化时只记录一次检查并跳过模型请求；首次检查、上次模型失败或指纹变化时，才把当前完整快照交给 AI，并附带最近监控轮次作为多轮上下文。
 5. 网络、登录或模型异常不会结束任务。控制器使用退避后继续重试；`monitoringEnabled=true` 时，即使界面状态显示「已暂停」，后台仍会继续只读监测，直到用户停止。
 6. 点击「停止观察」会写入停止锁、清除下一次定时器。正在执行的轮次结束后也不能创建新轮次、订单或交易写请求。
@@ -96,4 +100,4 @@ npm run dist:mac
 npm run dist:win
 ```
 
-安装包输出到 `release/`。GitHub Release 与自动更新见仓库 README。未签名的 macOS 包只适合本机测试。
+安装包输出到 `release/`。GitHub Release、Nginx 与 systemd 见 [deploy.md](./deploy.md) 与仓库 README。未签名的 macOS 包只适合本机测试。

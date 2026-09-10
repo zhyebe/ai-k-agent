@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
@@ -23,6 +23,8 @@
     "check": "npm run typecheck && npm run build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:bootstrap": "bash scripts/bootstrap-server.sh",
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",

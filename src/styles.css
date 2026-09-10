@@ -222,12 +222,26 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .auto-decision-switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 11px; white-space: nowrap; }
 .auto-decision-switch.on { color: var(--green); }
 .auto-decision-switch input { accent-color: var(--green); }
+.provider-switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted-strong); font-size: 11px; }
+.provider-switch select { min-width: 168px; max-width: 240px; min-height: 28px; padding: 0 8px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
+.provider-row.selected { background: var(--blue-soft); border-radius: 6px; padding-right: 8px; padding-left: 8px; }
+.provider-actions { display: inline-flex; align-items: center; gap: 6px; }
 .pending-action-card { margin: 14px 18px 0; padding: 12px; background: var(--amber-soft); border: 1px solid rgba(233, 184, 109, 0.24); border-radius: 6px; }
 .pending-action-card.waiting { background: rgba(126, 185, 238, 0.08); border-color: rgba(126, 185, 238, 0.28); }
 .pending-action-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .pending-action-head strong { font-size: 13px; }
 .pending-action-card p { margin: 8px 0 0; color: var(--muted-strong); font-size: 11px; line-height: 1.45; }
 .pending-action-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 10px; }
+.pending-action-hint { margin: 10px 0 0; color: var(--blue); font-size: 11px; }
+.trade-confirm-backdrop { z-index: 25; }
+.trade-confirm-shell { width: min(480px, 100%); }
+.trade-confirm-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 20px 0; }
+.trade-confirm-facts div { padding: 10px; background: var(--surface-raised); border: 1px solid var(--border-soft); border-radius: 6px; }
+.trade-confirm-facts span { display: block; color: var(--muted); font-size: 10px; }
+.trade-confirm-facts b { display: block; margin-top: 6px; color: var(--text-strong); font-size: 16px; font-weight: 600; }
+.trade-confirm-warn { margin: 14px 20px 0; }
+.trade-confirm-message { margin: 12px 20px 0; color: var(--muted-strong); font-size: 11px; line-height: 1.5; }
+.trade-confirm-actions { margin: 16px 20px 20px; }
 .countdown-display { min-width: 36px; color: var(--amber); font-size: 16px; font-weight: 700; }
 
 .workflow-panel { margin-bottom: 16px; padding-bottom: 18px; }.workflow-rail { display: flex; align-items: flex-start; padding: 22px 20px 3px; }.workflow-step { position: relative; display: flex; align-items: flex-start; gap: 8px; min-width: 0; flex: 1; }.workflow-node { display: grid; place-items: center; width: 24px; height: 24px; flex: 0 0 auto; color: #6e7a85; background: var(--surface-soft); border: 1px solid var(--border); border-radius: 50%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }.workflow-step.complete .workflow-node { color: #0d1a10; background: var(--green); border-color: var(--green); }.workflow-step.active .workflow-node { color: var(--blue); background: var(--blue-soft); border-color: var(--blue); }.node-pulse { width: 7px; height: 7px; background: var(--blue); border-radius: 50%; box-shadow: 0 0 0 4px rgba(126, 185, 238, 0.13); }.workflow-copy { min-width: 0; padding-top: 2px; }.workflow-copy strong, .workflow-copy span { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.workflow-copy strong { color: var(--muted-strong); font-size: 11px; font-weight: 600; }.workflow-step.active .workflow-copy strong { color: var(--text); }.workflow-copy span { margin-top: 5px; color: var(--muted); font-size: 9px; }.workflow-connector { height: 1px; min-width: 14px; flex: 1; margin: 12px 8px 0 5px; background: var(--border); }.workflow-connector.complete { background: rgba(111, 219, 138, 0.55); }

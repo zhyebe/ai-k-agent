@@ -1,8 +1,23 @@
 import { addEvent } from "./store.mjs";
 
 export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValuePct: 8 });
-export const tradingExecutionPolicy = Object.freeze({ enabled: false, mode: "SUGGESTION_ONLY" });
+export const tradingExecutionPolicy = Object.freeze({ enabled: false, mode: "CONFIRM_THEN_SUBMIT" });
 export const DEFAULT_AUTO_DECISION_COUNTDOWN_SEC = 30;
+
+export function isTradingSwitchOn() {
+  return process.env.AXIOM_TRADING_ENABLED !== "0";
+}
+
+export function isLiveTask(task) {
+  return String(task?.mode || "") === "LIVE";
+}
+
+export function shouldSubmitLiveOrder(task, source = "manual_confirm") {
+  return isLiveTask(task)
+    && source === "manual_confirm"
+    && task?.stopLocked !== true
+    && isTradingSwitchOn();
+}
 
 export function suggestOrderPreview(task, decision) {
   const price = Number(task?.market?.latest?.price);
@@ -32,15 +47,26 @@ export function suggestOrderPreview(task, decision) {
 
 export function executeDecision(task, decision, connector) {
   if (task.stopLocked) return { ok: false, code: "STOP_LOCKED", message: "任务已停止，服务端禁止新动作" };
-  if (decision.action === "HOLD") return { ok: true, skipped: true, reason: "HOLD", route: "HOLD", executionEnabled: tradingExecutionPolicy.enabled, orderCreated: false };
+  if (decision.action === "HOLD") return { ok: true, skipped: true, reason: "HOLD", route: "HOLD", executionEnabled: false, orderCreated: false };
   const preview = suggestOrderPreview(task, decision);
-  addEvent("automation_disabled", "买卖意图已记录为待确认建议，服务端禁止创建订单、调用交易写接口或点击交易控件", { taskId: task.id, action: decision.action, mode: task.mode, automationAuthorized: task.automationAuthorized === true, autoDecisionEnabled: task.autoDecisionEnabled === true });
+  const live = isLiveTask(task) && isTradingSwitchOn();
+  addEvent("suggestion_ready", live
+    ? "买卖建议已生成，等待弹窗确认后才会下单"
+    : "买卖建议已生成，等待确认；当前模式不会提交实盘", {
+    taskId: task.id,
+    action: decision.action,
+    mode: task.mode,
+    connectorId: connector?.adapterId || "",
+    autoDecisionEnabled: task.autoDecisionEnabled === true,
+  });
   return {
-    ok: false,
-    code: "TRADING_DISABLED",
-    message: "建议已生成，等待确认提交；测试阶段不会点击交易按钮",
+    ok: true,
+    skipped: true,
+    reason: "PENDING_CONFIRM",
+    code: "SUGGESTION_PENDING",
+    message: live ? "建议已生成，等待弹窗确认后下单" : "建议已生成，等待确认；观察模式不会下单",
     route: "SUGGESTION_PENDING",
-    executionEnabled: tradingExecutionPolicy.enabled,
+    executionEnabled: false,
     orderCreated: false,
     writeRequestSent: false,
     action: decision.action,

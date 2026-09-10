@@ -1,18 +1,19 @@
 import { requestDecision, requestSegmentReview } from "./provider.mjs";
-import { buildMarketAnalysisSegments, compactSegmentReview, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
+import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { searchKnowledge } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { observeMarket, openMarketBrowser } from "./market.mjs";
-import { browserLogin, browserLoginStatus, fillSuggestionForm } from "./tools.mjs";
+import { browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm } from "./tools.mjs";
 import { credentialExists } from "./vault.mjs";
-import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistTask, startAgentRun, state } from "./store.mjs";
+import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
 import { userIdsForTask } from "./users.mjs";
-import { HAO_HAN_TARGET_URL } from "./haohan.mjs";
+import { accountMetricsFromMarket, HAO_HAN_TARGET_URL } from "./haohan.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
 const controllerLoops = new Map();
 const pendingActionTimers = new Map();
+const pendingConfirmLocks = new Set();
 const DEFAULT_MONITOR_POLL_MS = 5000;
 const MAX_MONITOR_POLL_MS = 120000;
 
@@ -50,13 +51,20 @@ function resolveRuntime(overrides = {}) {
     requestSegmentReview: use("requestSegmentReview", requestSegmentReview),
     executeDecision: use("executeDecision", executeDecision),
     fillSuggestionForm: use("fillSuggestionForm", fillSuggestionForm),
+    submitSuggestionForm: use("submitSuggestionForm", submitSuggestionForm),
   };
+}
+
+function pendingWaitMessage(task, { auto = false, countdownSec = 0 } = {}) {
+  if (isLiveTask(task)) return "请在弹窗中确认后才会下单";
+  if (auto) return `${countdownSec} 秒内可人工接管；超时后自动确认建议，观察模式不会下单`;
+  return "请在弹窗中确认建议；观察模式不会下单";
 }
 
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const preview = suggestOrderPreview(task, decision);
   const countdownSec = Math.max(5, Math.min(300, Number(task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC)));
-  const auto = task.autoDecisionEnabled === true;
+  const auto = !isLiveTask(task) && task.autoDecisionEnabled === true;
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
@@ -71,7 +79,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     deadlineAt: auto ? new Date(now + countdownSec * 1000).toISOString() : null,
     countdownSec: auto ? countdownSec : 0,
     resolvedAt: null,
-    message: auto ? `${countdownSec} 秒内可人工接管；超时后自动确认建议，仍不会提交交易单` : "等待确认提交或人工接管；确认后只填写表单，不点击交易按钮",
+    message: pendingWaitMessage(task, { auto, countdownSec }),
   };
 }
 
@@ -83,6 +91,7 @@ function clearPendingActionTimer(taskId) {
 
 function schedulePendingActionTimeout(task) {
   clearPendingActionTimer(task.id);
+  if (isLiveTask(task)) return;
   if (task.autoDecisionEnabled !== true || task.pendingAction?.status !== "WAITING" || !task.pendingAction.deadlineAt) return;
   const delay = Math.max(0, new Date(task.pendingAction.deadlineAt).getTime() - Date.now());
   pendingActionTimers.set(task.id, setTimeout(() => {
@@ -133,8 +142,8 @@ async function openPendingAction(task, { runtime, run } = {}) {
         runId: run.id,
         stage: "action",
         message: task.pendingAction.formFilled
-          ? `已在目标页填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，未点击提交`
-          : "建议待确认；目标页未填写表单，未点击交易按钮",
+          ? `已在目标页填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`
+          : "建议待确认；目标页未填写表单，尚未提交",
         data: { pendingActionId: task.pendingAction.id, filled: task.pendingAction.formFilled, submitted: false },
       });
     }
@@ -159,55 +168,212 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
     task.autoDecisionCountdownSec = DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
   }
   if (task.pendingAction?.status === "WAITING") {
-    if (task.autoDecisionEnabled) {
+    if (task.autoDecisionEnabled && !isLiveTask(task)) {
       const waitSec = task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
       task.pendingAction.countdownSec = waitSec;
       task.pendingAction.deadlineAt = new Date(Date.now() + waitSec * 1000).toISOString();
-      task.pendingAction.message = `${waitSec} 秒内可人工接管；超时后自动确认建议，仍不会提交交易单`;
+      task.pendingAction.message = pendingWaitMessage(task, { auto: true, countdownSec: waitSec });
       schedulePendingActionTimeout(task);
     } else {
       task.pendingAction.countdownSec = 0;
       task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = "自动决策已关闭，等待确认提交或人工接管";
+      task.pendingAction.message = isLiveTask(task) ? "实盘必须弹窗确认后才会下单" : "自动决策已关闭，等待弹窗确认或人工接管";
       clearPendingActionTimer(task.id);
     }
   }
   task.updatedAt = new Date().toISOString();
-  addEvent("auto_decision_updated", task.autoDecisionEnabled ? `已打开自动决策，倒计时 ${task.autoDecisionCountdownSec} 秒` : "已关闭自动决策，建议需人工确认", { taskId, enabled: task.autoDecisionEnabled, countdownSec: task.autoDecisionCountdownSec });
+  addEvent("auto_decision_updated", isLiveTask(task)
+    ? "实盘必须弹窗确认，不会自动下单"
+    : task.autoDecisionEnabled ? `已打开自动决策，倒计时 ${task.autoDecisionCountdownSec} 秒` : "已关闭自动决策，建议需弹窗确认", { taskId, enabled: task.autoDecisionEnabled, countdownSec: task.autoDecisionCountdownSec });
   persistTask(task);
   return task;
 }
 
-export function confirmPendingAction(taskId, { source = "manual_confirm" } = {}) {
+export function setTaskProvider(taskId, providerId, userId = "") {
+  const task = getTask(taskId);
+  if (!task) throw new Error("TASK_NOT_FOUND");
+  const provider = findProviderForUser(String(providerId || ""), userId);
+  if (!provider?.encryptedKey || !provider.baseUrl) throw new Error("PROVIDER_NOT_READY");
+  task.providerId = provider.id;
+  task.updatedAt = new Date().toISOString();
+  addEvent("provider_selected", `已切换分析模型：${provider.name} / ${provider.model}`, { taskId, providerId: provider.id, userId });
+  persistTask(task);
+  return task;
+}
+
+function recordConfirmedOrder(task, pending, { status, submitted, source, message }) {
+  const existing = state.orders.find((order) => order.idempotencyKey === `pending:${pending.id}`);
+  if (existing) return existing;
+  const order = {
+    id: `order_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    idempotencyKey: `pending:${pending.id}`,
+    taskId: task.id,
+    symbol: String(task.market?.symbol || task.symbol || ""),
+    action: pending.action,
+    mode: task.mode,
+    status,
+    targetPositionPct: Number(task.decision?.targetPositionPct || 0),
+    maxOrderValuePct: Number(task.decision?.maxOrderValuePct || 0),
+    suggestedPrice: pending.suggestedPrice,
+    suggestedQty: pending.suggestedQty,
+    submitted,
+    source,
+    message,
+    createdAt: new Date().toISOString(),
+  };
+  state.orders.unshift(order);
+  persistOrder(order);
+  return order;
+}
+
+export async function confirmPendingAction(taskId, { source = "manual_confirm", runtime } = {}) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (source === "auto_timeout" && task.autoDecisionEnabled !== true) throw new Error("AUTO_DECISION_DISABLED");
+  if (source === "auto_timeout" && isLiveTask(task)) throw new Error("LIVE_REQUIRES_MANUAL_CONFIRM");
+  if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
+  pendingConfirmLocks.add(taskId);
+  try {
+    clearPendingActionTimer(task.id);
+    const actionLabel = task.pendingAction.action === "BUY" ? "买入" : "卖出";
+    const tools = resolveRuntime(runtime);
+    if (shouldSubmitLiveOrder(task, source)) {
+      task.pendingAction = {
+        ...task.pendingAction,
+        status: "SUBMITTING",
+        message: `正在提交${actionLabel}订单…`,
+      };
+      persistTask(task);
+      const sessionId = task.target?.browserSessionId || `task:${task.id}`;
+      const submitted = await tools.submitSuggestionForm({
+        sessionId,
+        action: task.pendingAction.action,
+        price: task.pendingAction.suggestedPrice,
+        quantity: task.pendingAction.suggestedQty,
+      });
+      if (submitted?.submitted === true && submitted.ok !== true) {
+        const order = recordConfirmedOrder(task, task.pendingAction, {
+          status: "rejected",
+          submitted: true,
+          source,
+          message: submitted.message || submitted.code || "交易所拒绝下单",
+        });
+        task.pendingAction = {
+          ...task.pendingAction,
+          status: "CONFIRMED",
+          source,
+          resolvedAt: new Date().toISOString(),
+          formSubmitBlocked: false,
+          message: `已点击${actionLabel}但未成交：${order.message}`,
+        };
+        task.nextTrigger = task.pendingAction.message;
+        addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: true, orderId: order.id, submitted: true });
+        appendAgentOutput({
+          taskId,
+          runId: task.activeRunId || "",
+          stage: "action",
+          kind: "order",
+          level: "error",
+          message: task.pendingAction.message,
+          data: { pendingActionId: task.pendingAction.id, source, submitted: true, orderCreated: true, orderId: order.id },
+        });
+        persistTask(task);
+        return task;
+      }
+      if (!submitted?.ok || submitted.submitted !== true) {
+        task.pendingAction = {
+          ...task.pendingAction,
+          status: "WAITING",
+          message: `确认后下单失败：${submitted?.message || submitted?.code || "请检查目标页登录态后重试"}`,
+        };
+        task.nextTrigger = task.pendingAction.message;
+        persistTask(task);
+        throw new Error(submitted?.message || submitted?.code || "TRADE_SUBMIT_FAILED");
+      }
+      const order = recordConfirmedOrder(task, task.pendingAction, {
+        status: "submitted",
+        submitted: true,
+        source,
+        message: submitted.message || "已提交实盘订单",
+      });
+      task.pendingAction = {
+        ...task.pendingAction,
+        status: "CONFIRMED",
+        source,
+        resolvedAt: new Date().toISOString(),
+        formSubmitBlocked: false,
+        message: `已确认并提交${actionLabel}订单`,
+      };
+      task.nextTrigger = task.pendingAction.message;
+      addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: true, orderId: order.id, submitted: true });
+      appendAgentOutput({
+        taskId,
+        runId: task.activeRunId || "",
+        stage: "action",
+        kind: "order",
+        message: task.pendingAction.message,
+        data: { pendingActionId: task.pendingAction.id, source, submitted: true, orderCreated: true, orderId: order.id },
+      });
+      persistTask(task);
+      return task;
+    }
+
+    if (task.mode === "SHADOW") {
+      recordConfirmedOrder(task, task.pendingAction, {
+        status: "shadow",
+        submitted: false,
+        source,
+        message: "影子记录，未提交实盘",
+      });
+    }
+
+    task.pendingAction = {
+      ...task.pendingAction,
+      status: "CONFIRMED",
+      source,
+      resolvedAt: new Date().toISOString(),
+      formSubmitBlocked: true,
+      message: source === "auto_timeout"
+        ? `倒计时结束，已自动确认${actionLabel}建议；观察模式未提交交易单`
+        : task.mode === "SHADOW"
+          ? `已确认${actionLabel}建议，已写入影子记录`
+          : `已确认${actionLabel}建议；观察模式未提交交易单`,
+    };
+    task.nextTrigger = task.pendingAction.message;
+    addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: task.mode === "SHADOW", submitted: false });
+    appendAgentOutput({
+      taskId,
+      runId: task.activeRunId || "",
+      stage: "action",
+      kind: "suggestion",
+      message: task.pendingAction.message,
+      data: { pendingActionId: task.pendingAction.id, source, submitted: false, orderCreated: task.mode === "SHADOW" },
+    });
+    if (task.mode === "PAPER" && state.orders.some((order) => order.taskId === taskId && order.mode === "LIVE" && order.status !== "rejected")) {
+      throw new Error("ORDER_CREATED_UNEXPECTEDLY");
+    }
+    persistTask(task);
+    return task;
+  } finally {
+    pendingConfirmLocks.delete(taskId);
+  }
+}
+
+export function cancelPendingAction(taskId) {
+  const task = getTask(taskId);
+  if (!task) throw new Error("TASK_NOT_FOUND");
+  if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   clearPendingActionTimer(task.id);
-  const actionLabel = task.pendingAction.action === "BUY" ? "买入" : "卖出";
   task.pendingAction = {
     ...task.pendingAction,
-    status: "CONFIRMED",
-    source,
+    status: "CANCELLED",
+    source: "manual_cancel",
     resolvedAt: new Date().toISOString(),
-    formSubmitBlocked: true,
-    message: source === "auto_timeout"
-      ? `倒计时结束，已自动确认${actionLabel}建议；测试阶段未提交交易单`
-      : `已确认${actionLabel}建议；测试阶段未提交交易单`,
+    message: "已取消本次建议，未下单",
   };
   task.nextTrigger = task.pendingAction.message;
-  addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: false });
-  appendAgentOutput({
-    taskId,
-    runId: task.activeRunId || "",
-    stage: "action",
-    kind: "suggestion",
-    message: task.pendingAction.message,
-    data: { pendingActionId: task.pendingAction.id, source, submitted: false, orderCreated: false },
-  });
-  if (state.orders.some((order) => order.taskId === taskId && order.status !== "rejected")) {
-    throw new Error("ORDER_CREATED_UNEXPECTEDLY");
-  }
+  addEvent("suggestion_cancelled", task.pendingAction.message, { taskId, action: task.pendingAction.action });
   persistTask(task);
   return task;
 }
@@ -604,9 +770,14 @@ function toTaskMarket(market) {
     availableTimeframes: Array.isArray(market.availableTimeframes) ? market.availableTimeframes : [],
     timeline: market.timeline || { kind: "timeline", ticks: Array.isArray(market.ticks) ? market.ticks : [], tickCount: Array.isArray(market.ticks) ? market.ticks.length : 0 },
     page: market.page || null,
+    pageView: market.pageView || market.page?.view || null,
     raw: market.raw || null,
-    account: market.account || { availableFunds: null, riskRate: null },
+    account: market.account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
   };
+}
+
+function syncTaskMetricsFromMarket(task, market) {
+  task.metrics = accountMetricsFromMarket(market?.account || {}, task.metrics || {});
 }
 
 function marketQualityIssues(market) {
@@ -648,31 +819,36 @@ function recentAnalysisRounds(taskId, limit = 8) {
     }));
 }
 
-function buildDecisionContext(task, market, evidence, trigger) {
+function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
+  const layered = analysisMarket?.analysisLayers ? analysisMarket : buildLayeredAnalysisMarket(analysisMarket || task.market);
   return {
     market: {
       symbol: market.symbol,
-      timeframe: market.timeframe,
+      timeframe: layered.timeframe,
       trend: market.trend,
       anomaly: market.anomaly,
       freshnessSec: market.freshnessSec,
       indicators: market.indicators,
       latest: task.market.latest,
-      historyCount: task.market.historyCount,
-      history: task.market.history,
-      ticks: task.market.ticks,
-      timeline: task.market.timeline,
-      timeframes: task.market.timeframes,
-      availableTimeframes: task.market.availableTimeframes,
+      historyCount: layered.historyCount,
+      history: layered.history,
+      ticks: [],
+      timeline: layered.timeline,
+      timeframes: layered.timeframes,
+      availableTimeframes: layered.availableTimeframes,
+      analysisLayers: layered.analysisLayers,
       quote: market.quote,
       dataQuality: market.dataQuality,
       missingFields: market.missingFields || [],
       marketClosed: Boolean(market.marketClosed),
       source: market.source,
-      page: task.market.page,
-      raw: task.market.raw,
+      page: layered.page ?? task.market.page,
+      raw: layered.raw,
     },
-    account: task.metrics,
+    account: {
+      ...task.metrics,
+      ...(market.account || {}),
+    },
     rules: task.rules,
     evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, segmentId, rowStart, rowEnd, rowCount, contentHash })),
     evidenceIds: evidence.map((item) => item.evidenceId).filter(Boolean),
@@ -742,7 +918,7 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
     expertEvidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score })),
     coverage: plan.coverage,
   };
-  appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `全量行情已拆分为 ${plan.segments.length} 个 AI 分析片段，覆盖 ${plan.coverage.totalKlineRows} 根 K 线和 ${plan.coverage.totalLiveTickRows} 条逐笔数据`, data: { coverage: plan.coverage } });
+  appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `分层行情已拆分为 ${plan.segments.length} 个 AI 分析片段，覆盖 ${plan.coverage.totalKlineRows} 根 K 线（分钟/小时/日/月，不含秒级逐笔）`, data: { coverage: plan.coverage } });
   const worker = async () => {
     while (true) {
       if (task.stopLocked) {
@@ -814,7 +990,7 @@ export function enforceDecisionLimits(decision) {
   return { ...decision, targetPositionPct, maxOrderValuePct };
 }
 
-export async function runAnalysis(taskId, providerId = "provider_deepseek", { trigger = "manual", userId = "", skipIfUnchanged = false, runtime: runtimeOverrides = {} } = {}) {
+export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
   const acquired = await acquireCycle(taskId, { wait: trigger === "manual" });
@@ -860,6 +1036,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
       return { task, market, run, route };
     }
     task.market = toTaskMarket(market);
+    syncTaskMetricsFromMarket(task, market);
     task.lastPolledAt = new Date().toISOString();
     task.lastObservedFingerprint = String(market.fingerprint || "");
     task.monitorFailureCount = 0;
@@ -895,21 +1072,40 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
     const automaticRuleFailures = failedAutomaticRules(task);
 
     logStage(task, run, "analyze", "检索专家经验并请求模型结构化建议");
+    const analysisMarket = buildLayeredAnalysisMarket(task.market);
+    appendAgentOutput({
+      taskId,
+      runId: run.id,
+      stage: "analyze",
+      kind: "coverage",
+      message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
+      data: analysisMarket.analysisLayers,
+    });
     const knowledge = searchKnowledge(`${market.symbol || task.symbol} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: userId }, 4);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
     ];
     appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: `检索到 ${knowledge.length} 条已发布经验切片` });
-    const provider = findProviderForUser(providerId, userId);
+    const resolvedProviderId = resolveDefaultProviderId(userId, providerId || task.providerId);
+    const provider = findProviderForUser(resolvedProviderId, userId);
+    if (provider?.id) task.providerId = provider.id;
+    appendAgentOutput({
+      taskId,
+      runId: run.id,
+      stage: "analyze",
+      message: provider?.encryptedKey
+        ? `使用 ${provider.name}（${provider.model}）请求结构化建议`
+        : "未配置可用 Provider，将保持观望",
+    });
     let decision;
     let providerSucceeded = true;
-    let analysisCoverage = directAnalysisCoverage(task.market);
+    let analysisCoverage = directAnalysisCoverage(analysisMarket);
     let segmentReviews = [];
     try {
       assertCurrent();
-      if (provider?.encryptedKey && shouldUseSegmentedAnalysis(task.market)) {
-        const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: task.market, evidence, assertCurrent });
+      if (provider?.encryptedKey && shouldUseSegmentedAnalysis(analysisMarket)) {
+        const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: analysisMarket, evidence, assertCurrent });
         assertCurrent();
         analysisCoverage = segmented.coverage;
         task.analysisCoverage = analysisCoverage;
@@ -919,7 +1115,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
         evidence.push({
           evidenceId: coverageEvidenceId,
           type: "market_coverage",
-          excerpt: `全量覆盖 ${analysisCoverage.totalSegments} 个片段、${analysisCoverage.totalKlineRows} 根 K 线、${analysisCoverage.totalLiveTickRows} 条逐笔；完成 ${analysisCoverage.reviewedSegments} 个片段`,
+          excerpt: `分层覆盖 ${analysisCoverage.totalSegments} 个片段、${analysisCoverage.totalKlineRows} 根 K 线；完成 ${analysisCoverage.reviewedSegments} 个片段`,
           contentHash: String(market.fingerprint || ""),
         });
         for (const segment of segmented.segments) {
@@ -943,11 +1139,11 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
           appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", level: "error", message: `全量分析未完成：${analysisCoverage.failedSegments.length} 个片段失败；本轮不生成方向性决策，后台将重试`, data: { coverage: analysisCoverage } });
         } else {
           appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: "全部数据片段已完成 AI 复核，开始结合多轮上下文生成最终建议", data: { coverage: analysisCoverage } });
-          const decisionContext = buildDecisionContext(task, market, evidence, trigger);
+          const decisionContext = buildDecisionContext(task, market, evidence, trigger, analysisMarket);
           decision = await runtime.requestDecision(provider, {
             ...decisionContext,
             analysisMode: "hierarchical_full_coverage",
-            market: summarizeMarketForDecision(task.market, analysisCoverage),
+            market: summarizeMarketForDecision(analysisMarket, analysisCoverage),
             coverage: analysisCoverage,
             segmentReviews,
           }, { timeoutMs: 45000 });
@@ -955,7 +1151,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
         }
       } else {
         task.analysisCoverage = analysisCoverage;
-        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger), { timeoutMs: 45000 });
+        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger, analysisMarket), { timeoutMs: 45000 });
         assertCurrent();
       }
       providerSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].some((code) => (decision.riskFlags || []).includes(code));
@@ -973,7 +1169,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
         riskFlags: ["PROVIDER_REQUEST_FAILED"],
         decisionTtlSec: 300,
       };
-      appendAgentOutput({ taskId, runId: run.id, stage: "analyze", level: "error", message: `模型请求失败：${error.message}` });
+      appendAgentOutput({ taskId, runId: run.id, stage: "analyze", level: "error", message: `模型请求失败：${provider?.name || "Provider"} ${error.message}` });
     }
     assertCurrent();
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
@@ -1041,11 +1237,11 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
       completeWorkflow(task, "rules", ruleMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: ruleMessage });
     } else {
-      completeWorkflow(task, "rules", "规则通过，买卖意图转为建议");
-      appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: "规则通过；最终动作仍禁止自动下单" });
+      completeWorkflow(task, "rules", isLiveTask(task) ? "规则通过，等待弹窗确认后下单" : "规则通过，买卖意图转为建议");
+      appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: isLiveTask(task) ? "规则通过；确认后才会下单" : "规则通过；观察模式不会自动下单" });
     }
 
-    logStage(task, run, "action", "路由最终建议，禁止交易写操作");
+    logStage(task, run, "action", "路由最终建议，等待确认后决定是否下单");
     assertCurrent();
     const execution = await runtime.executeDecision(task, task.decision, connector);
     assertCurrent();
@@ -1055,11 +1251,11 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
     } else {
       clearPendingAction(task, { persist: false });
     }
-    if (execution.code === "TRADING_DISABLED") {
+    if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const pending = task.pendingAction?.status === "WAITING";
-      completeWorkflow(task, "action", pending ? `${task.decision.action} 建议待确认，未提交交易单` : `${task.decision.action} 建议已生成，测试模式未执行`);
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${task.decision.action === "BUY" ? "买入" : "卖出"}建议待确认；已禁止点击交易按钮` : `${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望"}建议已生成；未创建订单、未调用交易写接口、未点击买卖按钮`, data: { action: task.decision.action, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
+      completeWorkflow(task, "action", pending ? `${task.decision.action} 建议待弹窗确认` : `${task.decision.action} 建议已生成`);
+      appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${task.decision.action === "BUY" ? "买入" : "卖出"}建议待确认；${isLiveTask(task) ? "确认后才会下单" : "观察模式不会下单"}` : `${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望"}建议已生成`, data: { action: task.decision.action, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
     } else if (!execution.ok) {
       task.status = "PAUSED";
       route = execution.route || "BLOCKED";
@@ -1068,7 +1264,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
     } else {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       completeWorkflow(task, "action", execution.reason === "HOLD" ? "保持观望" : "已记录受控动作");
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: execution.reason === "HOLD" ? "决策为 HOLD，无需动作" : "建议已记录，服务端禁止交易写操作" });
+      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: execution.reason === "HOLD" ? "决策为 HOLD，无需动作" : "建议已记录，等待确认" });
     }
     const analysis = {
       id: run.id,
@@ -1114,7 +1310,7 @@ export async function runAnalysis(taskId, providerId = "provider_deepseek", { tr
   }
 }
 
-export async function runMonitoringCycle(taskId, { providerId = "provider_deepseek", userId = "", runtime = {} } = {}) {
+export async function runMonitoringCycle(taskId, { providerId = "", userId = "", runtime = {} } = {}) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (!monitoringIntent(task)) return { task, skipped: true, reason: "MONITORING_STOPPED" };
@@ -1125,7 +1321,7 @@ export async function runMonitoringCycle(taskId, { providerId = "provider_deepse
     addEvent("lease_expired", "任务租约曾过期，已锁定交易动作并恢复只读监控", { taskId });
   }
   renewLease(task);
-  const result = await runAnalysis(taskId, providerId, {
+  const result = await runAnalysis(taskId, providerId || task.providerId || "", {
     trigger: "controller",
     userId: userId || userIdsForTask(taskId)[0] || "",
     skipIfUnchanged: true,
