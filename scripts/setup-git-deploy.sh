@@ -84,7 +84,7 @@ ssh-keygen -t ed25519 -N "" -C "$ACTIONS_COMMENT" -f "$WORKDIR/actions" >/dev/nu
 ACTIONS_PUB="$(cat "$WORKDIR/actions.pub")"
 ACTIONS_PRIV="$(cat "$WORKDIR/actions")"
 log "Installing Actions deploy SSH key on the server"
-remote_ssh "grep -F '$ACTIONS_COMMENT' /root/.ssh/authorized_keys >/dev/null 2>&1 || echo '$ACTIONS_PUB' >> /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys"
+remote_ssh "touch /root/.ssh/authorized_keys; grep -vF '$ACTIONS_COMMENT' /root/.ssh/authorized_keys > /tmp/axiom-ak || true; echo '$ACTIONS_PUB' >> /tmp/axiom-ak; mv /tmp/axiom-ak /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys"
 
 log "Writing GitHub Actions secrets"
 PUBKEY_JSON="$(github_api GET "/repos/${REPO}/actions/secrets/public-key")"
@@ -117,32 +117,45 @@ print(json.dumps({
 PY
 
 TOKEN="$(github_token)"
-python3 - "$WORKDIR/secrets.json" "$TOKEN" "$REPO" <<'PY'
-import json, sys, urllib.request
+python3 - "$WORKDIR/secrets.json" "$REPO" <<'PY' > "$WORKDIR/secret-requests.jsonl"
+import json, sys
 payload = json.load(open(sys.argv[1]))
-token, repo = sys.argv[2], sys.argv[3]
+repo = sys.argv[2]
 for name, encrypted in payload["secrets"].items():
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/actions/secrets/{name}",
-        data=json.dumps({"encrypted_value": encrypted, "key_id": payload["key_id"]}).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-        method="PUT",
-    )
-    with urllib.request.urlopen(req) as resp:
-        print(f"secret {name} HTTP {resp.status}")
+    print(json.dumps({
+        "name": name,
+        "url": f"https://api.github.com/repos/{repo}/actions/secrets/{name}",
+        "body": {"encrypted_value": encrypted, "key_id": payload["key_id"]},
+    }))
 PY
+while IFS= read -r line; do
+  name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["name"])' "$line")"
+  url="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["url"])' "$line")"
+  body="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1])["body"]))' "$line")"
+  code="$(curl -sS -o /tmp/axiom-secret-resp.json -w '%{http_code}' -X PUT \
+    -H "Authorization: Bearer ${TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "Content-Type: application/json" \
+    "$url" -d "$body")"
+  if [[ "$code" != "201" && "$code" != "204" ]]; then
+    echo "failed to write secret ${name} HTTP ${code}" >&2
+    cat /tmp/axiom-secret-resp.json >&2
+    exit 1
+  fi
+  log "secret ${name} HTTP ${code}"
+done < "$WORKDIR/secret-requests.jsonl"
+rm -f /tmp/axiom-secret-resp.json
 
 log "Converting /opt/axiom-agent into a git checkout"
 remote_ssh "set -euo pipefail
 cd '${DEPLOY_PATH}'
+git config --global --add safe.directory '${DEPLOY_PATH}'
 if [[ ! -d .git ]]; then
   git init
   git remote add origin git@github.com:${REPO}.git || git remote set-url origin git@github.com:${REPO}.git
 fi
+git remote get-url origin >/dev/null 2>&1 || git remote add origin git@github.com:${REPO}.git
+git remote set-url origin git@github.com:${REPO}.git
 export GIT_SSH_COMMAND='ssh -i /root/.ssh/axiom-github -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
 git fetch --tags origin
 git checkout -f -B main origin/main
