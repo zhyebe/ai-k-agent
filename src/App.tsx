@@ -203,21 +203,25 @@ function IconButton({ label, children, onClick, disabled = false }: { label: str
 
 function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateState | null; busy: boolean; onAction: () => void }) {
   if (!state || ["disabled", "unsupported"].includes(state.status)) return null;
-  const actionLabel = state.status === "downloaded"
-    ? "重启并安装"
-    : state.status === "available"
-      ? "下载更新"
-      : state.status === "downloading"
-        ? `下载 ${state.progress}%`
-        : state.status === "checking"
-          ? "检查中"
-          : state.status === "error"
-            ? "重试更新"
-            : state.status === "not-available"
-              ? "已是最新"
-              : "检查更新";
+  const canInstall = state.status === "downloaded" || state.status === "installing" || Boolean(state.downloadedVersion);
+  const actionLabel = state.status === "installing"
+    ? "正在重启安装"
+    : canInstall
+      ? "重启并安装"
+      : state.status === "available"
+        ? "下载更新"
+        : state.status === "downloading"
+          ? `下载 ${state.progress}%`
+          : state.status === "checking"
+            ? "检查中"
+            : state.status === "error"
+              ? "重试更新"
+              : state.status === "not-available"
+                ? "已是最新"
+                : "检查更新";
   const disabled = busy || ["checking", "downloading", "installing", "not-available"].includes(state.status);
-  return <button type="button" className={`update-control update-${state.status}`} onClick={onAction} disabled={disabled} title={`桌面版 v${state.currentVersion} · ${state.error || actionLabel}`}><Download size={14} /><span>{actionLabel}</span></button>;
+  const title = [`桌面版 v${state.currentVersion}`, canInstall && state.downloadedVersion ? `已下载 v${state.downloadedVersion}` : "", state.error || actionLabel].filter(Boolean).join(" · ");
+  return <button type="button" className={`update-control update-${canInstall ? "downloaded" : state.status}`} onClick={onAction} disabled={disabled} title={title}><Download size={14} /><span>{actionLabel}</span></button>;
 }
 
 const emptyWorkspace: Workspace = { tasks: [], skills: [], providers: [], events: [], runs: [], connectors: [], orders: [], agentRuns: [], credentials: [] };
@@ -517,13 +521,16 @@ function App() {
     if (!bridge || !updateState) return;
     setUpdateBusy(true);
     try {
-      const next = updateState.status === "downloaded"
+      const canInstall = updateState.status === "downloaded" || Boolean(updateState.downloadedVersion);
+      const next = canInstall
         ? await bridge.install()
         : updateState.status === "available"
           ? await bridge.download()
           : await bridge.check();
       setUpdateState(next);
-      if (next.status === "error") notify(`更新失败：${next.error || "请稍后重试"}`);
+      if (next.status === "installing") notify("正在退出并安装更新，请稍候");
+      else if (next.status === "error" && !next.downloadedVersion) notify(`更新失败：${next.error || "请稍后重试"}`);
+      else if (next.error && canInstall) notify(`安装未完成：${next.error}。可再点一次「重启并安装」`);
     } catch (error) {
       notify(`更新失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setUpdateBusy(false); }

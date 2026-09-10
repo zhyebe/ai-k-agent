@@ -6,31 +6,27 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { autoUpdater } = require("electron-updater");
 const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
+const { emptyUpdateState, hasDownloadedPackage, reduceUpdateState } = require("./update-state.cjs");
 
 let apiProcess;
 let mainWindow;
 let updateCheckTimer;
 let updateCheckPromise;
+let installTimer;
+let quittingForUpdate = false;
 let apiPort = Number(process.env.AXIOM_API_PORT || 8787);
 if (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535) apiPort = 8787;
 let apiBaseUrl = "";
 const embeddedApiEnabled = process.env.AXIOM_EMBEDDED_API === "1";
 let resizeSession;
-const updateState = {
-  status: "disabled",
-  currentVersion: "dev",
-  availableVersion: null,
-  downloadedVersion: null,
-  progress: 0,
-  error: null,
-};
+const updateState = emptyUpdateState();
 
 function supportsAutoUpdate() {
   return app.isPackaged && ["darwin", "win32"].includes(process.platform);
 }
 
 function publishUpdateState(next) {
-  Object.assign(updateState, next);
+  Object.assign(updateState, reduceUpdateState(updateState, next || {}));
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("update:state", { ...updateState });
   }
@@ -45,7 +41,9 @@ function checkForUpdates() {
     publishUpdateState({ status: app.isPackaged ? "unsupported" : "disabled", currentVersion: app.getVersion() });
     return Promise.resolve(currentUpdateState());
   }
-  if (updateState.status === "downloading" || updateState.status === "downloaded") return Promise.resolve(currentUpdateState());
+  if (updateState.status === "downloading" || updateState.status === "installing" || hasDownloadedPackage(updateState)) {
+    return Promise.resolve(currentUpdateState());
+  }
   if (updateCheckPromise) return updateCheckPromise;
 
   publishUpdateState({ status: "checking", currentVersion: app.getVersion(), error: null });
@@ -68,6 +66,7 @@ function configureAutoUpdater() {
   publishUpdateState({ status: "idle", currentVersion: app.getVersion(), error: null });
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoRunAppAfterInstall = true;
   autoUpdater.allowDowngrade = false;
   autoUpdater.on("checking-for-update", () => publishUpdateState({ status: "checking", error: null }));
   autoUpdater.on("update-available", (info) => publishUpdateState({ status: "available", availableVersion: info.version, progress: 0, error: null }));
@@ -92,13 +91,41 @@ ipcMain.handle("update:download", async () => {
   }
   return currentUpdateState();
 });
-ipcMain.handle("update:install", () => {
-  if (supportsAutoUpdate() && updateState.status === "downloaded") {
-    publishUpdateState({ status: "installing" });
-    setImmediate(() => autoUpdater.quitAndInstall(false, true));
+function prepareAppForUpdateQuit() {
+  quittingForUpdate = true;
+  if (updateCheckTimer) {
+    clearInterval(updateCheckTimer);
+    updateCheckTimer = undefined;
   }
+  disconnectAiRuntime();
+  if (apiProcess && !apiProcess.killed) apiProcess.kill();
+}
+
+function installDownloadedUpdate() {
+  if (!supportsAutoUpdate() || !hasDownloadedPackage(updateState) || updateState.status === "installing") {
+    return currentUpdateState();
+  }
+  publishUpdateState({ status: "installing", error: null });
+  prepareAppForUpdateQuit();
+  const install = () => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+    } catch (error) {
+      quittingForUpdate = false;
+      publishUpdateState({ status: "downloaded", error: error instanceof Error ? error.message : String(error) });
+    }
+  };
+  setImmediate(install);
+  if (installTimer) clearTimeout(installTimer);
+  installTimer = setTimeout(() => {
+    if (!quittingForUpdate) return;
+    install();
+    if (quittingForUpdate) app.quit();
+  }, 1200);
   return currentUpdateState();
-});
+}
+
+ipcMain.handle("update:install", () => installDownloadedUpdate());
 
 ipcMain.handle("window:minimize", () => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
@@ -326,16 +353,17 @@ app.whenReady().then(async () => {
 });
 
 app.on("activate", () => {
-  if (!gotTheLock || !app.isReady()) return;
+  if (!gotTheLock || !app.isReady() || quittingForUpdate) return;
   showMainWindow();
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (quittingForUpdate || process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
   if (updateCheckTimer) clearInterval(updateCheckTimer);
+  if (installTimer) clearTimeout(installTimer);
   disconnectAiRuntime();
   if (apiProcess && !apiProcess.killed) apiProcess.kill();
 });
