@@ -291,6 +291,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 700,
     backgroundColor: "#0b0d10",
+    icon: path.join(__dirname, "icon.png"),
     frame: false,
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
     trafficLightPosition: { x: 16, y: 18 },

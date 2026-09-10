@@ -136,7 +136,7 @@ MONGO_DB=axiom_agent
 ```bash
 git clone <repo> /opt/axiom-agent
 cd /opt/axiom-agent
-git checkout v0.2.4
+git checkout v0.2.5
 npm ci --omit=dev
 cp .env.example .env
 # 编辑 .env
@@ -281,7 +281,7 @@ BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 推送 `v*` 标签后，[`.github/workflows/release.yml`](../.github/workflows/release.yml) 构建 macOS universal 与 Windows x64，并上传 GitHub Release（含 `latest-mac.yml` / `latest.yml`）。
 
 ```bash
-git tag v0.2.4
+git tag v0.2.5
 git push origin main --tags
 ```
 

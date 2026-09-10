@@ -9,6 +9,7 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html admin.html vite.config.ts tsconfig.json ./
+COPY public ./public
 COPY src ./src
 RUN npm run build
 

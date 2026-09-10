@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
@@ -68,6 +68,8 @@
     ],
     "files": [
       "dist/index.html",
+      "dist/icon.png",
+      "dist/favicon.ico",
       "dist/assets/**",
       "electron/**",
       "server/**",
@@ -75,7 +77,8 @@
       "node_modules/**"
     ],
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "publish": {
       "provider": "github",
@@ -84,6 +87,7 @@
       "releaseType": "release"
     },
     "mac": {
+      "icon": "build/icon.icns",
       "category": "public.app-category.finance",
       "target": [
         "dmg",
@@ -92,6 +96,7 @@
       "artifactName": "Axiom-Agent-${version}-${arch}.${ext}"
     },
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         {
           "target": "nsis",
