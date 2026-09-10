@@ -61,6 +61,17 @@ function normalizeBaseUrl(value) {
   return parsed.toString().replace(/\/$/, "");
 }
 
+export function providerIdentityKey(provider) {
+  let base = "";
+  try { base = normalizeBaseUrl(provider?.baseUrl); } catch { base = String(provider?.baseUrl || "").trim().replace(/\/$/, ""); }
+  return [
+    String(provider?.ownerUserId || ""),
+    String(provider?.name || "").trim().toLowerCase(),
+    base,
+    String(provider?.model || "").trim().toLowerCase(),
+  ].join("\u0001");
+}
+
 export function resolveProviderWireApi(provider = {}) {
   const explicit = String(provider.apiFormat || provider.wireApi || "").trim().toLowerCase();
   if (["openai_responses", "responses", "response"].includes(explicit)) return "responses";
@@ -69,6 +80,15 @@ export function resolveProviderWireApi(provider = {}) {
     if (new URL(normalizeBaseUrl(provider.baseUrl)).hostname === "ai.tiancheng.tcyun.net") return "responses";
   } catch {}
   return "chat";
+}
+
+export function providerApiKey(provider) {
+  if (typeof provider?.apiKey === "string" && provider.apiKey.trim()) return provider.apiKey.trim();
+  return decryptSecret(provider?.encryptedKey);
+}
+
+function providerHasKey(provider) {
+  return Boolean(providerApiKey(provider));
 }
 
 function inferApiFormat(baseUrl) {
@@ -141,6 +161,7 @@ export function publicProvider(provider) {
     configured: Boolean(provider.encryptedKey),
     keyPreview: provider.keyPreview || maskSecret(decryptSecret(provider.encryptedKey)),
     status: provider.status || "未验证",
+    owned: Boolean(provider.ownerUserId),
   };
 }
 
@@ -165,7 +186,7 @@ export function createProvider(payload, existing = null) {
 }
 
 export async function verifyProvider(provider, { timeoutMs = 8000 } = {}) {
-  const apiKey = decryptSecret(provider?.encryptedKey);
+  const apiKey = providerApiKey(provider);
   const baseUrl = normalizeBaseUrl(provider?.baseUrl);
   if (!apiKey || !baseUrl) return { ok: false, code: "PROVIDER_NOT_READY", status: "未配置" };
   try {
@@ -220,12 +241,11 @@ function parseModelContent(content) {
 }
 
 function providerReady(provider) {
-  const apiKey = decryptSecret(provider?.encryptedKey);
-  return Boolean(apiKey && provider?.baseUrl);
+  return Boolean(providerHasKey(provider) && provider?.baseUrl);
 }
 
 async function requestProviderJson(provider, messages, options = {}) {
-  const apiKey = decryptSecret(provider?.encryptedKey);
+  const apiKey = providerApiKey(provider);
   if (!apiKey || !provider?.baseUrl) return null;
   const wireApi = resolveProviderWireApi(provider);
   const response = await fetch(providerRequestUrl(provider), {
@@ -292,7 +312,7 @@ export async function requestSegmentReview(provider, segment, context = {}, opti
 
 export async function requestDecision(provider, context, options = {}) {
   const requestContext = context || {};
-  if (!provider?.encryptedKey) {
+  if (!providerHasKey(provider)) {
     return normalizeDecision({
       action: "HOLD",
       target_position_pct: 0,
@@ -306,7 +326,7 @@ export async function requestDecision(provider, context, options = {}) {
     });
   }
 
-  const apiKey = decryptSecret(provider.encryptedKey);
+  const apiKey = providerApiKey(provider);
   if (!apiKey || !provider.baseUrl) return normalizeDecision({ action: "HOLD", risk_flags: ["PROVIDER_NOT_READY"] });
   const conversationMessages = buildConversationMessages(requestContext);
   const response = await requestProviderJson(provider, [

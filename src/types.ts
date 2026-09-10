@@ -34,6 +34,11 @@ export interface DesktopApiBridge {
   setBaseUrl: (value: string) => Promise<string>;
 }
 
+export interface DesktopAiBridge {
+  connect: (session: { apiBaseUrl: string; userToken: string }) => Promise<{ ok: boolean; error?: string }>;
+  disconnect: () => Promise<{ ok: boolean }>;
+}
+
 declare global {
   interface Window {
     axiomDesktop?: {
@@ -41,6 +46,7 @@ declare global {
       isDesktop: boolean;
       apiBaseUrl: string;
       api?: DesktopApiBridge;
+      ai?: DesktopAiBridge;
       updates?: DesktopUpdateBridge;
       window?: DesktopWindowBridge;
     };
@@ -295,6 +301,7 @@ export interface Provider {
   configured: boolean;
   keyPreview: string;
   status: string;
+  owned?: boolean;
 }
 
 export interface EventItem {

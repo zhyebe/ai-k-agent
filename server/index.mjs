@@ -3,11 +3,11 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
-import { createProvider, publicProvider, verifyProvider } from "./provider.mjs";
+import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
-import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskProvider, startController, startTask, stopAllControllers, stopTask, takeoverPendingAction } from "./engine.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedProvider, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
+import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { openMarketBrowser, observeMarket } from "./market.mjs";
 import { browserLogin, browserLoginStatus } from "./tools.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
@@ -15,6 +15,7 @@ import { credentialExists, initVault, listCredentials, setVaultPersistence, stor
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
 import { assignTask, assignedTaskIds, canAccessTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, requireUser, revokeUserSession, setUserPersistence, unassignTask, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
+import { attachDesktopAiSocket, callProviderMethod } from "./desktop-ai.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 await app.register(cors, {
@@ -26,7 +27,7 @@ await app.register(cors, {
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   maxAge: 86400,
 });
-await app.register(websocket);
+await app.register(websocket, { options: { maxPayload: 50 * 1024 * 1024 } });
 const persistence = await createPersistence();
 setPersistence(persistence);
 const restoredState = await persistence.loadState?.().catch(() => null);
@@ -350,6 +351,14 @@ app.get("/api/events/stream", { websocket: true, preValidation: requireWorkspace
   socket.send(JSON.stringify({ type: "workspace.updated", payload: snapshot(entry.auth) }));
   socket.on("close", () => streams.delete(entry));
 });
+app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAccess }, (socket, request) => {
+  if (!request.auth || request.auth.type !== "user") {
+    try { socket.close(1008, "USER_AUTH_REQUIRED"); } catch {}
+    return;
+  }
+  attachDesktopAiSocket(request.auth.user.id, socket);
+  try { socket.send(JSON.stringify({ type: "ai.ready" })); } catch {}
+});
 
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
@@ -366,7 +375,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: String(body.name || "新建观察任务"),
     status: "READY",
-    mode: body.mode === "LIVE" ? "LIVE" : body.mode === "SHADOW" ? "SHADOW" : "PAPER",
+    mode: body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : "LIVE",
     symbol: String(body.symbol || "DGJJ"),
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
@@ -443,6 +452,15 @@ app.post("/api/tasks/:taskId/auto-decision", { preHandler: requireTaskAccess }, 
 app.post("/api/tasks/:taskId/provider", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
     const task = setTaskProvider(request.params.taskId, request.body?.providerId, request.auth.user.id);
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) {
+    return reply.code(400).send({ error: error.message });
+  }
+});
+app.post("/api/tasks/:taskId/mode", { preHandler: requireTaskAccess }, async (request, reply) => {
+  try {
+    const task = setTaskMode(request.params.taskId, request.body?.mode);
     broadcast();
     return { task: publicTask(task) };
   } catch (error) {
@@ -683,11 +701,16 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
   }
 });
 
-app.get("/api/providers", { preHandler: requireWorkspaceAccess }, async (request) => ({ providers: publicProviderList(request.auth.user.id) }));
+app.get("/api/providers", { preHandler: requireWorkspaceAccess }, async (request) => {
+  collapseDuplicateProviders();
+  return { providers: publicProviderList(request.auth.user.id) };
+});
 app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
   const providerId = String(body.id || "");
-  const existing = providerId ? state.providers.find((item) => item.id === providerId && String(item.ownerUserId || "") === request.auth.user.id) : null;
+  const existing = providerId
+    ? state.providers.find((item) => item.id === providerId && String(item.ownerUserId || "") === request.auth.user.id)
+    : findOwnedProviderMatch(request.auth.user.id, body);
   const template = providerId ? state.providers.find((item) => item.id === providerId) : null;
   let provider;
   try {
@@ -701,17 +724,36 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
   persistProvider(provider);
   addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id });
   broadcast();
-  return reply.code(201).send({ provider: publicProvider(provider) });
+  return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider) });
 });
 app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
   if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
-  const verification = await verifyProvider(provider);
+  let verification;
+  try {
+    verification = await callProviderMethod("verifyProvider", request.auth.user.id, { provider, options: { timeoutMs: 8000 } });
+  } catch (error) {
+    return reply.code(400).send({ error: error.message || "PROVIDER_TEST_FAILED" });
+  }
   provider.status = verification.status;
   persistProvider(provider);
   addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, code: verification.code, httpStatus: verification.httpStatus });
   broadcast();
   return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus } };
+});
+app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
+  const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
+  if (!provider || !provider.ownerUserId) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  state.providers = state.providers.filter((item) => item.id !== provider.id);
+  persistDeletedProvider(provider.id);
+  for (const task of state.tasks) {
+    if (task.providerId !== provider.id) continue;
+    task.providerId = "";
+    persistTask(task);
+  }
+  addEvent("provider_deleted", `已删除 Provider：${provider.name}`, { providerId: provider.id });
+  broadcast();
+  return { ok: true };
 });
 
 app.get("/api/skills", { preHandler: requireWorkspaceAccess }, async (request) => ({ skills: snapshot(request.auth).skills }));
@@ -785,7 +827,7 @@ app.get("/api/admin/summary", { preHandler: requireAdmin }, async () => {
 
 const port = Number(process.env.PORT || 8787);
 const host = String(process.env.HOST || "127.0.0.1");
-for (const task of state.tasks) if (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && task.status === "MONITORING")) startController(task.id);
+for (const task of state.tasks) if (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && task.status === "MONITORING")) startController(task.id, { userId: userIdsForTask(task.id)[0] || "" });
 try {
   await app.listen({ port, host });
   console.log(`Axiom API listening on http://${host}:${port}`);

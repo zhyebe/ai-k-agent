@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executeDecision, suggestOrderPreview } from "../server/execution.mjs";
+import { executeDecision, shouldSubmitLiveOrder, suggestOrderPreview } from "../server/execution.mjs";
 import { state } from "../server/store.mjs";
 
 test("buy and sell stay suggestions even when automation is explicitly authorized", () => {
@@ -37,4 +37,7 @@ test("buy and sell stay suggestions even when automation is explicitly authorize
   const preview = suggestOrderPreview({ ...task, market: { latest: { price: 100 }, account: { availableFunds: 5000 } }, metrics: { equity: 5000 } }, decision);
   assert.equal(preview.suggestedQty, 2);
   assert.equal(preview.formSubmitBlocked, true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "PAPER" }, "manual_confirm"), false);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "auto_timeout"), false);
 });

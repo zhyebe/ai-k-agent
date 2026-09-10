@@ -41,15 +41,33 @@ function authHeaders(): Record<string, string> {
   };
 }
 
+const mutatingInFlight = new Map<string, Promise<unknown>>();
+
+function mutationKey(path: string, options?: RequestInit) {
+  const method = String(options?.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD") return "";
+  return `${method} ${path} ${typeof options?.body === "string" ? options.body : ""}`;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const key = mutationKey(path, options);
+  const existing = key ? mutatingInFlight.get(key) : undefined;
+  if (existing) return existing as Promise<T>;
   const headers = new Headers({ ...authHeaders(), ...(options?.headers || {}) });
   if (options?.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json");
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    ...options,
-    headers,
-  });
-  if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
-  return response.json() as Promise<T>;
+  const pending = (async () => {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      ...options,
+      headers,
+    });
+    if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
+    return response.json() as Promise<T>;
+  })();
+  if (key) {
+    mutatingInFlight.set(key, pending);
+    pending.finally(() => { if (mutatingInFlight.get(key) === pending) mutatingInFlight.delete(key); });
+  }
+  return pending;
 }
 
 export async function fetchApiHealth() {
@@ -159,6 +177,10 @@ export async function setTaskProvider(taskId: string, providerId: string): Promi
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/provider`, { method: "POST", body: JSON.stringify({ providerId }) })).task;
 }
 
+export async function setTaskMode(taskId: string, mode: string): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/mode`, { method: "POST", body: JSON.stringify({ mode }) })).task;
+}
+
 export async function confirmPendingAction(taskId: string): Promise<Task> {
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/pending-action/confirm`, { method: "POST", body: "{}" })).task;
 }
@@ -210,4 +232,8 @@ export async function saveProvider(payload: Record<string, unknown>): Promise<Pr
 
 export async function testProvider(providerId: string): Promise<Provider> {
   return (await request<{ provider: Provider; verification?: { ok: boolean; code: string; httpStatus?: number } }>(`/api/providers/${providerId}/test`, { method: "POST", body: "{}" })).provider;
+}
+
+export async function deleteProvider(providerId: string) {
+  return request<{ ok: boolean }>(`/api/providers/${providerId}`, { method: "DELETE" });
 }

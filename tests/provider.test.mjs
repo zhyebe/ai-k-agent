@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, providerIdentityKey, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -42,9 +42,17 @@ test("desktop users can create an owned provider and keep the wire format", () =
   provider.ownerUserId = "user_desktop_1";
   const published = publicProvider(provider);
   assert.equal(published.configured, true);
+  assert.equal(published.owned, true);
   assert.equal(published.apiFormat, "responses");
   assert.equal("encryptedKey" in published, false);
   assert.equal("apiKey" in published, false);
+});
+
+test("owned providers with the same name, model and URL share an identity", () => {
+  const first = { ownerUserId: "user_1", name: "tiancheng", model: "gpt-6-astra", baseUrl: "https://ai.tiancheng.tcyun.net/" };
+  const second = { ownerUserId: "user_1", name: "Tiancheng", model: "gpt-6-astra", baseUrl: "https://ai.tiancheng.tcyun.net" };
+  assert.equal(providerIdentityKey(first), providerIdentityKey(second));
+  assert.equal(publicProvider({ ...first, encryptedKey: "x" }).owned, true);
 });
 
 test("provider decision receives bounded evidence context", async () => {
@@ -152,6 +160,30 @@ test("天成网关按 Codex/cc-switch 走 Responses API，不打 chat/completion
     assert.equal(requestUrl, "/responses");
     assert.equal(received.model, "gpt-6-astra");
     assert.ok(Array.isArray(received.input));
+    assert.equal(result.action, "HOLD");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("plaintext apiKey is enough for a local model request without encryptedKey", async () => {
+  let seenAuth = "";
+  const server = http.createServer(async (request, response) => {
+    seenAuth = String(request.headers.authorization || "");
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", confidence: 0.1 }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const result = await requestDecision({
+      name: "Local",
+      model: "demo",
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      apiKey: "plain-desktop-key",
+    }, { market: { trend: "range" }, evidenceIds: [] });
+    assert.equal(seenAuth, "Bearer plain-desktop-key");
     assert.equal(result.action, "HOLD");
   } finally {
     await new Promise((resolve) => server.close(resolve));

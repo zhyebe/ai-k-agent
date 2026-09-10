@@ -136,7 +136,7 @@ MONGO_DB=axiom_agent
 ```bash
 git clone <repo> /opt/axiom-agent
 cd /opt/axiom-agent
-git checkout v0.2.1
+git checkout v0.2.2
 npm ci --omit=dev
 cp .env.example .env
 # 编辑 .env
@@ -282,7 +282,7 @@ BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 推送 `v*` 标签后，[`.github/workflows/release.yml`](../.github/workflows/release.yml) 构建 macOS universal 与 Windows x64，并上传 GitHub Release（含 `latest-mac.yml` / `latest.yml`）。
 
 ```bash
-git tag v0.2.1
+git tag v0.2.2
 git push origin main --tags
 ```
 
@@ -299,12 +299,13 @@ npm run release:win
 
 1. `curl https://<host>/api/health` → `ok`，库 `available`。
 2. 浏览器打开 `https://<host>/admin.html`，用管理账号登录，创建桌面用户并分配任务。
-3. 桌面端改服务地址、登录、保存 Provider、测试连接器（只读）。
+3. 桌面端改服务地址、登录、把任务切到「实盘（确认后下单）」、保存 Provider、测试连接器。
 4. 目标页保持登录后「立即分析」，输出流为 `connect → login → collect → analyze → rules → action`。
-5. `BUY` / `SELL` 只是建议；`action` 阶段不应出现真实订单。
-6. 「开始观察」多轮后，行情不变应跳过模型；「停止观察」后不再开新轮次。
+5. `BUY` / `SELL` 会弹确认窗；点确认后才会在已登录页面提交订单。观察模式确认后也不会实盘下单。
+6. 模型请求必须从桌面本机发出；API 服务器不应出现对天成 / DeepSeek 的直连。桌面离线时分析应失败为 `DESKTOP_AI_OFFLINE`。
+7. 「开始观察」多轮后，行情不变应跳过模型；「停止观察」后不再开新轮次。
 
-不要用生产环境测自动下单。
+实盘必须弹窗确认。生产 Compose 设置 `AXIOM_REQUIRE_DESKTOP_AI=1`。
 
 ## 12. 安全
 

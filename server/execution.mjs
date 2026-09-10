@@ -1,7 +1,7 @@
 import { addEvent } from "./store.mjs";
 
 export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValuePct: 8 });
-export const tradingExecutionPolicy = Object.freeze({ enabled: false, mode: "CONFIRM_THEN_SUBMIT" });
+export const tradingExecutionPolicy = Object.freeze({ enabled: true, mode: "CONFIRM_THEN_SUBMIT" });
 export const DEFAULT_AUTO_DECISION_COUNTDOWN_SEC = 30;
 
 export function isTradingSwitchOn() {

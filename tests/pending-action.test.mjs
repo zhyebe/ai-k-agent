@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
-import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, takeoverPendingAction } from "../server/engine.mjs";
+import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, takeoverPendingAction } from "../server/engine.mjs";
 import { isForbiddenTradeControl, suggestionFormLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
 
@@ -123,6 +123,13 @@ test("live auto timeout cannot skip the confirm dialog", async () => {
   await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /LIVE_REQUIRES_MANUAL_CONFIRM/);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});
+
+test("existing paper tasks can switch to confirm-gated live", () => {
+  const task = insertTask(`task_mode_${Date.now()}`, { mode: "PAPER", autoDecisionEnabled: true });
+  const next = setTaskMode(task.id, "LIVE");
+  assert.equal(next.mode, "LIVE");
+  assert.equal(next.autoDecisionEnabled, false);
 });
 
 test("cancel pending keeps monitoring and does not create an order", () => {

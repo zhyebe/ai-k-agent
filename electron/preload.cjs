@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld("axiomDesktop", {
     getBaseUrl: () => ipcRenderer.invoke("api:get-base-url"),
     setBaseUrl: (value) => ipcRenderer.invoke("api:set-base-url", value),
   },
+  ai: {
+    connect: (session) => ipcRenderer.invoke("ai:connect", session),
+    disconnect: () => ipcRenderer.invoke("ai:disconnect"),
+  },
   updates: {
     getState: () => ipcRenderer.invoke("update:get-state"),
     check: () => ipcRenderer.invoke("update:check"),

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { indexSkill } from "./rag.mjs";
-import { publicProvider as formatPublicProvider } from "./provider.mjs";
+import { publicProvider as formatPublicProvider, providerIdentityKey } from "./provider.mjs";
 
 const isoNow = () => new Date().toISOString();
 const maxAgentRuns = 100;
@@ -126,7 +126,7 @@ export const state = {
       id: "task_demo_001",
       name: "浩瀚数贸观察",
       status: "READY",
-      mode: "PAPER",
+      mode: "LIVE",
       symbol: "DGJJ",
       timeframe: "15m",
       target: {
@@ -423,6 +423,51 @@ export function persistSkill(skill) {
 
 export function persistProvider(provider) {
   return persistValue("saveProvider", provider);
+}
+
+export function persistDeletedProvider(providerId) {
+  return persistValue("deleteProvider", providerId);
+}
+
+export function findOwnedProviderMatch(userId, payload) {
+  const needle = providerIdentityKey({ ...payload, ownerUserId: userId });
+  return state.providers.find((item) => String(item.ownerUserId || "") === String(userId || "") && providerIdentityKey(item) === needle) || null;
+}
+
+export function collapseDuplicateProviders() {
+  const referenced = new Set(state.tasks.map((task) => String(task.providerId || "")).filter(Boolean));
+  const keptByKey = new Map();
+  const removed = [];
+  for (const provider of state.providers) {
+    if (!provider.ownerUserId) continue;
+    const key = providerIdentityKey(provider);
+    const current = keptByKey.get(key);
+    if (!current) {
+      keptByKey.set(key, provider);
+      continue;
+    }
+    const keepCurrent = referenced.has(String(current.id)) || (!referenced.has(String(provider.id)) && String(current.id) <= String(provider.id));
+    if (keepCurrent) removed.push(provider);
+    else {
+      removed.push(current);
+      keptByKey.set(key, provider);
+    }
+  }
+  if (!removed.length) return 0;
+  const removeIds = new Set(removed.map((item) => item.id));
+  const replacement = new Map();
+  for (const provider of removed) {
+    const kept = keptByKey.get(providerIdentityKey(provider));
+    if (kept) replacement.set(provider.id, kept.id);
+  }
+  state.providers = state.providers.filter((item) => !removeIds.has(item.id));
+  for (const task of state.tasks) {
+    if (!removeIds.has(task.providerId)) continue;
+    task.providerId = replacement.get(task.providerId) || "";
+    persistTask(task);
+  }
+  for (const id of removeIds) persistDeletedProvider(id);
+  return removed.length;
 }
 
 export function persistConnector(connector) {

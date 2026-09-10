@@ -26,9 +26,11 @@ npm run dev:desktop
 
 `npm run dev` 同时启动 Vite（5173）与 Node API（8787）。未配置数据库时使用内存演示仓储，页面仍可操作；服务端状态重启后会重置为演示数据。复制 `.env.example` 后请至少替换 `ADMIN_PASSWORD`、`APP_SECRET` 和 `DESKTOP_PASSWORD`。桌面端必须登录；若配置了 `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`，首次启动会创建该用户并分配已有任务。
 
-当前版本默认只给出买卖建议，不会自动下单。生产部署见 [docs/deploy.md](docs/deploy.md)，本地安装与试运行见 [docs/install.md](docs/install.md)。
+当前版本实盘出现买卖建议时会弹窗，确认后才会在已登录页面下单。生产部署见 [docs/deploy.md](docs/deploy.md)，本地安装与试运行见 [docs/install.md](docs/install.md)。
 
-「开始观察」启动的是服务端持续控制循环：首轮立即执行，之后按周期读取网页和只读行情。每轮都保留配置周期的历史 K 线、逐笔、页面字段和账户只读字段；规范化行情未变化时跳过 AI，变化、首轮或上轮失败时开启新的分析轮次，并把最近轮次作为多轮上下文。交给模型的行情会按上海时区分层（近 1 小时分钟、至昨天凌晨小时、至上月日、更早月），不含秒级逐笔。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可覆盖轮询频率，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读采集范围。即使模型给出 `BUY` / `SELL`，执行层仍全局禁止交易写请求和买卖控件点击。
+生产环境里，账号、任务、Provider 配置和密钥只存在服务端；桌面 Agent 与模型的 HTTP 请求从本机发出，不经过 API 服务器转发。桌面端必须保持登录在线，否则分析会返回 `DESKTOP_AI_OFFLINE`。本地 `npm run dev` 未设置 `AXIOM_REQUIRE_DESKTOP_AI=1` 时，API 与模型在同一台机器上，仍可直接请求。
+
+「开始观察」启动的是服务端持续控制循环：首轮立即执行，之后按周期读取网页和只读行情。每轮都保留配置周期的历史 K 线、逐笔、页面字段和账户只读字段；规范化行情未变化时跳过 AI，变化、首轮或上轮失败时开启新的分析轮次，并把最近轮次作为多轮上下文。交给模型的行情会按上海时区分层（近 1 小时分钟、至昨天凌晨小时、至上月日、更早月），不含秒级逐笔。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可覆盖轮询频率，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读采集范围。模型给出 `BUY` / `SELL` 后，实盘任务会弹窗；只有你确认，服务端才会在已登录页面提交订单。观察 / 影子模式不会实盘下单。`AXIOM_TRADING_ENABLED=0` 可整机关闭实盘提交。
 
 后台默认入口：`http://127.0.0.1:5173/admin.html`。使用 `.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录；未加载 `.env` 时开发回退值为 `admin` / `local-admin`，不要用于共享环境。
 
@@ -103,7 +105,7 @@ macOS 构建在 `release/` 生成 `dmg` / `zip`（本机已验证 arm64 目录�
 仓库使用 GitHub Release 分发桌面端。推送 `v*` 标签后，`.github/workflows/release.yml` 会分别构建 macOS universal 和 Windows x64，并发布安装包、portable 包及 `latest-mac.yml` / `latest.yml` 更新元数据：
 
 ```bash
-git tag v0.2.1
+git tag v0.2.2
 git push origin main --tags
 ```
 

@@ -1,4 +1,4 @@
-import { requestDecision, requestSegmentReview } from "./provider.mjs";
+import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-ai.mjs";
 import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { searchKnowledge } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
@@ -40,15 +40,15 @@ function assertCycleCurrent(task, generation) {
   if (taskGeneration(task) !== generation) throw new CycleAbortError("CYCLE_INVALIDATED");
 }
 
-function resolveRuntime(overrides = {}) {
+function resolveRuntime(overrides = {}, { userId = "" } = {}) {
   const use = (name, fallback) => typeof overrides?.[name] === "function" ? overrides[name] : fallback;
   return {
     openMarketBrowser: use("openMarketBrowser", openMarketBrowser),
     browserLoginStatus: use("browserLoginStatus", browserLoginStatus),
     browserLogin: use("browserLogin", browserLogin),
     observeMarket: use("observeMarket", observeMarket),
-    requestDecision: use("requestDecision", requestDecision),
-    requestSegmentReview: use("requestSegmentReview", requestSegmentReview),
+    requestDecision: use("requestDecision", (provider, context, options) => callProviderMethod("requestDecision", userId, { provider, context, options })),
+    requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
     fillSuggestionForm: use("fillSuggestionForm", fillSuggestionForm),
     submitSuggestionForm: use("submitSuggestionForm", submitSuggestionForm),
@@ -197,6 +197,31 @@ export function setTaskProvider(taskId, providerId, userId = "") {
   task.providerId = provider.id;
   task.updatedAt = new Date().toISOString();
   addEvent("provider_selected", `已切换分析模型：${provider.name} / ${provider.model}`, { taskId, providerId: provider.id, userId });
+  persistTask(task);
+  return task;
+}
+
+export function setTaskMode(taskId, mode) {
+  const task = getTask(taskId);
+  if (!task) throw new Error("TASK_NOT_FOUND");
+  const next = mode === "LIVE" ? "LIVE" : mode === "SHADOW" ? "SHADOW" : mode === "PAPER" ? "PAPER" : "";
+  if (!next) throw new Error("TASK_MODE_INVALID");
+  if (task.pendingAction?.status === "SUBMITTING") throw new Error("PENDING_ACTION_BUSY");
+  const previous = task.mode;
+  task.mode = next;
+  if (next === "LIVE") task.autoDecisionEnabled = false;
+  if (task.pendingAction?.status === "WAITING") {
+    task.pendingAction.countdownSec = 0;
+    task.pendingAction.deadlineAt = null;
+    task.pendingAction.message = next === "LIVE"
+      ? "实盘必须弹窗确认后才会下单"
+      : "观察模式确认后也不会提交实盘";
+    clearPendingActionTimer(task.id);
+  }
+  task.updatedAt = new Date().toISOString();
+  addEvent("task_mode_updated", next === "LIVE"
+    ? "任务已切换为实盘：弹窗确认后才会下单"
+    : `任务已切换为${next === "SHADOW" ? "影子记录" : "观察 / 建议"}`, { taskId, mode: next, previous });
   persistTask(task);
   return task;
 }
@@ -582,7 +607,7 @@ export function startTask(taskId) {
   task.updatedAt = new Date().toISOString();
   addEvent("task_monitoring", "启动检查通过，Agent 已进入持续监控；买卖仍只给出建议", { taskId });
   persistTask(task);
-  startController(taskId);
+  startController(taskId, { userId: userIdsForTask(taskId)[0] || "" });
   return task;
 }
 
@@ -651,7 +676,7 @@ export function autoJudge(taskId) {
     task.heartbeatAt = new Date().toISOString();
     task.leaseExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     addEvent("task_resumed", "人工规则确认完成，任务恢复持续监控", { taskId });
-    startController(taskId);
+    startController(taskId, { userId: userIdsForTask(taskId)[0] || "" });
   }
   persistTask(task);
   return task;
@@ -993,6 +1018,10 @@ export function enforceDecisionLimits(decision) {
 export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
+  const resolvedUserId = userId || userIdsForTask(taskId)[0] || "";
+  if (desktopAiRequired() && !hasDesktopAi(resolvedUserId) && typeof runtimeOverrides.requestDecision !== "function") {
+    throw new Error("DESKTOP_AI_OFFLINE");
+  }
   const acquired = await acquireCycle(taskId, { wait: trigger === "manual" });
   if (!acquired) return { task: existing, market: existing.market || null, skipped: true, reason: "CYCLE_IN_PROGRESS", analysisTriggered: false };
   const task = getTask(taskId);
@@ -1001,7 +1030,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     notifyCycleIdle(taskId);
     throw new Error("TASK_NOT_FOUND");
   }
-  const runtime = resolveRuntime(runtimeOverrides);
+  const runtime = resolveRuntime(runtimeOverrides, { userId: resolvedUserId });
   const run = startAgentRun(taskId, { trigger });
   const generation = taskGeneration(task);
   const assertCurrent = () => assertCycleCurrent(task, generation);
@@ -1390,9 +1419,10 @@ export function startController(taskId, options = {}) {
   if (controllerLoops.has(taskId)) return;
   const task = getTask(taskId);
   if (!monitoringIntent(task)) return;
+  const userId = options.userId || userIdsForTask(taskId)[0] || "";
   const runCycle = typeof options.runCycle === "function"
     ? options.runCycle
-    : (id) => runMonitoringCycle(id, { providerId: options.providerId, userId: options.userId, runtime: options.runtime });
+    : (id) => runMonitoringCycle(id, { providerId: options.providerId, userId, runtime: options.runtime });
   const entry = { timer: null, running: false, stopped: false, generation: taskGeneration(task), runCycle };
   controllerLoops.set(taskId, entry);
   const persistedNextPoll = new Date(task.nextPollAt || "").getTime();

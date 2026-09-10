@@ -4,7 +4,7 @@ const http = require("node:http");
 const net = require("node:net");
 const fs = require("node:fs");
 const path = require("node:path");
-const { autoUpdater } = require("electron-updater");
+const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
 
 let apiProcess;
 let mainWindow;
@@ -156,6 +156,7 @@ function saveApiBaseUrl(value) {
 ipcMain.on("api:get-base-url", (event) => { event.returnValue = apiBaseUrl || initialApiBaseUrl(); });
 ipcMain.handle("api:get-base-url", () => apiBaseUrl || initialApiBaseUrl());
 ipcMain.handle("api:set-base-url", (_event, value) => saveApiBaseUrl(value));
+bindAiRuntime(ipcMain, app);
 
 function probePort(port) {
   return new Promise((resolve) => {
@@ -306,5 +307,6 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   if (updateCheckTimer) clearInterval(updateCheckTimer);
+  disconnectAiRuntime();
   if (apiProcess && !apiProcess.killed) apiProcess.kill();
 });

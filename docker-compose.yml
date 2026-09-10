@@ -46,6 +46,7 @@ services:
       AXIOM_VAULT_FILE: /var/lib/axiom-agent/credentials.vault.json
       AXIOM_BROWSER_NO_SANDBOX: "1"
       ALLOW_MEMORY_FALLBACK: "0"
+      AXIOM_REQUIRE_DESKTOP_AI: "1"
     volumes:
       - axiom_data:/var/lib/axiom-agent
     depends_on:
