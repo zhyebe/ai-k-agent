@@ -26,3 +26,24 @@ test("stores and resolves credentials without exposing plaintext", async () => {
   assert.equal(source.includes("tester@example.com"), false);
   assert.equal(source.includes("vault-only-password"), false);
 });
+
+test("upserts the same owner's credential for the same website host", async () => {
+  await vault.initVault();
+  const first = await vault.storeCredential({
+    username: "haohan-user",
+    password: "first-pass",
+    ownerUserId: "user_owner_1",
+    target: { type: "website", url: "https://smyw.haohandahan.cn/client/#/transcc", adapterId: "haohan-readonly" },
+  });
+  const second = await vault.storeCredential({
+    username: "haohan-user",
+    password: "second-pass",
+    ownerUserId: "user_owner_1",
+    target: { type: "website", url: "https://smyw.haohandahan.cn/client/#/other", adapterId: "haohan-readonly" },
+  });
+  assert.equal(first.credentialRef, second.credentialRef);
+  assert.equal(vault.getCredential(second.credentialRef, { ownerUserId: "user_owner_1" }).password, "second-pass");
+  assert.equal(vault.findOwnedCredential({ ownerUserId: "user_owner_2", target: { type: "website", url: "https://smyw.haohandahan.cn/" } }), null);
+  const owned = vault.findOwnedCredential({ ownerUserId: "user_owner_1", target: { type: "website", url: "https://smyw.haohandahan.cn/foo" } });
+  assert.equal(owned.credentialRef, first.credentialRef);
+});

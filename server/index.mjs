@@ -11,7 +11,7 @@ import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runA
 import { openMarketBrowser, observeMarket } from "./market.mjs";
 import { browserLogin, browserLoginStatus } from "./tools.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
-import { credentialExists, initVault, listCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
+import { credentialExists, findOwnedCredential, initVault, listCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
 import { assignTask, assignedTaskIds, canAccessTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, requireUser, revokeUserSession, setUserPersistence, unassignTask, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
@@ -96,6 +96,78 @@ function ownerOptions(auth, taskId = "") {
   return { ownerUserId: auth.user.id, ownerUserIds: taskId ? userIdsForTask(taskId) : [auth.user.id] };
 }
 
+function credentialTargetFromProfile(profile) {
+  if (!profile) return { type: "website", url: "", installPath: "", adapterId: "" };
+  return {
+    type: profile.type === "app" ? "app" : "website",
+    url: profile.type === "website" ? String(profile.target || "") : "",
+    installPath: profile.type === "app" ? String(profile.target || "") : "",
+    adapterId: String(profile.adapterId || ""),
+  };
+}
+
+function publicOwnedCredentials(auth) {
+  return listCredentials(ownerOptions(auth)).map((item) => ({
+    accountLabel: item.accountLabel,
+    target: item.target,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  }));
+}
+
+async function resolveOwnedCredential({ auth, task = null, profile, username = "", password = "", targetChanged = false }) {
+  const ownerUserId = auth?.type === "user" ? String(auth.user.id) : "";
+  const options = ownerOptions(auth, task?.id);
+  const usernameValue = String(username || "").trim();
+  const passwordValue = String(password || "");
+  const target = credentialTargetFromProfile(profile);
+
+  if (passwordValue) {
+    if (!usernameValue) throw new Error("CREDENTIALS_REQUIRED");
+    const stored = await storeCredential({
+      username: usernameValue,
+      password: passwordValue,
+      label: profile?.name || "",
+      ownerUserId,
+      target,
+    });
+    return {
+      credentialRef: stored.credentialRef,
+      accountLabel: stored.accountLabel,
+      credentialOwnerUserId: String(stored.ownerUserId || ownerUserId),
+      hasCredential: true,
+    };
+  }
+
+  if (!targetChanged) {
+    const existingRef = String(task?.target?.credentialRef || "");
+    if (existingRef && existingRef !== "credential:demo" && credentialExists(existingRef, options)) {
+      const stored = listCredentials(options).find((item) => item.credentialRef === existingRef);
+      return {
+        credentialRef: existingRef,
+        accountLabel: stored?.accountLabel || task.target.accountLabel || "已托管",
+        credentialOwnerUserId: String(stored?.ownerUserId || task.target.credentialOwnerUserId || ownerUserId),
+        hasCredential: true,
+      };
+    }
+  }
+
+  if (ownerUserId) {
+    const owned = findOwnedCredential({ ownerUserId, target });
+    if (owned) {
+      return {
+        credentialRef: owned.credentialRef,
+        accountLabel: owned.accountLabel,
+        credentialOwnerUserId: owned.ownerUserId,
+        hasCredential: true,
+      };
+    }
+  }
+
+  if (usernameValue) throw new Error("CREDENTIALS_REQUIRED");
+  return { credentialRef: "", accountLabel: "未配置", credentialOwnerUserId: "", hasCredential: false };
+}
+
 function rememberConnector(profile, auth) {
   if (auth?.type !== "user") return profile;
   const existing = state.connectors.find((item) => item.connectorId === profile.connectorId);
@@ -170,6 +242,7 @@ function snapshot(auth = null) {
     ...publicState({ taskIds, userId: currentUser?.id || null }),
     health: { db: persistence.mode, dbAvailable: persistence.available, persistentSecret: hasPersistentSecret(), vault: vaultStatus() },
     rag: getRagStats(),
+    credentials: currentUser ? publicOwnedCredentials({ type: "user", user: currentUser }) : [],
     auth: currentUser ? { type: "user", user: { ...currentUser, assignedTaskIds: taskIds } } : auth ? { type: auth.type, username: auth.username } : null,
   };
 }
@@ -345,6 +418,19 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     try { profile = discoverConnector(targetInput); } catch (error) { return reply.code(400).send({ error: error.message }); }
     profile = upsertConnector(profile, request.auth);
   }
+  let resolved = { credentialRef: "", accountLabel: "未配置", credentialOwnerUserId: "", hasCredential: false };
+  if (profile) {
+    try {
+      resolved = await resolveOwnedCredential({
+        auth: request.auth,
+        profile,
+        username: body.username,
+        password: body.password,
+      });
+    } catch (error) {
+      return reply.code(400).send({ error: error.message || "CREDENTIALS_REQUIRED" });
+    }
+  }
   const task = {
     id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     name: String(body.name || "新建观察任务"),
@@ -355,7 +441,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     automationAuthorized: false,
     autoDecisionEnabled: false,
     autoDecisionCountdownSec: 30,
-    providerId: "",
+    providerId: request.auth?.type === "user" ? resolveDefaultProviderId(request.auth.user.id) : "",
     pendingAction: null,
     target: {
       type: targetType,
@@ -366,10 +452,12 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
       connectorId: profile?.connectorId || "",
       adapterId: profile?.adapterId || "",
       adapterVersion: profile?.adapterVersion || "",
-      accountLabel: String(body.accountLabel || "未配置"),
-      credentialStatus: "未配置",
+      accountLabel: resolved.accountLabel,
+      credentialRef: resolved.credentialRef,
+      credentialOwnerUserId: resolved.credentialOwnerUserId,
+      credentialStatus: resolved.hasCredential ? "已托管" : "未配置",
       connectionStatus: profile?.reviewStatus === "APPROVED" ? (profile.adapterId === "haohan-readonly" ? "readonly_ready" : "disconnected") : profile ? "review_required" : "disconnected",
-      loginStatus: profile?.reviewStatus === "APPROVED" ? "credential_required" : profile ? "adapter_review_required" : "unconfigured",
+      loginStatus: profile?.reviewStatus === "APPROVED" ? (resolved.hasCredential ? "login_unverified" : "credential_required") : profile ? "adapter_review_required" : "unconfigured",
       executionModes: profile?.executionModes || [],
       adapterStatus: profile?.adapterStatus || "待发现",
       discoveryStatus: profile?.discoveryStatus || "未发现",
@@ -536,45 +624,21 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
     if (task && !hasTarget && profile.connectorId !== task.target?.connectorId) return reply.code(403).send({ error: "CONNECTOR_TASK_MISMATCH" });
     if (request.auth.type === "user" && !task && profile.ownerUserId && profile.ownerUserId !== request.auth.user.id && !profile.ownerUserIds?.includes(request.auth.user.id)) return reply.code(403).send({ error: "CONNECTOR_ACCESS_DENIED" });
     const targetChanged = Boolean(task && task.target?.connectorId && task.target.connectorId !== profile.connectorId);
-    const submittedCredentialRef = String(body.credentialRef || "");
-    let credentialRef = targetChanged ? "" : submittedCredentialRef || String(task?.target?.credentialRef || "");
-    let credentialOwnerUserId = targetChanged ? "" : String(task?.target?.credentialOwnerUserId || "");
-    let accountLabel = "未配置";
+    const resolved = await resolveOwnedCredential({
+      auth: request.auth,
+      task,
+      profile,
+      username: body.username,
+      password: body.password,
+      targetChanged,
+    });
+    const credentialRef = resolved.credentialRef;
+    const credentialOwnerUserId = resolved.credentialOwnerUserId;
+    const accountLabel = resolved.accountLabel;
     const credentialOptions = ownerOptions(request.auth, task?.id);
-    if (credentialRef) {
-      if (credentialRef === "credential:demo") return reply.code(400).send({ error: "CREDENTIAL_REF_NOT_FOUND" });
-      if (!credentialExists(credentialRef, credentialOptions)) return reply.code(400).send({ error: "CREDENTIAL_REF_NOT_FOUND" });
-      const stored = listCredentials(credentialOptions).find((item) => item.credentialRef === credentialRef);
-      if (stored?.target?.adapterId && stored.target.adapterId !== profile.adapterId) return reply.code(400).send({ error: "CREDENTIAL_TARGET_MISMATCH" });
-      if (stored?.target?.url && profile.type === "website") {
-        try {
-          if (new URL(stored.target.url).hostname !== new URL(profile.target).hostname) return reply.code(400).send({ error: "CREDENTIAL_TARGET_MISMATCH" });
-        } catch { return reply.code(400).send({ error: "CREDENTIAL_TARGET_MISMATCH" }); }
-      }
-      if (stored?.target?.installPath && profile.type === "app" && stored.target.installPath !== profile.target) return reply.code(400).send({ error: "CREDENTIAL_TARGET_MISMATCH" });
-      accountLabel = stored?.accountLabel || "已托管";
-      credentialOwnerUserId = String(stored?.ownerUserId || credentialOwnerUserId);
-    } else if (body.username || body.password) {
-      if (!body.username || !body.password) return reply.code(400).send({ error: "CREDENTIALS_REQUIRED" });
-      const stored = await storeCredential({
-        username: body.username,
-        password: body.password,
-        label: body.name,
-        ownerUserId: request.auth.type === "user" ? request.auth.user.id : "",
-        target: {
-          type: profile.type,
-          url: profile.type === "website" ? profile.target : "",
-          installPath: profile.type === "app" ? profile.target : "",
-          adapterId: profile.adapterId,
-        },
-      });
-      credentialRef = stored.credentialRef;
-      accountLabel = stored.accountLabel;
-      credentialOwnerUserId = String(stored.ownerUserId || credentialOwnerUserId);
-    }
     profile = upsertConnector(profile, request.auth);
     const adapterReady = profile.reviewStatus === "APPROVED";
-    const hasCredential = Boolean(credentialRef);
+    const hasCredential = resolved.hasCredential;
     let ok = false;
     let code = "CONNECTOR_NOT_VERIFIED";
     let message = "连接尚未验证";

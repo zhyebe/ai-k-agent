@@ -81,7 +81,7 @@ import {
   userLogout,
   userSession,
 } from "./lib/api";
-import type { AgentOutputLine, AgentRun, DesktopUpdateState, MarketCandle, MarketTimeframe, PendingAction, Provider, Rule, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import type { AgentOutputLine, AgentRun, DesktopUpdateState, MarketCandle, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "console", label: "任务控制台", icon: LayoutDashboard },
@@ -220,7 +220,24 @@ function DesktopUpdateControl({ state, busy, onAction }: { state: DesktopUpdateS
   return <button type="button" className={`update-control update-${state.status}`} onClick={onAction} disabled={disabled} title={`桌面版 v${state.currentVersion} · ${state.error || actionLabel}`}><Download size={14} /><span>{actionLabel}</span></button>;
 }
 
-const emptyWorkspace: Workspace = { tasks: [], skills: [], providers: [], events: [], runs: [], connectors: [], orders: [], agentRuns: [] };
+const emptyWorkspace: Workspace = { tasks: [], skills: [], providers: [], events: [], runs: [], connectors: [], orders: [], agentRuns: [], credentials: [] };
+
+function hostnameOf(url = "") {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function savedCredentialForTarget(credentials: SavedCredential[] = [], targetType: string, url: string, installPath: string) {
+  return credentials.find((item) => {
+    if (targetType === "app") return String(item.target?.installPath || "") === String(installPath || "");
+    const savedHost = hostnameOf(item.target?.url || "");
+    const nextHost = hostnameOf(url);
+    return Boolean(savedHost && nextHost && savedHost === nextHost);
+  }) || null;
+}
 
 function preferredProviderId(providers: Provider[]) {
   return providers.find((item) => item.configured)?.id;
@@ -763,10 +780,16 @@ function App() {
     await withBusy("task-create", async () => {
       try {
         const created = await createTask(payload);
-        setWorkspace((current) => ({ ...current, tasks: [created, ...current.tasks] }));
+        try {
+          const next = await fetchWorkspace();
+          setWorkspace(next);
+          if (next.auth?.user) setUser(next.auth.user);
+        } catch {
+          setWorkspace((current) => ({ ...current, tasks: [created, ...current.tasks] }));
+        }
         setModal(null);
         setView("console");
-        notify(`任务已创建：${created.name}`);
+        notify(created.target.credentialStatus === "已托管" ? `任务已创建，登录凭据已保存到当前账号：${created.name}` : `任务已创建：${created.name}`);
       } catch (error) {
         notify(`创建失败：${error instanceof Error ? error.message : "请检查目标地址"}`);
         throw error;
@@ -829,7 +852,7 @@ function App() {
       {task?.pendingAction && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
         <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
       )}
-      {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} />}
+      {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} savedCredentials={workspace.credentials || []} />}
       {modal === "skill" && <SkillModal onClose={() => setModal(null)} onSave={handleSkillSave} />}
       {modal === "provider" && <ProviderModal onClose={() => setModal(null)} onSave={handleProviderSave} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={16} /><span>{toast}</span><button aria-label="关闭提示" onClick={() => setToast(null)}><X size={14} /></button></div>}
@@ -1051,12 +1074,24 @@ function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task;
   const [url, setUrl] = useState(task.target.url || "");
   const [appId, setAppId] = useState(task.target.appId || "");
   const [installPath, setInstallPath] = useState(task.target.installPath || "");
-  const [username, setUsername] = useState(task.target.accountLabel);
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  function submit(event: FormEvent) { event.preventDefault(); onTest({ taskId: task.id, connectorId: task.target.connectorId, type, name, url, appId, installPath, username, password }); setPassword(""); }
+  const hosted = task.target.credentialStatus === "已托管";
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    const payload: Record<string, unknown> = { taskId: task.id, connectorId: task.target.connectorId, type, name, url, appId, installPath };
+    if (password) {
+      payload.username = username;
+      payload.password = password;
+    } else if (!hosted && username) {
+      payload.username = username;
+    }
+    onTest(payload);
+    setPassword("");
+  }
   const connectionReady = ["connected", "readonly_ready", "browser_ready"].includes(task.target.connectionStatus);
   const connectionLabel = displayLabel(task.target.connectionStatus, connectionLabels, "待确认");
-  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={task.target.credentialStatus === "已托管" ? "已托管，留空以复用" : "只写入安全托管，不展示"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>密码写入本地加密 Vault；日志和模型上下文只使用 credentialRef。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><RefreshCw size={15} />{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
+  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "当前账号的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用当前账号凭据" : "写入当前账号的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>凭据绑定当前登录用户。同一网站下次创建任务或重新登录会自动复用，其他账号看不到。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><RefreshCw size={15} />{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
 }
 
 function ProviderRow({ provider, selected, onTest, onDelete, onSelect, busy, testing }: { provider: Provider; selected: boolean; onTest: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; busy: boolean; testing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.configured ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onTest(provider)}><RefreshCw size={13} />{testing ? "验证中" : "验证"}</button>{provider.owned ? <button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button> : null}</div></div>; }
@@ -1067,7 +1102,61 @@ function RunsView({ runs, agentRuns, orders = [] }: { runs: Workspace["runs"]; a
   return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />可观测性</div><h1>运行记录</h1><p>每一轮分析、规则裁决和建议结果均可回放。</p></div></section><div className="run-summary"><SummaryTile label="Agent 运行" value={String(agentRuns.length)} icon={<Activity size={17} />} tone="green" /><SummaryTile label="总决策" value={runs.reduce((sum, run) => sum + run.decisions, 0).toString()} icon={<Bot size={17} />} tone="blue" /><SummaryTile label="交易订单" value={String(orders?.length || 0)} icon={<BarChart3 size={17} />} tone="muted" /><SummaryTile label="规则拦截" value={runs.reduce((sum, run) => sum + run.blocked, 0).toString()} icon={<ShieldCheck size={17} />} tone="amber" /></div><section className="panel runs-panel"><div className="panel-header"><div><div className="panel-kicker"><History size={14} />任务运行</div><h2>运行实例</h2></div></div><div className="run-table"><div className="table-head"><span>运行 ID</span><span>阶段</span><span>开始时间</span><span>建议</span><span>路由</span><span>状态</span></div>{agentRuns.length ? agentRuns.map((run) => <div className="run-row" key={run.id}><span className="run-id tabular">{run.id}</span><span>{displayLabel(run.currentStage, stageLabels, "其他阶段")}</span><span className="tabular">{formatTime(run.startedAt)}</span><span className="tabular">{run.finalAction ? displaySuggestion(run.finalAction) : "--"}</span><span className="tabular">{displayLabel(run.route, routeLabels, "仅输出建议")}</span><span className="approval-label">{displayLabel(run.status, runStatusLabels, "待确认")}</span></div>) : <div className="empty-state"><CircleDashed size={16} />还没有分析运行</div>}</div></section></>;
 }
 
-function TaskModal({ onClose, onCreate }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void> }) { const [name, setName] = useState("浩瀚数贸观察任务"); const [targetType, setTargetType] = useState("website"); const [targetName, setTargetName] = useState("浩瀚数贸"); const [url, setUrl] = useState("https://smyw.haohandahan.cn/client/#/transcc"); const [installPath, setInstallPath] = useState(""); const [appId, setAppId] = useState(""); const [accountLabel, setAccountLabel] = useState(""); const [symbol, setSymbol] = useState("DGJJ"); const [timeframe, setTimeframe] = useState("15m"); const [mode, setMode] = useState("LIVE"); const [busy, setBusy] = useState(false); const lock = useRef(false); async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onCreate({ name, targetType, targetName, url, installPath, appId, accountLabel, symbol, timeframe, mode }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="创建任务" subtitle="先保存配置，再执行启动前检查。实盘任务出现建议时会弹窗，确认后才会下单。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label><div className="form-row"><label>目标类型<select value={targetType} onChange={(event) => setTargetType(event.target.value)}><option value="website">网站</option><option value="app">桌面 App</option></select></label><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label></div><label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>{targetType === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label> : <><label>App 安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>账号标识<input value={accountLabel} onChange={(event) => setAccountLabel(event.target.value)} placeholder="登录后将脱敏显示" autoComplete="username" /></label><div className="modal-footnote"><LockKeyhole size={14} />密码和 API Key 在连接器页面托管，创建任务不会把明文写入任务配置。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><Plus size={15} />{busy ? "创建中" : "创建任务"}</button></div></form></ModalShell>; }
+function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void>; savedCredentials?: SavedCredential[] }) {
+  const [name, setName] = useState("浩瀚数贸观察任务");
+  const [targetType, setTargetType] = useState("website");
+  const [targetName, setTargetName] = useState("浩瀚数贸");
+  const [url, setUrl] = useState("https://smyw.haohandahan.cn/client/#/transcc");
+  const [installPath, setInstallPath] = useState("");
+  const [appId, setAppId] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [symbol, setSymbol] = useState("DGJJ");
+  const [timeframe, setTimeframe] = useState("15m");
+  const [mode, setMode] = useState("LIVE");
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const saved = savedCredentialForTarget(savedCredentials, targetType, url, installPath);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (lock.current) return;
+    if (!saved && (!username.trim() || !password)) return;
+    lock.current = true;
+    setBusy(true);
+    try {
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode });
+    } catch {
+      lock.current = false;
+      setBusy(false);
+    }
+  }
+  return (
+    <ModalShell title="创建任务" subtitle="登录账号和 Provider 都保存在当前桌面用户下。同一账号再次登录会自动带出，其他用户互相隔离。" onClose={busy ? () => {} : onClose}>
+      <form className="modal-form" onSubmit={submit}>
+        <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
+        <div className="form-row">
+          <label>目标类型<select value={targetType} onChange={(event) => setTargetType(event.target.value)}><option value="website">网站</option><option value="app">桌面 App</option></select></label>
+          <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label>
+        </div>
+        <label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>
+        {targetType === "website"
+          ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label>
+          : <><label>App 安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}
+        <div className="form-row">
+          <label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} /></label>
+          <label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
+        </div>
+        <label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} placeholder={saved ? `已保存 ${saved.accountLabel}，留空则复用` : "目标网站登录名"} autoComplete="username" required={!saved} /></label>
+        <label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} placeholder={saved ? "已保存到当前账号，留空则复用" : "加密保存到当前登录用户"} autoComplete="new-password" type="password" required={!saved} /></label>
+        <div className="modal-footnote"><LockKeyhole size={14} />{saved ? "当前账号已有该网站凭据，密码留空会自动复用。Provider 也会按当前用户带出。" : "账号密码绑定当前登录用户，写入服务端加密托管。下次登录同一账号不用再填。"}</div>
+        <div className="modal-actions">
+          <button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button>
+          <button type="submit" className="button button-primary" disabled={busy}><Plus size={15} />{busy ? "创建中" : "创建任务"}</button>
+        </div>
+      </form>
+    </ModalShell>
+  );
+}
 
 function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><FileText size={15} />{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
 

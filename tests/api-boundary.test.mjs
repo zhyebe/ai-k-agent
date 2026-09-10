@@ -139,6 +139,54 @@ test("connector test enforces task binding and clears credentials on target chan
     const second = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-b", targetType: "website", url: "https://example.org" }) });
     assert.equal(first.status, 201);
     assert.equal(second.status, 201);
+    assert.equal(first.body.task.providerId, userProvider.body.provider.id);
+    assert.equal(first.body.task.target.credentialStatus, "未配置");
+
+    const hosted = await request(baseUrl, "/api/tasks", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        name: "boundary-hosted",
+        targetType: "website",
+        url: "https://smyw.haohandahan.cn/client/#/transcc",
+        username: "haohan-user",
+        password: "haohan-pass",
+      }),
+    });
+    assert.equal(hosted.status, 201, JSON.stringify(hosted.body));
+    assert.equal(hosted.body.task.target.credentialStatus, "已托管");
+    assert.equal(hosted.body.task.target.credentialRef, "");
+    assert.equal(hosted.body.task.providerId, userProvider.body.provider.id);
+
+    const incompleteCreds = await request(baseUrl, "/api/tasks", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "boundary-incomplete", targetType: "website", url: "https://example.net", username: "only-user" }),
+    });
+    assert.equal(incompleteCreds.status, 400);
+    assert.equal(incompleteCreds.body.error, "CREDENTIALS_REQUIRED");
+
+    const reused = await request(baseUrl, "/api/tasks", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name: "boundary-hosted-reuse", targetType: "website", url: "https://smyw.haohandahan.cn/client/#/other" }),
+    });
+    assert.equal(reused.status, 201, JSON.stringify(reused.body));
+    assert.equal(reused.body.task.target.credentialStatus, "已托管");
+    assert.equal(reused.body.task.target.accountLabel, hosted.body.task.target.accountLabel);
+
+    const ownedCreds = await request(baseUrl, "/api/credentials", { headers });
+    assert.ok(ownedCreds.body.credentials.some((item) => item.ownerUserId === login.body.user.id));
+    const workspaceOwned = await request(baseUrl, "/api/workspace", { headers });
+    assert.ok(Array.isArray(workspaceOwned.body.credentials));
+    assert.equal("credentialRef" in (workspaceOwned.body.credentials[0] || {}), false);
+    assert.ok(workspaceOwned.body.providers.some((provider) => provider.name === "Boundary Provider"));
+
+    const secondCreds = await request(baseUrl, "/api/credentials", { headers: secondHeaders });
+    assert.equal(secondCreds.body.credentials.some((item) => item.accountLabel === hosted.body.task.target.accountLabel), false);
+    const secondWorkspace = await request(baseUrl, "/api/workspace", { headers: secondHeaders });
+    assert.equal(secondWorkspace.body.providers.some((provider) => provider.name === "Boundary Provider"), false);
+    assert.equal((secondWorkspace.body.credentials || []).length, 0);
 
     const foreignConnector = second.body.task.target.connectorId;
     const crossTask = await request(baseUrl, "/api/connectors/test", {
@@ -156,6 +204,24 @@ test("connector test enforces task binding and clears credentials on target chan
     });
     assert.equal(credential.status, 200);
     assert.ok(credential.body.credentialRef);
+    assert.equal(credential.body.credentialStatus, "已托管");
+
+    const hostedReuse = await request(baseUrl, "/api/connectors/test", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ taskId: first.body.task.id, connectorId: first.body.task.target.connectorId, username: "boundary-account", password: "" }),
+    });
+    assert.equal(hostedReuse.status, 200, JSON.stringify(hostedReuse.body));
+    assert.ok(hostedReuse.body.credentialRef);
+    assert.equal(hostedReuse.body.credentialStatus, "已托管");
+
+    const usernameOnlyMissing = await request(baseUrl, "/api/connectors/test", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ taskId: second.body.task.id, connectorId: second.body.task.target.connectorId, username: "only-user", password: "" }),
+    });
+    assert.equal(usernameOnlyMissing.status, 400);
+    assert.equal(usernameOnlyMissing.body.error, "CREDENTIALS_REQUIRED");
 
     const changed = await request(baseUrl, "/api/connectors/test", {
       method: "POST",
@@ -181,6 +247,13 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(oldPasswordLogin.status, 401);
     const newPasswordLogin = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) });
     assert.equal(newPasswordLogin.status, 200);
+    const reloginHeaders = { "x-user-token": newPasswordLogin.body.token };
+    const reloginProviders = await request(baseUrl, "/api/providers", { headers: reloginHeaders });
+    assert.ok(reloginProviders.body.providers.some((provider) => provider.name === "Boundary Provider"));
+    const reloginCreds = await request(baseUrl, "/api/credentials", { headers: reloginHeaders });
+    assert.ok(reloginCreds.body.credentials.some((item) => item.accountLabel === hosted.body.task.target.accountLabel));
+    const reloginWorkspace = await request(baseUrl, "/api/workspace", { headers: reloginHeaders });
+    assert.ok(reloginWorkspace.body.tasks.some((task) => task.id === hosted.body.task.id && task.target.credentialStatus === "已托管"));
   } finally {
     child.kill("SIGTERM");
     await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 2000))]);

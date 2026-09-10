@@ -388,6 +388,18 @@ export interface WorkspaceUser {
   assignedTaskIds: string[];
 }
 
+export interface SavedCredential {
+  accountLabel: string;
+  target?: {
+    type?: string;
+    url?: string;
+    installPath?: string;
+    adapterId?: string;
+  };
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface Workspace {
   tasks: Task[];
   skills: Skill[];
@@ -398,6 +410,7 @@ export interface Workspace {
   orders?: OrderItem[];
   analyses?: Array<Record<string, unknown>>;
   agentRuns?: AgentRun[];
+  credentials?: SavedCredential[];
   health?: { db: string; dbAvailable: boolean; persistentSecret: boolean };
   rag?: { indexedChunks: number; mode: string; vectorProvider: string };
   auth?: { type: "user" | "admin"; user?: WorkspaceUser; username?: string } | null;

@@ -24,6 +24,37 @@ function ownerAllowed(record, options = {}) {
   return Boolean(recordOwner && allowed.has(recordOwner));
 }
 
+function hostnameOf(url) {
+  try {
+    return new URL(String(url || "")).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+export function credentialTargetMatches(recordTarget = {}, requested = {}) {
+  const recordType = recordTarget.type === "app" ? "app" : "website";
+  const requestedType = requested.type === "app" ? "app" : "website";
+  if (requestedType !== recordType) return false;
+  if (requestedType === "app") {
+    const recordPath = String(recordTarget.installPath || "");
+    const requestedPath = String(requested.installPath || "");
+    return !requestedPath || !recordPath || recordPath === requestedPath;
+  }
+  const recordHost = hostnameOf(recordTarget.url);
+  const requestedHost = hostnameOf(requested.url);
+  if (recordHost && requestedHost) return recordHost === requestedHost;
+  return String(recordTarget.url || "") === String(requested.url || "");
+}
+
+function findOwnedCredentialRecord({ ownerUserId, target = {} } = {}) {
+  const owner = String(ownerUserId || "");
+  if (!owner) return null;
+  return [...records.values()]
+    .filter((record) => ownerIdOf(record) === owner && credentialTargetMatches(record.target, target))
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")))[0] || null;
+}
+
 export function setVaultPersistence(adapter) {
   persistence = adapter;
 }
@@ -72,26 +103,44 @@ export async function storeCredential({ username, password, target = {}, label =
   const normalizedUsername = String(username || "").trim();
   const normalizedPassword = String(password || "");
   if (!normalizedUsername || !normalizedPassword) throw new Error("CREDENTIALS_REQUIRED");
-  const id = `cred_${crypto.randomUUID()}`;
-  const record = {
-    id,
-    ownerUserId: String(ownerUserId || ""),
-    username: encryptSecret(normalizedUsername),
-    password: encryptSecret(normalizedPassword),
-    target: {
-      type: target.type === "app" ? "app" : "website",
-      url: String(target.url || ""),
-      installPath: String(target.installPath || ""),
-      adapterId: String(target.adapterId || ""),
-    },
-    label: String(label || ""),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+  const owner = String(ownerUserId || "");
+  const nextTarget = {
+    type: target.type === "app" ? "app" : "website",
+    url: String(target.url || ""),
+    installPath: String(target.installPath || ""),
+    adapterId: String(target.adapterId || ""),
   };
-  records.set(id, record);
+  const existing = findOwnedCredentialRecord({ ownerUserId: owner, target: nextTarget });
+  const now = new Date().toISOString();
+  const record = existing
+    ? {
+      ...existing,
+      ownerUserId: owner || ownerIdOf(existing),
+      username: encryptSecret(normalizedUsername),
+      password: encryptSecret(normalizedPassword),
+      target: nextTarget,
+      label: String(label || existing.label || ""),
+      updatedAt: now,
+    }
+    : {
+      id: `cred_${crypto.randomUUID()}`,
+      ownerUserId: owner,
+      username: encryptSecret(normalizedUsername),
+      password: encryptSecret(normalizedPassword),
+      target: nextTarget,
+      label: String(label || ""),
+      createdAt: now,
+      updatedAt: now,
+    };
+  records.set(record.id, record);
   await persist();
   if (persistence?.saveCredential) await persistence.saveCredential(record);
   return publicCredential(record);
+}
+
+export function findOwnedCredential({ ownerUserId, target = {} } = {}) {
+  const record = findOwnedCredentialRecord({ ownerUserId, target });
+  return record ? publicCredential(record) : null;
 }
 
 export function getCredential(credentialRef, options = {}) {
