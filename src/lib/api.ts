@@ -11,6 +11,9 @@ function normalizeApiBaseUrl(value: string) {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("API_URL_INVALID");
   parsed.hash = "";
   parsed.search = "";
+  if (parsed.pathname === "/api" || parsed.pathname.endsWith("/api")) {
+    parsed.pathname = parsed.pathname.replace(/\/api\/?$/, "") || "/";
+  }
   return parsed.toString().replace(/\/$/, "");
 }
 

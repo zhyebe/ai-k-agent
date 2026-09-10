@@ -45,7 +45,7 @@ function chromePath() {
     ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", path.join(os.homedir(), "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")]
     : process.platform === "win32"
       ? [process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Google/Chrome/Application/chrome.exe"), process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google/Chrome/Application/chrome.exe")]
-      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium"];
+      : ["/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser"];
   return candidates.find((candidate) => candidate && fs.existsSync(candidate));
 }
 
@@ -71,6 +71,11 @@ async function createSession(sessionId) {
   };
   const executablePath = chromePath();
   if (executablePath) options.executablePath = executablePath;
+  const args = [];
+  if (process.env.AXIOM_BROWSER_NO_SANDBOX === "1") {
+    args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
+  }
+  if (args.length) options.args = args;
   const context = await chromium.launchPersistentContext(profileDirectory(sessionId), options);
   const page = context.pages()[0] || await context.newPage();
   return { context, page, ownsBrowser: true, mode: options.headless ? "headless" : "visible" };

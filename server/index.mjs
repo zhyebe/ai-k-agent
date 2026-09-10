@@ -14,15 +14,18 @@ import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, initVault, listCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
 import { assignTask, assignedTaskIds, canAccessTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, requireUser, revokeUserSession, setUserPersistence, unassignTask, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
+import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
-const allowedOrigins = new Set([
-  "http://127.0.0.1:5173",
-  "http://localhost:5173",
-  "null",
-  ...(process.env.CORS_ALLOWED_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean),
-]);
-await app.register(cors, { origin: (origin, callback) => callback(null, !origin || allowedOrigins.has(origin)) });
+await app.register(cors, {
+  origin: (origin, callback) => callback(null, isAllowedCorsOrigin(origin, {
+    extraOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS),
+    extraHosts: parseCsv(process.env.CORS_ALLOWED_HOSTS),
+  })),
+  allowedHeaders: ["content-type", "x-admin-token", "x-user-token", "authorization"],
+  methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  maxAge: 86400,
+});
 await app.register(websocket);
 const persistence = await createPersistence();
 setPersistence(persistence);

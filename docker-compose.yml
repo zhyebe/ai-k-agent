@@ -1,0 +1,77 @@
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-docker.m.daocloud.io/library/mysql:8.4}
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: axiom_agent
+      MYSQL_USER: axiom
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./db/mysql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    ports:
+      - "${INTERNAL_HOST:-172.19.62.79}:3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -uaxiom -p$$MYSQL_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mongo:
+    image: ${MONGO_IMAGE:-docker.m.daocloud.io/library/mongo:7}
+    restart: unless-stopped
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "${INTERNAL_HOST:-172.19.62.79}:27017:27017"
+
+  api:
+    build:
+      context: .
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DB_MODE: mysql
+      MYSQL_URL: mysql://axiom:${MYSQL_PASSWORD}@mysql:3306/axiom_agent
+      MONGO_URL: mongodb://mongo:27017
+      MONGO_DB: axiom_agent
+      AXIOM_DATA_DIR: /var/lib/axiom-agent
+      AXIOM_SECRET_FILE: /var/lib/axiom-agent/.axiom-secret
+      AXIOM_VAULT_FILE: /var/lib/axiom-agent/credentials.vault.json
+      AXIOM_BROWSER_NO_SANDBOX: "1"
+      ALLOW_MEMORY_FALLBACK: "0"
+    volumes:
+      - axiom_data:/var/lib/axiom-agent
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    expose:
+      - "8787"
+    shm_size: "1gb"
+
+  nginx:
+    build:
+      context: .
+      target: admin
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm}
+        NGINX_IMAGE: ${NGINX_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-80}:80"
+      - "${CLIENT_PORT:-8787}:80"
+    depends_on:
+      - api
+
+volumes:
+  mysql_data:
+  mongo_data:
+  axiom_data:

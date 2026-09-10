@@ -2,7 +2,7 @@
 
 你要部署的只有两块：**API 服务**和**后台管理页**（账号、分配、审计）。**桌面客户端不装在服务器上**，用户从 GitHub Releases 自己下载，登录页填写你的服务地址。每个桌面用户在客户端里添加自己的 Provider，后台看不到密钥。
 
-当前版本只做观察与建议，服务端禁止下单、撤单、提现，也不会点击目标站的买入 / 卖出。
+生产用 Docker 部署 API 和后台。桌面客户端不装在服务器上，用户从 GitHub Releases 下载，登录页填写公网服务地址。实盘任务出现买卖建议时会弹窗，确认后才会下单。
 
 本地开发仍看 [install.md](./install.md) 与仓库 [README.md](../README.md)。一键部署脚本见 [scripts](../scripts)。
 
@@ -32,15 +32,21 @@ flowchart LR
 | 管理员 | `https://<host>/admin.html` | 账号、分配、审计；不能配 Provider / 连接器 |
 | API | `https://<host>/api/*` 或内网 `HOST:PORT` | Fastify，默认 `127.0.0.1:8787` |
 
-以后把服务器 IP 和 SSH 密码发过来即可部署，不要把密码写进仓库：
+服务器已有 Docker 时用 Compose（推荐）。MySQL / Mongo 只绑内网 IP，客户端走公网：
 
 ```bash
-scripts/bootstrap-server.sh --host <IP> --user root --password '<SSH密码>'
-# 以后更新服务端 + 后台：
-scripts/deploy.sh --host <IP> --user root --password '<SSH密码>'
+scripts/deploy-docker.sh --host <公网IP> --internal-host <内网IP> --password '<SSH密码>'
 ```
 
-脚本只装 API、MySQL、Nginx 和 `admin.html`。桌面安装包仍由 Release 提供给用户下载。
+不要把密码写进仓库。桌面安装包仍由 Release 提供给用户下载。脚本会导出本机 `axiom_agent` 库和 Vault，并沿用原来的 `APP_SECRET`，否则 Provider / 凭据密文解不开。桌面端服务地址填公网 `http://<IP>` 或 `http://<IP>:8787`，不要加 `/api`。
+
+首次用 Docker 装好后，把服务器改成 git 拉取（Deploy key + Actions SSH）：
+
+```bash
+scripts/setup-git-deploy.sh
+```
+
+之后发 GitHub Release，或在 Actions 里手动跑 **Deploy API**，服务器会 `git fetch` 指定 ref 再 `docker compose up --build`。数据库卷和 `.env` 不会被覆盖。本地也可 `scripts/update-server.sh main`。
 
 ## 2. 机器要求
 
@@ -304,7 +310,7 @@ npm run release:win
 
 - 不要把 `.env`、`.axiom-data`、Vault、数据库备份提交到 Git。
 - `APP_SECRET`、管理密码、桌面密码、Provider Key、目标站密码分开保管。
-- API 只绑回环并由 Nginx 反代；安全组不要对公网开 8787。
+- API 容器不直接对公网暴露；Nginx 对外开 80，并可用 8787 作为桌面端默认端口的入口。
 - 定期轮转桌面用户密码；停用账号用后台状态，不要共用一个操作员。
 - 更换 `APP_SECRET` 前先导出/重录 Provider，否则旧密文无法解密。
 
@@ -313,7 +319,7 @@ npm run release:win
 | 现象 | 处理 |
 |---|---|
 | `MYSQL_CONNECTION_FAILED` | 检查 `MYSQL_URL`、库是否已建、`ALLOW_MEMORY_FALLBACK` 是否为 0 |
-| 后台能开、桌面连不上 | CORS 是否包含桌面实际访问的 API 源；服务地址不要写成带路径的 `/api` |
+| 后台能开、桌面连不上 | 服务地址填公网 `http://IP` 或 `http://IP:8787`，不要带 `/api`；安全组放行 80 和 8787；`CORS_ALLOWED_HOSTS` 含该 IP |
 | 健康检查 persistence 不可用 | 进程连的不是你以为的那套库，或权限不足 |
 | 分析提示重新登录 | 在桌面连接器确认凭据，或在 API 主机上重新打开目标页 |
 | 账户权益为 `--` / 0 | 页面可见「可用资金」才会同步；确认采集的是当前登录页 |

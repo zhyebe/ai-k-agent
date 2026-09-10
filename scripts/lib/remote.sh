@@ -24,6 +24,9 @@ parse_deploy_args() {
       --identity) DEPLOY_IDENTITY="$2"; shift 2 ;;
       --path) DEPLOY_PATH="$2"; shift 2 ;;
       --url|--public-url) DEPLOY_PUBLIC_URL="$2"; shift 2 ;;
+      --internal-host) DEPLOY_INTERNAL_HOST="$2"; shift 2 ;;
+      --public-port) DEPLOY_PUBLIC_PORT="$2"; shift 2 ;;
+      --client-port) DEPLOY_CLIENT_PORT="$2"; shift 2 ;;
       --skip-build) DEPLOY_SKIP_BUILD=1; shift ;;
       -h|--help) return 2 ;;
       *) die "unknown argument: $1" ;;
@@ -40,14 +43,44 @@ require_deploy_target() {
   [[ -n "$DEPLOY_HOST" ]] || die "set DEPLOY_HOST or pass --host"
   [[ "$DEPLOY_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || die "DEPLOY_HOST looks invalid"
   DEPLOY_PUBLIC_URL="${DEPLOY_PUBLIC_URL:-http://${DEPLOY_HOST}}"
+  DEPLOY_INTERNAL_HOST="${DEPLOY_INTERNAL_HOST:-172.19.62.79}"
+  DEPLOY_PUBLIC_PORT="${DEPLOY_PUBLIC_PORT:-80}"
+  DEPLOY_CLIENT_PORT="${DEPLOY_CLIENT_PORT:-8787}"
+  SSH_CONTROL_PATH="${TMPDIR:-/tmp}/axiom-ssh-${DEPLOY_HOST}.sock"
 }
 
 ssh_base_opts() {
-  local opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 -p "$DEPLOY_PORT")
+  local opts=(-F /dev/null -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o ConnectTimeout=20 -p "$DEPLOY_PORT")
   if [[ -n "${DEPLOY_IDENTITY:-}" ]]; then
     opts+=(-i "$DEPLOY_IDENTITY")
   fi
+  if [[ -n "${SSH_CONTROL_PATH:-}" && -S "$SSH_CONTROL_PATH" ]]; then
+    opts+=(-o ControlMaster=no -o ControlPath="$SSH_CONTROL_PATH")
+  fi
   printf '%s\n' "${opts[@]}"
+}
+
+open_ssh_master() {
+  [[ -n "${DEPLOY_PASSWORD:-}" ]] || return 0
+  if [[ -S "${SSH_CONTROL_PATH:-}" ]]; then
+    if ssh -F /dev/null -O check -o ControlPath="$SSH_CONTROL_PATH" \
+      -o ControlMaster=no "${DEPLOY_USER}@${DEPLOY_HOST}" >/dev/null 2>&1; then
+      return 0
+    fi
+    ssh -F /dev/null -O exit -o ControlPath="$SSH_CONTROL_PATH" \
+      "${DEPLOY_USER}@${DEPLOY_HOST}" >/dev/null 2>&1 || true
+    rm -f "$SSH_CONTROL_PATH"
+  fi
+  command -v expect >/dev/null 2>&1 || die "password login needs expect"
+  expect "$ROOT/scripts/lib/ssh-with-password.exp" "$DEPLOY_PASSWORD" \
+    ssh -F /dev/null -M -o ControlMaster=yes -o ControlPersist=600 \
+    -o ControlPath="$SSH_CONTROL_PATH" \
+    -o StrictHostKeyChecking=accept-new \
+    -o UserKnownHostsFile=/dev/null \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o ConnectTimeout=20 -p "$DEPLOY_PORT" \
+    "${DEPLOY_USER}@${DEPLOY_HOST}" true
+  [[ -S "$SSH_CONTROL_PATH" ]] || die "failed to open SSH control master"
 }
 
 have_sshpass() { command -v sshpass >/dev/null 2>&1; }
@@ -55,6 +88,10 @@ have_sshpass() { command -v sshpass >/dev/null 2>&1; }
 remote_ssh() {
   local opts=()
   while IFS= read -r item; do opts+=("$item"); done < <(ssh_base_opts)
+  if [[ -S "${SSH_CONTROL_PATH:-}" ]]; then
+    ssh "${opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "$@"
+    return
+  fi
   if [[ -n "${DEPLOY_PASSWORD:-}" ]] && have_sshpass; then
     SSHPASS="$DEPLOY_PASSWORD" sshpass -e ssh "${opts[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "$@"
     return
@@ -78,6 +115,7 @@ remote_rsync() {
     --exclude node_modules
     --exclude .axiom-data
     --exclude .env
+    --exclude .first-login
     --exclude scripts/deploy.env
     --exclude release
     --exclude electron
@@ -85,6 +123,11 @@ remote_rsync() {
     --exclude .DS_Store
   )
   local ssh_cmd
+  if [[ -S "${SSH_CONTROL_PATH:-}" ]]; then
+    rsync -az --delete "${excludes[@]}" -e "ssh $(printf '%q ' "${opts[@]}")" \
+      "$src" "${DEPLOY_USER}@${DEPLOY_HOST}:${dest}"
+    return
+  fi
   if [[ -n "${DEPLOY_PASSWORD:-}" ]] && have_sshpass; then
     ssh_cmd="sshpass -e ssh $(printf '%q ' "${opts[@]}")"
     SSHPASS="$DEPLOY_PASSWORD" rsync -az --delete "${excludes[@]}" -e "$ssh_cmd" \
@@ -99,4 +142,20 @@ remote_rsync() {
   fi
   rsync -az --delete "${excludes[@]}" -e "ssh $(printf '%q ' "${opts[@]}")" \
     "$src" "${DEPLOY_USER}@${DEPLOY_HOST}:${dest}"
+}
+
+remote_tar_sync() {
+  local dest="$1"
+  COPYFILE_DISABLE=1 tar -C "$ROOT" -czf - \
+    --exclude .git \
+    --exclude node_modules \
+    --exclude .axiom-data \
+    --exclude .env \
+    --exclude .first-login \
+    --exclude scripts/deploy.env \
+    --exclude release \
+    --exclude electron \
+    --exclude '*.log' \
+    --exclude .DS_Store \
+    . | remote_ssh "mkdir -p '$dest' && tar -xzf - -C '$dest'"
 }
