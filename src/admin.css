@@ -296,7 +296,7 @@
 
 .admin-metric {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
   min-height: 94px;
@@ -374,10 +374,10 @@
   font-weight: 700;
 }
 
-.admin-account-summary-row strong,
-.admin-account-summary-row span,
-.admin-service-row strong,
-.admin-service-row span {
+.admin-account-summary-row > div strong,
+.admin-account-summary-row > div span,
+.admin-service-row > div strong,
+.admin-service-row > div span {
   display: block;
   overflow: hidden;
   white-space: nowrap;
@@ -489,7 +489,16 @@
 }
 
 .audit-line > .event-dot {
+  display: grid;
+  place-items: center;
+  align-self: center;
   flex: 0 0 auto;
+}
+
+.audit-line > .event-dot > span {
+  display: block;
+  width: 6px;
+  height: 6px;
 }
 
 .audit-line .audit-time {
@@ -505,7 +514,8 @@
 }
 
 .audit-line strong,
-.audit-line span {
+.audit-line .audit-time,
+.audit-line > div span {
   display: block;
 }
 
@@ -808,6 +818,7 @@
 .audit-line.detailed {
   display: grid;
   grid-template-columns: 22px 55px minmax(0, 1fr) 160px 32px;
+  align-items: center;
   gap: 10px;
 }
 

@@ -808,7 +808,7 @@ function App() {
   if (!user) return <UserLogin onSignedIn={setUser} />;
 
   return (
-    <div className={`app-shell ${window.axiomDesktop ? "is-desktop" : ""}`}>
+    <div className={["app-shell", window.axiomDesktop ? "is-desktop" : "", window.axiomDesktop?.platform ? `platform-${window.axiomDesktop.platform}` : ""].filter(Boolean).join(" ")}>
       <WindowResizeHandles />
       <aside className={`sidebar ${sidebarOpen ? "sidebar-open" : ""}`}>
         <div className="brand-lockup">
