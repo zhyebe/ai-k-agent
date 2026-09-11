@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createUpdateFeed, sanitizeUpdateAssetName } from "../server/updates.mjs";
+import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName, updateAssetUrls } from "../server/updates.mjs";
 
 test("update asset names reject path traversal", () => {
   assert.equal(sanitizeUpdateAssetName("Axiom-Agent-0.2.9-arm64.dmg"), "Axiom-Agent-0.2.9-arm64.dmg");
@@ -36,4 +36,28 @@ test("update feed caches GitHub latest and finds a named asset", async () => {
   assert.equal(second.latestVersion, first.latestVersion);
   assert.equal((await feed.findAsset("Axiom-Agent-0.2.9-arm64.dmg"))?.url, "https://example.com/arm64.dmg");
   assert.equal(await feed.findAsset("../escape.exe"), null);
+});
+
+test("installer proxy tries streaming mirrors before unreachable GitHub", async () => {
+  const official = "https://github.com/zhyebe/ai-k-agent/releases/download/v0.3.0/Axiom-Agent-0.3.0-universal.dmg";
+  const urls = updateAssetUrls(official, ["https://mirror-one.example/", "https://mirror-two.example"]);
+  assert.deepEqual(urls, [
+    `https://mirror-one.example/${official}`,
+    `https://mirror-two.example/${official}`,
+    official,
+  ]);
+  const calls = [];
+  const response = await proxyUpdateAsset(
+    { name: "Axiom-Agent-0.3.0-universal.dmg", url: official },
+    {
+      mirrors: ["https://mirror-one.example/", "https://mirror-two.example/"],
+      fetchImpl: async (url) => {
+        calls.push(String(url));
+        if (calls.length === 1) return { ok: false, status: 502, body: { cancel: async () => {} } };
+        return { ok: true, status: 200 };
+      },
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(calls, urls.slice(0, 2));
 });
