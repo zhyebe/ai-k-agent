@@ -255,9 +255,12 @@ function productOptionText(value) {
 function extractInstrumentOption(text, fromMenu = false) {
   const value = productOptionText(text);
   if (!value || value === "F10" || value.length > 80) return null;
-  if (/登录|密码|可用资金|最新价|涨跌幅|持仓明细|销售|采购/.test(value)) return null;
+  if (/登录|密码|可用资金|最新价|涨跌幅|持仓明细|销售|采购|显示全部|请选择/.test(value)) return null;
+  if (/^(全部|买入|卖出|订立|转让)$/.test(value)) return null;
   const pipeMatch = value.match(/^([A-Z][A-Z0-9_.-]{1,24})\s*\|\s*(.+)$/);
   if (pipeMatch) return { symbol: pipeMatch[1], symbolName: pipeMatch[2], instrumentId: "" };
+  const gluedMatch = value.match(/^([A-Z][A-Z0-9_-]{1,15})([\u4e00-\u9fff].+)$/);
+  if (gluedMatch) return { symbol: gluedMatch[1], symbolName: gluedMatch[2], instrumentId: "" };
   const codeMatch = value.match(/^([A-Z][A-Z0-9_-]{1,15})\s+(.+)$/);
   if (codeMatch) return { symbol: codeMatch[1], symbolName: codeMatch[2], instrumentId: "" };
   if (/（二期）|一期|金尖|康砖/.test(value)) return { symbol: "", symbolName: value, instrumentId: "" };

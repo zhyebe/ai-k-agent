@@ -159,7 +159,7 @@ export function instrumentFromMarketDetail(value) {
 export function normalizePageInstrument(value) {
   if (!value || typeof value !== "object") return null;
   let symbol = String(value.symbol || value.symbolCode || value.code || "").trim();
-  const symbolName = String(value.symbolName || value.name || value.label || "").replace(/\s+/g, " ").trim();
+  let symbolName = String(value.symbolName || value.name || value.label || "").replace(/\s+/g, " ").trim();
   let instrumentId = String(value.instrumentId || value.symbolId || value.contractId || "").trim();
   if (isInternalChartSymbol(symbol)) {
     if (/^\d+$/.test(symbol) && !instrumentId) instrumentId = symbol;
@@ -168,6 +168,12 @@ export function normalizePageInstrument(value) {
   if (isInternalChartSymbol(instrumentId) && !/^\d+$/.test(instrumentId)) instrumentId = "";
   if (!symbol && !symbolName && !instrumentId) return null;
   if (symbolName === "F10") return symbol || instrumentId ? { symbol, symbolName: "", instrumentId } : null;
+  if (/^(全部|买入|卖出|订立|转让|显示全部)$/.test(symbolName) && !symbol && !instrumentId) return null;
+  const glued = symbolName.match(/^([A-Z][A-Z0-9_-]{1,15})([\u4e00-\u9fff].+)$/);
+  if (!symbol && glued) {
+    symbol = glued[1];
+    symbolName = glued[2];
+  }
   return { symbol, symbolName: symbolName.slice(0, 120), instrumentId };
 }
 

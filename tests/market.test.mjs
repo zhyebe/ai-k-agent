@@ -201,6 +201,19 @@ test("同一盘口的完整标识与下拉盘名不会重复计数", () => {
   ]);
 });
 
+test("下拉杂质和粘连盘名不会膨胀监控范围", () => {
+  assert.deepEqual(uniquePageInstruments([
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）" },
+    { symbolName: "全部" },
+    { symbolName: "买入" },
+    { symbolName: "DGJJ丹桂金尖（二期）" },
+  ]), [
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "" },
+  ]);
+});
+
 test("Vuex 商品列表会解析出两个真实盘口并忽略图表内部代码", () => {
   const boards = uniquePageInstruments([
     instrumentFromMarketDetail({ symbol: "丹桂金尖（二期）", commodityCode: "DGJJ", symbolId: "536" }),
