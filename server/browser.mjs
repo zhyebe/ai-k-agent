@@ -272,23 +272,24 @@ async function readVisibleInstrumentOptions(page) {
     const texts = [];
     const instruments = [];
     const seenInstances = new Set();
-    for (const node of document.querySelectorAll("*")) {
-      let instance = node.__vue__;
-      for (let depth = 0; instance && depth < 4; depth += 1, instance = instance.$parent) {
-        if (seenInstances.has(instance)) continue;
-        seenInstances.add(instance);
-        let options = [];
-        try { options = Array.isArray(instance.commodityOptions) ? instance.commodityOptions : []; } catch {}
-        for (const option of options) {
-          if (!option || typeof option !== "object") continue;
-          const rawSymbol = String(option.symbol || "").trim();
-          const symbol = /^[A-Z][A-Z0-9_-]{1,15}$/.test(rawSymbol)
-            ? rawSymbol
-            : [option.commodityCode, option.symbolCode, option.code].map((value) => String(value || "").trim()).find((value) => /^[A-Z][A-Z0-9_-]{1,15}$/.test(value)) || "";
-          const symbolName = String(option.commodityName || option.name || option.unit || option.symbolName || option.label || (!symbol ? rawSymbol : "")).replace(/\s+/g, " ").trim();
-          const instrumentId = String(option.symbolId ?? option.contractId ?? "").trim();
-          if (symbol || symbolName || instrumentId) instruments.push({ symbol, symbolName, instrumentId });
-        }
+    const queue = [...document.querySelectorAll("*")].map((node) => node.__vue__).filter(Boolean);
+    while (queue.length && seenInstances.size < 3000) {
+      const instance = queue.shift();
+      if (!instance || seenInstances.has(instance)) continue;
+      seenInstances.add(instance);
+      if (instance.$parent) queue.push(instance.$parent);
+      if (Array.isArray(instance.$children)) queue.push(...instance.$children);
+      let options = [];
+      try { options = Array.isArray(instance.commodityOptions) ? instance.commodityOptions : []; } catch {}
+      for (const option of options) {
+        if (!option || typeof option !== "object") continue;
+        const rawSymbol = String(option.symbol || "").trim();
+        const symbol = /^[A-Z][A-Z0-9_-]{1,15}$/.test(rawSymbol)
+          ? rawSymbol
+          : [option.commodityCode, option.symbolCode, option.code].map((value) => String(value || "").trim()).find((value) => /^[A-Z][A-Z0-9_-]{1,15}$/.test(value)) || "";
+        const symbolName = String(option.commodityName || option.name || option.unit || option.symbolName || option.label || (!symbol ? rawSymbol : "")).replace(/\s+/g, " ").trim();
+        const instrumentId = String(option.symbolId ?? option.contractId ?? "").trim();
+        if (symbol || symbolName || instrumentId) instruments.push({ symbol, symbolName, instrumentId });
       }
     }
     const selectors = [
