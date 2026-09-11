@@ -13,6 +13,7 @@ const {
   reduceUpdateState,
 } = require("./update-state.cjs");
 const { checkForUpdates: checkGithubUpdates, downloadInstaller, openInstaller } = require("./update-service.cjs");
+const { DEFAULT_PACKAGED_API_URL, isLoopbackApiUrl } = require("./default-api.cjs");
 
 let apiProcess;
 let mainWindow;
@@ -22,6 +23,7 @@ let installTimer;
 let quittingForUpdate = false;
 let latestUpdateAsset = null;
 let downloadedInstallerPath = "";
+let downloadAbort = null;
 let apiPort = Number(process.env.AXIOM_API_PORT || 8787);
 if (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535) apiPort = 8787;
 let apiBaseUrl = "";
@@ -59,12 +61,14 @@ function checkForUpdates() {
   if (updateCheckPromise) return updateCheckPromise;
 
   publishUpdateState({ status: "checking", currentVersion: app.getVersion(), error: null });
-  updateCheckPromise = checkGithubUpdates()
+  updateCheckPromise = checkGithubUpdates(apiBaseUrl)
     .then((result) => {
       latestUpdateAsset = result.asset || null;
       if (result.available && result.asset) {
         publishUpdateState({ status: "available", availableVersion: result.latestVersion, progress: 0, error: null });
-        downloadUpdatePackage().catch(() => {});
+        downloadUpdatePackage().catch((error) => {
+          publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+        });
       } else if (result.available) {
         publishUpdateState({ status: "error", error: result.message });
       } else if (result.message && result.message.startsWith("检查更新失败")) {
@@ -85,7 +89,7 @@ function checkForUpdates() {
 async function downloadUpdatePackage() {
   if (!supportsAutoUpdate()) return currentUpdateState();
   if (!latestUpdateAsset) {
-    const checked = await checkGithubUpdates();
+    const checked = await checkGithubUpdates(apiBaseUrl);
     latestUpdateAsset = checked.asset || null;
     if (checked.available && checked.latestVersion) {
       publishUpdateState({ status: "available", availableVersion: checked.latestVersion, error: null });
@@ -99,9 +103,19 @@ async function downloadUpdatePackage() {
     publishUpdateState({ status: "downloaded", downloadedVersion: updateState.availableVersion, progress: 100, error: null });
     return currentUpdateState();
   }
+  if (downloadAbort) downloadAbort.abort();
+  downloadAbort = new AbortController();
+  const thisDownload = downloadAbort;
   try {
     publishUpdateState({ status: "downloading", progress: 0, error: null });
-    downloadedInstallerPath = await downloadInstaller(latestUpdateAsset);
+    downloadedInstallerPath = await downloadInstaller(latestUpdateAsset, {
+      apiBaseUrl,
+      signal: thisDownload.signal,
+      onProgress: (progress) => {
+        if (downloadAbort !== thisDownload) return;
+        publishUpdateState({ status: "downloading", progress, error: null });
+      },
+    });
     publishUpdateState({
       status: "downloaded",
       downloadedVersion: updateState.availableVersion || latestUpdateAsset.name,
@@ -109,7 +123,11 @@ async function downloadUpdatePackage() {
       error: null,
     });
   } catch (error) {
-    publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+    if (downloadAbort === thisDownload) {
+      publishUpdateState({ status: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  } finally {
+    if (downloadAbort === thisDownload) downloadAbort = null;
   }
   return currentUpdateState();
 }
@@ -204,7 +222,11 @@ function readSavedApiBaseUrl() {
 }
 
 function initialApiBaseUrl() {
-  const configured = readSavedApiBaseUrl() || process.env.AXIOM_API_URL || `http://127.0.0.1:${apiPort}`;
+  const saved = readSavedApiBaseUrl();
+  const useCloudDefault = app.isPackaged && !embeddedApiEnabled;
+  const fallback = useCloudDefault ? DEFAULT_PACKAGED_API_URL : `http://127.0.0.1:${apiPort}`;
+  const usableSaved = saved && !(useCloudDefault && isLoopbackApiUrl(saved)) ? saved : "";
+  const configured = usableSaved || process.env.AXIOM_API_URL || fallback;
   return normalizeApiBaseUrl(configured);
 }
 

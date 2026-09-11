@@ -16,6 +16,8 @@ import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmi
 import { assignTask, assignedTaskIds, canAccessTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, requireUser, revokeUserSession, setUserPersistence, unassignTask, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 import { attachDesktopAiSocket, callProviderMethod } from "./desktop-ai.mjs";
+import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
+import { Readable } from "node:stream";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 await app.register(cors, {
@@ -54,6 +56,7 @@ hydrateUserSessions(await persistence.loadUserSessions?.().catch(() => []));
 setUserPersistence(persistence);
 const streams = new Set();
 const sseClients = new Set();
+const updateFeed = createUpdateFeed();
 
 const workflowTemplate = [
   ["connect", "连接目标"],
@@ -333,6 +336,30 @@ if (stateLoadFailed) {
 }
 
 app.get("/api/health", async () => ({ ok: true, service: "axiom-api", uptimeSec: Math.round(process.uptime()), persistence: await persistence.health(), persistentSecret: hasPersistentSecret(), vault: vaultStatus(), adapters: listConnectorAdapters().length }));
+app.get("/api/updates/latest", async (_request, reply) => {
+  try {
+    return await updateFeed.latestRelease();
+  } catch (error) {
+    return reply.code(502).send({ error: error.message || "UPDATE_FEED_UNAVAILABLE" });
+  }
+});
+app.get("/api/updates/download/:name", async (request, reply) => {
+  const name = sanitizeUpdateAssetName(request.params.name);
+  if (!name) return reply.code(400).send({ error: "UPDATE_ASSET_INVALID" });
+  try {
+    const asset = await updateFeed.findAsset(name);
+    if (!asset) return reply.code(404).send({ error: "UPDATE_ASSET_NOT_FOUND" });
+    const upstream = await proxyUpdateAsset(asset);
+    request.raw.setTimeout(0);
+    reply.raw.setTimeout(0);
+    reply.type(upstream.headers.get("content-type") || "application/octet-stream");
+    if (upstream.headers.get("content-length")) reply.header("content-length", upstream.headers.get("content-length"));
+    reply.header("content-disposition", `attachment; filename="${name}"`);
+    return reply.send(upstream.body ? Readable.fromWeb(upstream.body) : Buffer.alloc(0));
+  } catch (error) {
+    return reply.code(502).send({ error: error.message || "UPDATE_UPSTREAM_FAILED" });
+  }
+});
 app.post("/api/admin/login", async (request, reply) => {
   const body = request.body || {};
   const session = createAdminSession(body.username, body.password);
@@ -777,7 +804,12 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
   } catch (error) { return reply.code(400).send({ error: error.message || "PROVIDER_INVALID" }); }
   state.providers = state.providers.filter((item) => item.id !== provider.id);
   state.providers.push(provider);
-  persistProvider(provider);
+  try {
+    await persistProvider(provider);
+  } catch {
+    if (!existing) state.providers = state.providers.filter((item) => item.id !== provider.id);
+    return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
+  }
   addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id });
   broadcast();
   return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider) });
@@ -791,8 +823,14 @@ app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess
   } catch (error) {
     return reply.code(400).send({ error: error.message || "PROVIDER_TEST_FAILED" });
   }
+  const previousStatus = provider.status;
   provider.status = verification.status;
-  persistProvider(provider);
+  try {
+    await persistProvider(provider);
+  } catch {
+    provider.status = previousStatus;
+    return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
+  }
   addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, code: verification.code, httpStatus: verification.httpStatus });
   broadcast();
   return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus } };
@@ -801,7 +839,12 @@ app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess },
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
   if (!provider || !provider.ownerUserId) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
   state.providers = state.providers.filter((item) => item.id !== provider.id);
-  persistDeletedProvider(provider.id);
+  try {
+    await persistDeletedProvider(provider.id);
+  } catch {
+    state.providers.push(provider);
+    return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
+  }
   for (const task of state.tasks) {
     if (task.providerId !== provider.id) continue;
     task.providerId = "";

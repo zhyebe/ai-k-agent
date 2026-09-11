@@ -118,6 +118,40 @@ function updateIntent(state) {
   return "check";
 }
 
+function downloadProgressPercent(received, total) {
+  const got = Number(received) || 0;
+  const size = Number(total) || 0;
+  if (size <= 0) return got > 0 ? 1 : 0;
+  return Math.max(0, Math.min(99, Math.floor((got / size) * 100)));
+}
+
+function isLoopbackApiUrl(value) {
+  try {
+    const host = new URL(String(value || "")).hostname.toLowerCase();
+    return host === "127.0.0.1" || host === "localhost" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function installerDownloadUrls({ apiBaseUrl = "", asset } = {}) {
+  const urls = [];
+  const name = String(asset?.name || "");
+  const official = String(asset?.url || "");
+  const base = String(apiBaseUrl || "").replace(/\/$/, "");
+  if (base && name && !isLoopbackApiUrl(base)) {
+    urls.push(`${base}/api/updates/download/${encodeURIComponent(name)}`);
+  }
+  if (official) {
+    urls.push(official);
+    if (/^https:\/\/(github\.com|objects\.githubusercontent\.com)\//i.test(official)) {
+      urls.push(`https://ghfast.top/${official}`);
+      urls.push(`https://gh-proxy.com/${official}`);
+    }
+  }
+  return [...new Set(urls.filter(Boolean))];
+}
+
 module.exports = {
   emptyUpdateState,
   hasDownloadedPackage,
@@ -130,4 +164,7 @@ module.exports = {
   windowsInstallScript,
   reduceUpdateState,
   updateIntent,
+  downloadProgressPercent,
+  isLoopbackApiUrl,
+  installerDownloadUrls,
 };

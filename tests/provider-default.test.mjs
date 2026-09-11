@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTaskProvider } from "../server/engine.mjs";
-import { publicProviderList, resolveDefaultProviderId, state } from "../server/store.mjs";
+import { publicProviderList, publicState, resolveDefaultProviderId, state } from "../server/store.mjs";
 
 test("analysis uses only the signed-in user's configured providers", () => {
   const original = state.providers;
@@ -16,6 +16,21 @@ test("analysis uses only the signed-in user's configured providers", () => {
     assert.deepEqual(publicProviderList("user_1").map((item) => item.id), ["provider_owned"]);
     assert.deepEqual(publicProviderList("user_2"), []);
     assert.deepEqual(publicProviderList(""), []);
+  } finally {
+    state.providers = original;
+  }
+});
+
+test("workspace still returns the user's providers when no task is assigned", () => {
+  const original = state.providers;
+  state.providers = [
+    { id: "provider_owned", ownerUserId: "user_1", name: "自建网关", model: "your-model", encryptedKey: "enc-owned", baseUrl: "https://gateway.example.test" },
+    { id: "provider_other", ownerUserId: "user_2", name: "别人的", model: "other", encryptedKey: "enc-other", baseUrl: "https://other.example.test" },
+  ];
+  try {
+    const snapshot = publicState({ taskIds: [], userId: "user_1" });
+    assert.deepEqual(snapshot.tasks, []);
+    assert.deepEqual(snapshot.providers.map((item) => item.id), ["provider_owned"]);
   } finally {
     state.providers = original;
   }

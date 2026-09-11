@@ -590,7 +590,7 @@ export function publicState({ taskIds = null, userId = null, includeEvents = fal
   return {
     tasks: tasks.map(publicTask),
     skills: visibleSkills.map(publicSkill),
-    providers: visibleTaskIds && userId ? publicProviderList(userId) : state.providers.map(publicProvider),
+    providers: userId ? publicProviderList(userId) : state.providers.map(publicProvider),
     events: includeEvents ? visibleEvents : [],
     runs: visibleTaskIds ? state.runs.filter((run) => visibleTaskIds.has(String(run.taskId || ""))) : state.runs,
     connectors: visibleConnectors.map(publicConnector),

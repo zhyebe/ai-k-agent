@@ -12,6 +12,8 @@ const {
   windowsInstallScript,
   compareVersions,
   updateIntent,
+  downloadProgressPercent,
+  installerDownloadUrls,
 } = require("../electron/update-state.cjs");
 
 test("downloaded update stays installable after a later error", () => {
@@ -108,6 +110,30 @@ test("a later not-available result does not rewrite an already-downloaded packag
   assert.equal(afterCheck.downloadedVersion, "0.2.4");
   assert.equal(updateIntent(afterCheck), "check");
   assert.equal(shouldSkipUpdateCheck(afterCheck), false);
+});
+
+test("download progress stays at 0 until bytes arrive, then reports percent", () => {
+  assert.equal(downloadProgressPercent(0, 200), 0);
+  assert.equal(downloadProgressPercent(50, 200), 25);
+  assert.equal(downloadProgressPercent(199, 200), 99);
+  assert.equal(downloadProgressPercent(10, 0), 1);
+});
+
+test("installer download prefers the cloud API proxy, then GitHub, then mirrors", () => {
+  const urls = installerDownloadUrls({
+    apiBaseUrl: "http://47.109.95.143",
+    asset: {
+      name: "Axiom-Agent-0.2.9-arm64.dmg",
+      url: "https://github.com/zhyebe/ai-k-agent/releases/download/v0.2.9/Axiom-Agent-0.2.9-arm64.dmg",
+    },
+  });
+  assert.equal(urls[0], "http://47.109.95.143/api/updates/download/Axiom-Agent-0.2.9-arm64.dmg");
+  assert.equal(urls[1], "https://github.com/zhyebe/ai-k-agent/releases/download/v0.2.9/Axiom-Agent-0.2.9-arm64.dmg");
+  assert.ok(urls.some((url) => url.startsWith("https://ghfast.top/")));
+  assert.equal(installerDownloadUrls({
+    apiBaseUrl: "http://127.0.0.1:8787",
+    asset: { name: "Axiom-Agent-0.2.9-arm64.dmg", url: "https://example.com/app.dmg" },
+  })[0], "https://example.com/app.dmg");
 });
 
 test("error without a package still retries the check on both update feeds", () => {

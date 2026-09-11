@@ -5,6 +5,9 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   compareVersions,
+  downloadProgressPercent,
+  installerDownloadUrls,
+  isLoopbackApiUrl,
   normalizeVersion,
   selectInstallerAsset,
   windowsInstallScript,
@@ -15,10 +18,10 @@ const RELEASE_PAGE_URL = "https://github.com/zhyebe/ai-k-agent/releases/latest";
 const UPDATE_REQUEST_TIMEOUT_MS = 15_000;
 const INSTALLER_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 
-async function checkForUpdates() {
+async function checkForUpdates(apiBaseUrl = "") {
   const currentVersion = app.getVersion();
   try {
-    const release = await fetchLatestReleaseInfo(currentVersion);
+    const release = await fetchLatestReleaseInfo(currentVersion, apiBaseUrl);
     const available = compareVersions(release.latestVersion, currentVersion) > 0;
     return {
       currentVersion,
@@ -41,22 +44,28 @@ async function checkForUpdates() {
   }
 }
 
-async function downloadInstaller(asset) {
-  if (!asset?.url || !asset?.name) throw new Error("没有匹配当前系统的安装包");
+async function downloadInstaller(asset, { apiBaseUrl = "", onProgress, signal } = {}) {
+  const urls = installerDownloadUrls({ apiBaseUrl, asset });
+  if (!urls.length) throw new Error("没有匹配当前系统的安装包");
   const targetDir = path.join(app.getPath("downloads"), "Axiom Agent Updates");
   fs.mkdirSync(targetDir, { recursive: true });
   const filePath = path.join(targetDir, sanitizeFileName(asset.name));
-  const response = await fetchInstaller(asset.url);
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`GitHub 返回 ${response.status}${detail ? `：${detail.slice(0, 180)}` : ""}`);
+  const errors = [];
+  for (const url of urls) {
+    try {
+      await downloadToFile(url, filePath, {
+        expectedSize: Number(asset.size || 0),
+        onProgress,
+        signal,
+      });
+      return filePath;
+    } catch (error) {
+      if (signal?.aborted) throw new Error("下载已取消");
+      errors.push(`${hostnameOf(url)}：${error instanceof Error ? error.message : String(error)}`);
+      try { fs.rmSync(filePath, { force: true }); } catch { /* ignore incomplete file */ }
+    }
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (asset.size && bytes.length < asset.size) {
-    throw new Error(`安装包下载不完整：${bytes.length}/${asset.size} bytes`);
-  }
-  fs.writeFileSync(filePath, bytes);
-  return filePath;
+  throw new Error(`安装包下载失败。${errors.slice(0, 3).join("；")}`);
 }
 
 async function openInstaller(filePath) {
@@ -79,7 +88,9 @@ function spawnWindowsInstallerAfterKill(filePath) {
   });
 }
 
-async function fetchLatestReleaseInfo(currentVersion) {
+async function fetchLatestReleaseInfo(currentVersion, apiBaseUrl = "") {
+  const fromApi = await fetchApiReleaseInfo(apiBaseUrl, currentVersion);
+  if (fromApi) return fromApi;
   try {
     const response = await fetchForUpdate(RELEASE_API_URL, {
       headers: {
@@ -110,6 +121,30 @@ async function fetchLatestReleaseInfo(currentVersion) {
   }
 }
 
+async function fetchApiReleaseInfo(apiBaseUrl, currentVersion) {
+  const base = String(apiBaseUrl || "").replace(/\/$/, "");
+  if (!base || isLoopbackApiUrl(base)) return null;
+  try {
+    const response = await fetchForUpdate(`${base}/api/updates/latest`, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": `AxiomAgent/${currentVersion}`,
+      },
+    });
+    if (!response.ok) return null;
+    const release = await response.json();
+    const latestVersion = normalizeVersion(release.latestVersion || "");
+    if (!latestVersion) return null;
+    return {
+      latestVersion,
+      releaseUrl: release.releaseUrl || RELEASE_PAGE_URL,
+      asset: selectInstallerAsset(release.assets || [], { platform: process.platform, arch: process.arch }),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchReleasePageInfo(currentVersion) {
   const response = await fetchForUpdate(RELEASE_PAGE_URL, {
     headers: {
@@ -129,7 +164,51 @@ async function fetchReleasePageInfo(currentVersion) {
   };
 }
 
-async function fetchInstaller(url) {
+async function downloadToFile(url, filePath, { expectedSize = 0, onProgress, signal } = {}) {
+  const response = await fetchInstaller(url, signal);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`HTTP ${response.status}${detail ? `：${detail.slice(0, 120)}` : ""}`);
+  }
+  const total = Number(response.headers.get("content-length") || 0) || expectedSize || 0;
+  if (typeof onProgress === "function") onProgress(downloadProgressPercent(0, total));
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (expectedSize && bytes.length < expectedSize) throw new Error(`安装包下载不完整：${bytes.length}/${expectedSize} bytes`);
+    fs.writeFileSync(filePath, bytes);
+    if (typeof onProgress === "function") onProgress(100);
+    return filePath;
+  }
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(filePath);
+    let received = 0;
+    const fail = (error) => {
+      file.destroy();
+      reject(error);
+    };
+    file.on("error", fail);
+    const pump = () => {
+      reader.read().then(({ done, value }) => {
+        if (done) {
+          file.end(() => resolve());
+          return;
+        }
+        received += value.byteLength;
+        if (typeof onProgress === "function") onProgress(downloadProgressPercent(received, total));
+        if (!file.write(Buffer.from(value))) file.once("drain", pump);
+        else pump();
+      }).catch(fail);
+    };
+    pump();
+  });
+  const size = fs.statSync(filePath).size;
+  if (expectedSize && size < expectedSize) throw new Error(`安装包下载不完整：${size}/${expectedSize} bytes`);
+  if (typeof onProgress === "function") onProgress(100);
+  return filePath;
+}
+
+async function fetchInstaller(url, externalSignal) {
   const requestInit = {
     redirect: "follow",
     headers: {
@@ -137,11 +216,38 @@ async function fetchInstaller(url) {
       "User-Agent": `AxiomAgent/${app.getVersion()}`,
     },
   };
+  const withTimeout = (factory) => fetchWithTimeout(
+    (timeoutSignal) => factory(mergeAbortSignals(externalSignal, timeoutSignal)),
+    INSTALLER_DOWNLOAD_TIMEOUT_MS,
+  );
   try {
-    return await fetchWithTimeout((signal) => net.fetch(url, { ...requestInit, signal }), INSTALLER_DOWNLOAD_TIMEOUT_MS);
+    return await withTimeout((signal) => net.fetch(url, { ...requestInit, signal }));
   } catch (error) {
     if (isAbortError(error)) throw error;
-    return fetchWithTimeout((signal) => fetch(url, { ...requestInit, signal }), INSTALLER_DOWNLOAD_TIMEOUT_MS);
+    return withTimeout((signal) => fetch(url, { ...requestInit, signal }));
+  }
+}
+
+function mergeAbortSignals(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any([left, right]);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (left.aborted || right.aborted) {
+    abort();
+    return controller.signal;
+  }
+  left.addEventListener("abort", abort, { once: true });
+  right.addEventListener("abort", abort, { once: true });
+  return controller.signal;
+}
+
+function hostnameOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "download";
   }
 }
 
@@ -169,7 +275,7 @@ async function fetchWithTimeout(fn, timeoutMs = UPDATE_REQUEST_TIMEOUT_MS) {
 }
 
 function isAbortError(error) {
-  return error instanceof Error && /abort|aborted|timeout/i.test(error.message);
+  return error?.name === "AbortError" || (error instanceof Error && /\baborte?d?\b/i.test(error.message) && !/请求超时/.test(error.message));
 }
 
 function extractVersionFromReleaseUrl(url) {

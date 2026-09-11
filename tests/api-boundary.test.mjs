@@ -128,6 +128,7 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.deepEqual(removed.body.user.assignedTaskIds, []);
     const inaccessible = await request(baseUrl, "/api/workspace", { headers });
     assert.deepEqual(inaccessible.body.tasks, []);
+    assert.equal(inaccessible.body.providers.some((provider) => provider.name === "Boundary Provider"), true);
     const invalidAssignment = await request(baseUrl, `/api/admin/users/${assignedUser.id}/tasks`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ taskId: "task_missing" }) });
     assert.equal(invalidAssignment.status, 404);
     assert.equal(invalidAssignment.body.error, "TASK_NOT_FOUND");
