@@ -969,7 +969,7 @@ app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess
   if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
   let verification;
   try {
-    verification = await callProviderMethod("verifyProvider", request.auth.user.id, { provider, options: { timeoutMs: 8000 } });
+    verification = await callProviderMethod("verifyProvider", request.auth.user.id, { provider, options: { timeoutMs: 30000 } });
   } catch (error) {
     return reply.code(400).send({ error: error.message || "PROVIDER_TEST_FAILED" });
   }

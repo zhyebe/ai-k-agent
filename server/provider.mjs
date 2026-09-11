@@ -132,7 +132,11 @@ function appendApiPath(baseUrl, rootPath, versionedPath = rootPath) {
 
 export function providerRequestUrl(provider) {
   const base = normalizeBaseUrl(provider.baseUrl);
-  if (provider.fullUrlMode === true) return base;
+  let path = "";
+  try { path = new URL(base).pathname.replace(/\/+$/, "") || "/"; } catch {}
+  // CC Switch treats an origin or `/v1` as a base URL even when the UI flag
+  // is carried over. Only preserve full URL mode for an actual model endpoint.
+  if (provider.fullUrlMode === true && path !== "/" && !path.endsWith("/v1")) return base;
   const wireApi = resolveProviderWireApi(provider);
   if (wireApi === "responses") return appendApiPath(base, "/responses");
   if (wireApi === "anthropic") return appendApiPath(base, "/messages", "/v1/messages");
@@ -145,7 +149,7 @@ export function providerRequestUrl(provider) {
 
 function providerRequestCandidates(provider) {
   const primary = { provider, url: providerRequestUrl(provider) };
-  if (provider.fullUrlMode === true || resolveProviderWireApi(provider) !== "responses") return [primary];
+  if (resolveProviderWireApi(provider) !== "responses") return [primary];
   let path = "";
   try { path = new URL(normalizeBaseUrl(provider.baseUrl)).pathname.replace(/\/+$/, "") || "/"; } catch {}
   if (path !== "/") return [primary];
@@ -166,6 +170,7 @@ function chatCompletionsBody(provider, messages) {
 function responsesBody(provider, messages) {
   return {
     model: provider.model,
+    store: false,
     input: messages.map((message) => ({
       role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
       content: String(message.content || ""),
@@ -307,21 +312,30 @@ export function createProvider(payload, existing = null) {
   };
 }
 
-export async function verifyProvider(provider, { timeoutMs = 8000 } = {}) {
+export async function verifyProvider(provider, { timeoutMs = 30000 } = {}) {
   const apiKey = providerApiKey(provider);
   const baseUrl = normalizeBaseUrl(provider?.baseUrl);
   const model = String(provider?.model || "").trim();
   if (!apiKey || !baseUrl || !model) return { ok: false, code: "PROVIDER_NOT_READY", status: "未配置", message: "接口地址、模型和 API Key 均为必填项" };
   try {
     let lastFailure = null;
-    for (const candidate of providerRequestCandidates(provider)) {
+    const candidates = providerRequestCandidates(provider);
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index];
       const response = await fetch(candidate.url, {
         method: "POST",
         headers: providerHeaders(candidate.provider, apiKey),
         body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8 })),
-        signal: AbortSignal.timeout(Math.min(15000, Math.max(1000, Number(timeoutMs) || 8000))),
+        signal: AbortSignal.timeout(Math.min(45000, Math.max(1000, Number(timeoutMs) || 30000))),
       });
-      const payload = await readJsonPayload(response);
+      let payload;
+      try {
+        payload = await readJsonPayload(response);
+      } catch (error) {
+        lastFailure = { response, detail: error?.message || "Provider 响应不是 JSON" };
+        if (index < candidates.length - 1) continue;
+        throw error;
+      }
       if (response.ok) {
         const content = extractModelText(payload);
         return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: content ? "模型已返回推理结果" : "模型请求成功" };
@@ -343,7 +357,15 @@ export async function verifyProvider(provider, { timeoutMs = 8000 } = {}) {
 }
 
 function inferredModelsUrl(provider) {
-  if (provider.modelsUrl) return normalizeBaseUrl(provider.modelsUrl);
+  if (provider.modelsUrl) {
+    const explicit = normalizeBaseUrl(provider.modelsUrl);
+    let path = "";
+    try { path = new URL(explicit).pathname.replace(/\/+$/, "") || "/"; } catch {}
+    // cc-switch presets often store the same origin as the model-list URL.
+    // The origin is a base, never the web UI itself, so resolve it to /models.
+    if (path === "/" || path.endsWith("/v1")) return appendApiPath(explicit, "/models", "/models");
+    return explicit;
+  }
   const base = normalizeBaseUrl(provider.baseUrl);
   const parsed = new URL(base);
   const wireApi = resolveProviderWireApi(provider);
@@ -447,14 +469,24 @@ async function requestProviderJson(provider, messages, options = {}) {
   if (!apiKey || !provider?.baseUrl) return null;
   let lastResponse = null;
   let lastPayload = null;
-  for (const candidate of providerRequestCandidates(provider)) {
+  const candidates = providerRequestCandidates(provider);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
     const response = await fetch(candidate.url, {
       method: "POST",
       headers: providerHeaders(candidate.provider, apiKey),
       body: JSON.stringify(providerRequestBody(candidate.provider, messages, options)),
       signal: AbortSignal.timeout(Math.min(120000, Math.max(1000, Number(options.timeoutMs) || 45000))),
     });
-    const payload = await readJsonPayload(response);
+    let payload;
+    try {
+      payload = await readJsonPayload(response);
+    } catch (error) {
+      lastResponse = response;
+      lastPayload = { message: error?.message || "Provider 响应不是 JSON" };
+      if (index < candidates.length - 1) continue;
+      throw error;
+    }
     if (response.ok) {
       const content = extractModelText(payload);
       return { content, parsed: parseModelContent(content) };

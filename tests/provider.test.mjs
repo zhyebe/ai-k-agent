@@ -82,6 +82,21 @@ test("model discovery accepts OpenAI and Gemini model list shapes", async () => 
   }
 });
 
+test("root model-list URL resolves to /models without forcing /v1", async () => {
+  const server = http.createServer((request, response) => {
+    assert.equal(request.url, "/models");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "gpt-6-astra" }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}`, modelsUrl: `http://127.0.0.1:${port}`, model: "gpt-6-astra", apiKey: "key", apiFormat: "responses" });
+    assert.deepEqual((await listProviderModels(provider)).models, ["gpt-6-astra"]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("verification rejects a missing configured model even if model listing works", async () => {
   const server = http.createServer((request, response) => {
     response.setHeader("content-type", "application/json");
@@ -107,6 +122,8 @@ test("protocol adapters and full URL mode preserve arbitrary endpoints", () => {
   assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com/v1", model: "m", apiFormat: "anthropic" }), "https://api.example.com/v1/messages");
   assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "gemini/custom", apiFormat: "gemini" }), "https://api.example.com/v1beta/models/gemini%2Fcustom:generateContent");
   assert.equal(providerRequestUrl({ baseUrl: "https://custom.example.test/infer?mode=fast", model: "m", apiFormat: "chat", fullUrlMode: true }), "https://custom.example.test/infer?mode=fast");
+  assert.equal(providerRequestUrl({ baseUrl: "https://custom.example.test", model: "m", apiFormat: "chat", fullUrlMode: true }), "https://custom.example.test/chat/completions");
+  assert.equal(providerRequestUrl({ baseUrl: "https://custom.example.test/v1", model: "m", apiFormat: "responses", fullUrlMode: true }), "https://custom.example.test/v1/responses");
 });
 
 test("Anthropic and Gemini adapters send their native authentication and payloads", async () => {
@@ -308,6 +325,28 @@ test("legacy root Responses configs fall back to CC Switch Chat endpoint", async
     const result = await requestDecision({ baseUrl: `http://127.0.0.1:${port}`, model: "demo", apiKey: "key", apiFormat: "responses" }, { evidenceIds: [] });
     assert.equal(result.action, "HOLD");
     assert.deepEqual(seen, ["/responses", "/v1/responses", "/chat/completions"]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("HTML from a wrong root endpoint falls through to the Responses route", async () => {
+  const seen = [];
+  const server = http.createServer((request, response) => {
+    seen.push(request.url);
+    if (request.url === "/v1/responses") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ output_text: JSON.stringify({ action: "HOLD", confidence: 0.5 }) }));
+      return;
+    }
+    response.setHeader("content-type", "text/html");
+    response.end("<!doctype html><html><body>web ui</body></html>");
+  });
+  const port = await listen(server);
+  try {
+    const result = await requestDecision({ baseUrl: `http://127.0.0.1:${port}`, model: "demo", apiKey: "key", apiFormat: "responses" }, { evidenceIds: [] });
+    assert.equal(result.action, "HOLD");
+    assert.deepEqual(seen, ["/responses", "/v1/responses"]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
