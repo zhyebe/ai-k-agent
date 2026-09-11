@@ -182,6 +182,7 @@ test("provider decision preserves target board identity and per-board assessment
       target_symbol_name: "丹桂康砖（二期）",
       target_instrument_id: "537",
       confidence: 0.75,
+      profit_probability: 0.88,
       board_assessments: [
         { symbol: "DGJJ", symbol_name: "丹桂金尖（二期）", instrument_id: "536", action: "HOLD", confidence: 0.4, summary: "等待" },
         { symbol: "DGKZ", symbol_name: "丹桂康砖（二期）", instrument_id: "537", action: "BUY", confidence: 0.75, summary: "满足条件" },
@@ -194,6 +195,7 @@ test("provider decision preserves target board identity and per-board assessment
     const result = await requestDecision(provider, { market: { books: [] }, evidenceIds: [] });
     assert.equal(result.targetSymbol, "DGKZ");
     assert.equal(result.targetInstrumentId, "537");
+    assert.equal(result.profitProbability, 0.88);
     assert.equal(result.boardAssessments.length, 2);
     assert.equal(result.boardAssessments[0].action, "HOLD");
   } finally {

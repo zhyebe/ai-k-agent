@@ -506,6 +506,7 @@ function holdDecision(code, invalidation) {
   return {
     action: "HOLD",
     confidence: 0,
+    profitProbability: 0,
     targetPositionPct: 0,
     maxOrderValuePct: 0,
     reasonCodes: [],
@@ -860,14 +861,27 @@ export function bindDecisionToMarket(decision, market) {
   const books = monitoredBooks(market);
   const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) {
-    return decision ? { ...decision, boardAssessments } : decision;
+    const directional = boardAssessments
+      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability ?? item.confidence ?? 0) >= 0.8)
+      .sort((left, right) => Number(right.profitProbability ?? right.confidence ?? 0) - Number(left.profitProbability ?? left.confidence ?? 0))[0];
+    if (!directional) return decision ? { ...decision, boardAssessments } : decision;
+    decision = { ...decision, action: directional.action, profitProbability: directional.profitProbability ?? directional.confidence, confidence: directional.confidence, targetSymbol: directional.symbol, targetSymbolName: directional.symbolName, targetInstrumentId: directional.instrumentId, targetPositionPct: decision.targetPositionPct || 0, maxOrderValuePct: decision.maxOrderValuePct || 0, reasonCodes: [...new Set([...(decision.reasonCodes || []), "BOARD_PROFIT_PROBABILITY_THRESHOLD"])], boardAssessments };
   }
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
     symbolName: decision.targetSymbolName,
     instrumentId: decision.targetInstrumentId,
   });
-  const target = decisionTargetBook(decision, market) || (!requestedTarget.length && books.length === 1 ? books[0] : null);
+  const assessmentTarget = !requestedTarget.length
+    ? boardAssessments
+      .filter((item) => item.action === decision.action)
+      .sort((left, right) => Number(right.profitProbability ?? right.confidence ?? 0) - Number(left.profitProbability ?? left.confidence ?? 0))[0]
+    : null;
+  const primaryValues = normalizedInstrumentValues(market);
+  const target = decisionTargetBook(decision, market)
+    || (assessmentTarget ? decisionTargetBook(assessmentTarget, market) : null)
+    || (!requestedTarget.length && primaryValues.length ? books.find((book) => normalizedInstrumentValues(book).some((value) => primaryValues.includes(value))) : null)
+    || (!requestedTarget.length && books.length === 1 ? books[0] : null);
   if (!target) {
     return {
       ...decision,
@@ -1288,6 +1302,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       decision = {
         action: "HOLD",
         confidence: 0,
+        profitProbability: 0,
         targetPositionPct: 0,
         maxOrderValuePct: 0,
         reasonCodes: [],

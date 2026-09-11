@@ -73,6 +73,18 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   assert.equal(targeted.targetSymbolName, "丹桂康砖（二期）");
   assert.equal(targeted.targetInstrumentId, "537");
 
+  const inferred = bindDecisionToMarket({
+    action: "HOLD",
+    confidence: 0.9,
+    boardAssessments: [
+      { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", action: "HOLD", confidence: 0.55, profitProbability: 0.55 },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "BUY", confidence: 0.86, profitProbability: 0.91 },
+    ],
+  }, market);
+  assert.equal(inferred.action, "BUY");
+  assert.equal(inferred.profitProbability, 0.91);
+  assert.equal(inferred.targetInstrumentId, "537");
+
   const ambiguous = bindDecisionToMarket({ action: "SELL", riskFlags: [] }, market);
   assert.equal(ambiguous.action, "HOLD");
   assert.ok(ambiguous.riskFlags.includes("TARGET_BOARD_REQUIRED"));

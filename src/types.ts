@@ -107,6 +107,7 @@ export interface Decision {
   targetSymbolName?: string;
   targetInstrumentId?: string;
   confidence: number;
+  profitProbability?: number;
   targetPositionPct: number;
   maxOrderValuePct: number;
   reasonCodes: string[];
@@ -125,6 +126,7 @@ export interface Decision {
     instrumentId?: string;
     action: "BUY" | "SELL" | "HOLD";
     confidence: number;
+    profitProbability?: number;
     summary?: string;
   }>;
 }

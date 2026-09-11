@@ -1126,6 +1126,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const actionText = analyzed ? displaySuggestion(decision.action) : "尚未分析";
+  const profitProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
   const target = decisionTargetLabel(decision);
   const pending = task.pendingAction;
   return (
@@ -1136,12 +1137,12 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(profitProbability * 100)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
-      <div className="confidence-bar"><div style={{ width: `${decision.confidence * 100}%` }} /><span>置信度 <b>{Math.round(decision.confidence * 100)}%</b></span></div>
+      <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{Math.round(profitProbability * 100)}%</b></span></div>
       <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
-      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {Math.round(item.confidence * 100)}%</span></div>)}</div> : null}
+      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {Math.round(Number(item.profitProbability ?? item.confidence ?? 0) * 100)}% 获利概率</span></div>)}</div> : null}
       <div className="reason-block">
         <span className="block-label">机器可验证依据</span>
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
