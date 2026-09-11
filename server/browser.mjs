@@ -271,7 +271,6 @@ async function readVisibleInstrumentOptions(page) {
   const raw = await page.evaluate(() => {
     const texts = [];
     const instruments = [];
-    const seenInstances = new Set();
     const pushDetails = (details) => {
       if (!Array.isArray(details)) return;
       for (const option of details) {
@@ -289,12 +288,6 @@ async function readVisibleInstrumentOptions(page) {
         });
       }
     };
-    const vueRoot = () => {
-      let instance = document.querySelector("#app")?.__vue__;
-      while (instance?.$parent) instance = instance.$parent;
-      return instance || null;
-    };
-    const root = vueRoot();
     const pushSelectOptions = (instance) => {
       const options = instance?.options || instance?.cachedOptions || [];
       if (!Array.isArray(options)) return;
@@ -307,49 +300,19 @@ async function readVisibleInstrumentOptions(page) {
         });
       }
     };
+    let root = document.querySelector("#app")?.__vue__;
+    while (root?.$parent) root = root.$parent;
     try { pushDetails(root?.$store?.state?.hqData?.marketDetails); } catch {}
+    try { pushDetails(root?.commodityOptions); } catch {}
     for (const node of document.querySelectorAll(".el-select, .selectEl")) {
       try { pushSelectOptions(node.__vue__); } catch {}
     }
-    const queue = [root, ...[...document.querySelectorAll("*")].map((node) => node.__vue__)].filter(Boolean);
-    while (queue.length && seenInstances.size < 4000) {
-      const instance = queue.shift();
-      if (!instance || seenInstances.has(instance)) continue;
-      seenInstances.add(instance);
-      if (instance.$parent) queue.push(instance.$parent);
-      if (Array.isArray(instance.$children)) queue.push(...instance.$children);
-      try { pushDetails(instance.commodityOptions); } catch {}
-      try { pushDetails(instance.$store?.state?.hqData?.marketDetails); } catch {}
-      try { pushSelectOptions(instance); } catch {}
-    }
-    const selectors = [
-      "[role='option']",
-      ".el-select-dropdown__item",
-      ".el-dropdown-menu__item",
-      ".el-popper li",
-      ".el-popper div",
-      ".el-popper span",
-      ".ant-select-item",
-      "[class*='dropdown'] li",
-      "[class*='dropdown'] div",
-      "[class*='dropdown'] span",
-      "[class*='select'] li",
-      "[class*='select'] div",
-      "[class*='select'] span",
-      "body *",
-    ];
-    for (const node of selectors.flatMap((selector) => [...document.querySelectorAll(selector)])) {
-      const style = window.getComputedStyle(node);
-      const rect = node.getBoundingClientRect();
-      if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) continue;
+    for (const node of document.querySelectorAll(".el-select-dropdown__item, .el-select-dropdown [role='option'], .el-select-dropdown .el-option")) {
       const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-      const isExplicitProduct = /（二期）|一期|金尖|康砖/.test(text)
-        && !/最新价|涨跌幅|买价|卖价|买量|卖量|持仓|销售|采购|可用资金/.test(text);
-      if (selector === "body *" && (!isExplicitProduct || text.length > 80 || (node.children?.length || 0) > 3)) continue;
-      if (text) texts.push(text);
+      if (text && text.length <= 80) texts.push(text);
     }
-    return { texts, instruments };
-  }).catch(() => ({ texts: [], instruments: [] }));
+    return { texts, instruments, storeCount: Array.isArray(root?.$store?.state?.hqData?.marketDetails) ? root.$store.state.hqData.marketDetails.length : 0 };
+  }).catch(() => ({ texts: [], instruments: [], storeCount: 0 }));
   return uniquePageInstruments([
     ...(Array.isArray(raw.instruments) ? raw.instruments.map((item) => instrumentFromMarketDetail(item)).filter(Boolean) : []),
     ...(Array.isArray(raw.texts) ? raw.texts.map((text) => extractInstrumentOption(text, true)).filter(Boolean) : []),
