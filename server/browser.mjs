@@ -311,10 +311,16 @@ async function openProductMenu(page) {
       if (root) candidates.push(...root.querySelectorAll("span, div, p, button, a"));
       if (f10.previousElementSibling) candidates.unshift(f10.previousElementSibling);
     }
-    const trigger = [...candidates, ...nodes].find((el) => {
+    const scopedNodes = [...candidates, ...nodes];
+    const productTrigger = scopedNodes.find((el) => {
       const text = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
       return text.length >= 2 && text.length <= 40 && /（二期）|金尖|康砖/.test(text) && !/F10/.test(text) && (el.children?.length || 0) <= 3;
     });
+    const symbolTrigger = scopedNodes.find((el) => {
+      const text = String(el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+      return text !== "F10" && /^[A-Z][A-Z0-9_.-]{1,24}$/.test(text) && (el.children?.length || 0) <= 1;
+    });
+    const trigger = productTrigger || symbolTrigger;
     if (!trigger) return false;
     trigger.click();
     return true;
