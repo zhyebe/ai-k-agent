@@ -15,6 +15,7 @@ const pendingActionTimers = new Map();
 const pendingConfirmLocks = new Set();
 const DEFAULT_MONITOR_POLL_MS = 5000;
 const MAX_MONITOR_POLL_MS = 120000;
+const MIN_PROFIT_PROBABILITY = 0.5;
 
 class CycleAbortError extends Error {
   constructor(code) {
@@ -64,18 +65,56 @@ function pendingTargetLabel(pending) {
   return String(pending?.targetSymbolName || pending?.targetSymbol || pending?.targetInstrumentId || "目标盘口");
 }
 
+export function profitSignalTier(value) {
+  const probability = Number(value || 0);
+  if (probability > 0.9) return "VERY_STRONG";
+  if (probability > 0.8) return "STRONG";
+  if (probability > 0.7) return "STANDARD";
+  if (probability > 0.6) return "CAUTIOUS";
+  if (probability > MIN_PROFIT_PROBABILITY) return "EXPLORATORY";
+  return "HOLD";
+}
+
+export function profitSignalLabel(tier) {
+  return ({ EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示" })[tier] || "观望";
+}
+
+function enforceProfitProbability(decision) {
+  const profitProbability = Math.min(1, Math.max(0, Number(decision?.profitProbability ?? decision?.confidence ?? 0) || 0));
+  const signalTier = profitSignalTier(profitProbability);
+  if ((decision?.action === "BUY" || decision?.action === "SELL") && signalTier === "HOLD") {
+    return {
+      ...decision,
+      action: "HOLD",
+      profitProbability,
+      signalTier,
+      targetPositionPct: 0,
+      maxOrderValuePct: 0,
+      riskFlags: [...new Set([...(decision.riskFlags || []), "LOW_PROFIT_PROBABILITY"])],
+      invalidation: "获利概率不超过 50%，本轮保持观望",
+    };
+  }
+  return { ...decision, profitProbability, signalTier };
+}
+
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const preview = suggestOrderPreview(task, decision);
   const countdownSec = Math.max(5, Math.min(300, Number(task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC)));
   const auto = !isLiveTask(task) && task.autoDecisionEnabled === true;
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
+  const decisionProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
+  const signalTier = profitSignalTier(decisionProbability);
+  const signalLabel = profitSignalLabel(signalTier);
+  const probabilityLabel = `${Math.round(decisionProbability * 100)}%`;
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     action,
     targetSymbol: String(decision.targetSymbol || ""),
     targetSymbolName: String(decision.targetSymbolName || ""),
     targetInstrumentId: String(decision.targetInstrumentId || ""),
+    profitProbability: decisionProbability,
+    signalTier,
     status: "WAITING",
     source: null,
     suggestedQty: preview.suggestedQty,
@@ -86,7 +125,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     deadlineAt: auto ? new Date(now + countdownSec * 1000).toISOString() : null,
     countdownSec: auto ? countdownSec : 0,
     resolvedAt: null,
-    message: `${targetLabel}：${pendingWaitMessage(task, { auto, countdownSec })}`,
+    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}`,
   };
 }
 
@@ -862,7 +901,7 @@ export function bindDecisionToMarket(decision, market) {
   const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) {
     const directional = boardAssessments
-      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability ?? item.confidence ?? 0) >= 0.8)
+      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability ?? item.confidence ?? 0) > MIN_PROFIT_PROBABILITY)
       .sort((left, right) => Number(right.profitProbability ?? right.confidence ?? 0) - Number(left.profitProbability ?? left.confidence ?? 0))[0];
     if (!directional) return decision ? { ...decision, boardAssessments } : decision;
     decision = { ...decision, action: directional.action, profitProbability: directional.profitProbability ?? directional.confidence, confidence: directional.confidence, targetSymbol: directional.symbol, targetSymbolName: directional.symbolName, targetInstrumentId: directional.instrumentId, targetPositionPct: decision.targetPositionPct || 0, maxOrderValuePct: decision.maxOrderValuePct || 0, reasonCodes: [...new Set([...(decision.reasonCodes || []), "BOARD_PROFIT_PROBABILITY_THRESHOLD"])], boardAssessments };
@@ -1316,7 +1355,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     assertCurrent();
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
-    decision = bindDecisionToMarket(enforceDecisionLimits(decision), market);
+    decision = bindDecisionToMarket(enforceDecisionLimits(enforceProfitProbability(decision)), market);
     const targetBook = decisionTargetBook(decision, market);
     if (targetBook) qualityIssues = marketQualityIssues(targetBook);
     if (market.boardCoverage?.complete === false) qualityIssues = [...new Set([...qualityIssues, "BOARD_COVERAGE_INCOMPLETE"])];

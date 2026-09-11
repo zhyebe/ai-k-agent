@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindDecisionToMarket, buildDecisionContext, enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { bindDecisionToMarket, buildDecisionContext, enforceDecisionLimits, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -19,6 +19,16 @@ test("风险上限只阻断执行路由，不把真实 BUY 意图改成 HOLD", (
   assert.equal(decision.targetPositionPct, 42);
   assert.equal(decision.maxOrderValuePct, 12);
   assert.ok(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"));
+});
+
+test("获利概率分档：超过 50% 即允许方向性提示", () => {
+  assert.equal(profitSignalTier(0.5), "HOLD");
+  assert.equal(profitSignalTier(0.5001), "EXPLORATORY");
+  assert.equal(profitSignalTier(0.6), "EXPLORATORY");
+  assert.equal(profitSignalTier(0.6001), "CAUTIOUS");
+  assert.equal(profitSignalTier(0.7001), "STANDARD");
+  assert.equal(profitSignalTier(0.8001), "STRONG");
+  assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
 test("最终决策上下文包含当前页面、账户、时间戳和全部盘口", () => {

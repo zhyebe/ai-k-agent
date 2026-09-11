@@ -88,6 +88,8 @@ export interface PendingAction {
   targetSymbol?: string;
   targetSymbolName?: string;
   targetInstrumentId?: string;
+  profitProbability?: number;
+  signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
@@ -108,6 +110,7 @@ export interface Decision {
   targetInstrumentId?: string;
   confidence: number;
   profitProbability?: number;
+  signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   targetPositionPct: number;
   maxOrderValuePct: number;
   reasonCodes: string[];

@@ -115,6 +115,7 @@ const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { m
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买入", SELL: "卖出", HOLD: "观望" };
 const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买入", SELL: "建议卖出", HOLD: "保持观望" };
+const profitSignalLabels: Record<string, string> = { EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
 const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（确认后下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
 const stageLabels: Record<string, string> = { connect: "连接目标", login: "登录验证", collect: "数据采集", analyze: "趋势分析", rules: "规则裁决", action: "动作建议", system: "系统" };
@@ -1104,14 +1105,17 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
   const waiting = pending.status === "WAITING";
   const actionText = pending.action === "BUY" ? "买入" : "卖出";
   const target = decisionTargetLabel(pending);
+  const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
+  const probability = Number(pending.profitProbability ?? 0);
   return (
     <div className={`pending-action-card ${waiting ? "waiting" : ""}`}>
       <div className="pending-action-head">
-        <strong>{waiting ? `${target ? `${target} · ` : ""}${actionText}建议待确认` : pending.message}</strong>
+        <strong>{waiting ? `${target ? `${target} · ` : ""}${actionText}建议 · ${signalLabel}` : pending.message}</strong>
         {waiting && pending.deadlineAt ? <span className="countdown-display tabular">{remain}s</span> : null}
       </div>
       <p>{pending.message}</p>
       <div className="pending-action-meta">
+        <span>{signalLabel} {Math.round(probability * 100)}%</span>
         <span>目标盘 {target || "--"}</span>
         <span>建议价 {pending.suggestedPrice ?? "--"}</span>
         <span>建议量 {pending.suggestedQty ?? "--"}</span>
@@ -1137,7 +1141,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(profitProbability * 100)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(profitProbability * 100)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
       <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{Math.round(profitProbability * 100)}%</b></span></div>
@@ -1400,6 +1404,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
   const actionText = pending.action === "BUY" ? "买入" : "卖出";
   const target = decisionTargetLabel(pending);
   const submitting = pending.status === "SUBMITTING" || busyAction === "confirm";
+  const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
   return (
     <div className="modal-backdrop trade-confirm-backdrop" role="presentation">
       <section className="modal-shell trade-confirm-shell" role="alertdialog" aria-modal="true" aria-labelledby="trade-confirm-title">
@@ -1412,6 +1417,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
         <div className="trade-confirm-facts">
           <div><span>目标盘</span><b>{target || task.market?.symbol || task.symbol}</b></div>
           <div><span>方向</span><b>{actionText}</b></div>
+          <div><span>风险提示</span><b>{signalLabel} · {Math.round(Number(pending.profitProbability ?? 0) * 100)}%</b></div>
           <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
           <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>
         </div>
