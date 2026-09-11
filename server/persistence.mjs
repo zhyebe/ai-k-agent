@@ -20,6 +20,17 @@ function dateValue(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+// 大 JSON 行（完整 K 线、审计快照）不能直接在 MySQL 里 ORDER BY，会撑爆 sort buffer。
+// 先用窄子查询取最近 id，再回表取整行，展示顺序在 JS 里排。
+function recentRowsSql(table, idColumn, orderColumn, limit, columns = "t.*") {
+  const safeLimit = Math.max(1, Math.min(5000, Number(limit) || 1));
+  return `SELECT ${columns} FROM ${table} t JOIN (SELECT ${idColumn} FROM ${table} ORDER BY ${orderColumn} DESC LIMIT ${safeLimit}) recent ON recent.${idColumn} = t.${idColumn}`;
+}
+
+function byDesc(column) {
+  return (a, b) => new Date(b?.[column] || 0).getTime() - new Date(a?.[column] || 0).getTime();
+}
+
 function serializeWrites(adapter, methodNames) {
   let queue = Promise.resolve();
   for (const methodName of methodNames) {
@@ -313,17 +324,26 @@ async function createMySqlAdapter() {
       await pool.execute("DELETE FROM task_assignments WHERE user_id = ? AND task_id = ?", [assignment.userId, assignment.taskId]);
     },
     async loadState() {
-      const [taskRows] = await pool.query("SELECT * FROM tasks ORDER BY updated_at DESC");
-      const [skillRows] = await pool.query("SELECT * FROM skills ORDER BY updated_at DESC");
-      const [providerRows] = await pool.query("SELECT * FROM providers ORDER BY updated_at DESC");
-      const [connectorRows] = await pool.query("SELECT * FROM connectors ORDER BY updated_at DESC");
-      const [orderRows] = await pool.query("SELECT * FROM orders ORDER BY created_at DESC LIMIT 200").catch(() => [[]]);
-      const [eventRows] = await pool.query("SELECT payload_json FROM audit_logs ORDER BY created_at DESC LIMIT 80").catch(() => [[]]);
-      const [userRows] = await pool.query("SELECT * FROM users ORDER BY updated_at DESC");
+      const [taskRows] = await pool.query("SELECT * FROM tasks");
+      const [skillRows] = await pool.query("SELECT * FROM skills");
+      const [providerRows] = await pool.query("SELECT * FROM providers");
+      const [connectorRows] = await pool.query("SELECT * FROM connectors");
+      const [orderRows] = await pool.query(recentRowsSql("orders", "id", "created_at", 200)).catch(() => [[]]);
+      const [eventRows] = await pool.query(recentRowsSql("audit_logs", "event_id", "created_at", 80, "t.payload_json")).catch(() => [[]]);
+      const [userRows] = await pool.query("SELECT * FROM users");
       const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments");
-      const [analysisRows] = await pool.query("SELECT * FROM analysis_runs ORDER BY created_at DESC LIMIT 200").catch(() => [[]]);
-      const [agentRunRows] = await pool.query("SELECT * FROM agent_runs ORDER BY started_at DESC LIMIT 100").catch(() => [[]]);
-      const [agentOutputRows] = await pool.query("SELECT * FROM agent_output ORDER BY created_at DESC LIMIT 1200").catch(() => [[]]);
+      const [analysisRows] = await pool.query(recentRowsSql("analysis_runs", "id", "created_at", 200)).catch(() => [[]]);
+      const [agentRunRows] = await pool.query(recentRowsSql("agent_runs", "id", "started_at", 100)).catch(() => [[]]);
+      const [agentOutputRows] = await pool.query(recentRowsSql("agent_output", "id", "created_at", 1200)).catch(() => [[]]);
+      taskRows.sort(byDesc("updated_at"));
+      skillRows.sort(byDesc("updated_at"));
+      providerRows.sort(byDesc("updated_at"));
+      connectorRows.sort(byDesc("updated_at"));
+      userRows.sort(byDesc("updated_at"));
+      orderRows.sort(byDesc("created_at"));
+      analysisRows.sort(byDesc("created_at"));
+      agentRunRows.sort(byDesc("started_at"));
+      agentOutputRows.sort(byDesc("created_at"));
       return {
         tasks: taskRows.map((row) => {
           const target = parse(row.target_json, {});
@@ -371,7 +391,7 @@ async function createMySqlAdapter() {
         providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, baseUrl: row.base_url, apiFormat: row.api_format || "", encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
         connectors: connectorRows.map((row) => parse(row.profile_json, { connectorId: row.connector_id, type: row.type, target: row.target_value, name: row.name, adapterId: row.adapter_id, adapterVersion: row.adapter_version, status: row.status })),
         orders: orderRows.map((row) => parse(row.order_json, { id: row.id, idempotencyKey: row.idempotency_key, taskId: row.task_id, symbol: row.symbol, action: row.action, mode: row.mode, status: row.status })),
-        events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean),
+        events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))),
         users: userRows.map((row) => ({ id: row.id, username: row.username, displayName: row.display_name, passwordHash: row.password_hash, status: row.status, createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ""), updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || "") })),
         assignments: assignmentRows.map((row) => ({ userId: row.user_id, taskId: row.task_id })),
         analyses: analysisRows.map((row) => ({ id: row.id, taskId: row.task_id, round: row.round_no === null || row.round_no === undefined ? null : Number(row.round_no), trigger: row.trigger_name || "", market: parse(row.market_snapshot_json, {}), evidence: parse(row.evidence_json, []), decision: parse(row.decision_json, {}), coverage: parse(row.coverage_json, null), segmentReviews: parse(row.segment_reviews_json, []), route: row.route, createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "") })),
