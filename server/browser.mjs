@@ -305,6 +305,14 @@ async function openProductMenu(page) {
   const clicked = await page.evaluate(() => {
     const nodes = [...document.querySelectorAll("span, div, p, button, a, h1, h2, h3")];
     const f10 = nodes.find((el) => String(el.textContent || "").trim() === "F10" && el.children.length === 0);
+    const f10Column = f10?.closest(".el-col") || f10?.parentElement;
+    const adjacentSelect = f10Column?.previousElementSibling?.querySelector(".el-select, [role='combobox'], .el-input")
+      || f10Column?.parentElement?.querySelector(".el-select, [role='combobox']");
+    if (adjacentSelect) {
+      const trigger = adjacentSelect.querySelector(".el-input, input, [role='combobox']") || adjacentSelect;
+      trigger.click();
+      return true;
+    }
     const candidates = [];
     if (f10) {
       const root = f10.closest("header, section, nav, div") || f10.parentElement;
