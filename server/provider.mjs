@@ -61,6 +61,17 @@ function normalizeBaseUrl(value) {
   return parsed.toString().replace(/\/$/, "");
 }
 
+function normalizeOptionalUrl(value) {
+  return String(value || "").trim() ? normalizeBaseUrl(value) : "";
+}
+
+function normalizeModels(value, primaryModel = "") {
+  const values = Array.isArray(value)
+    ? value
+    : String(value || "").split(/[\n,]/);
+  return [...new Set([primaryModel, ...values].map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 500);
+}
+
 export function providerIdentityKey(provider) {
   let base = "";
   try { base = normalizeBaseUrl(provider?.baseUrl); } catch { base = String(provider?.baseUrl || "").trim().replace(/\/$/, ""); }
@@ -76,8 +87,14 @@ export function resolveProviderWireApi(provider = {}) {
   const explicit = String(provider.apiFormat || provider.wireApi || "").trim().toLowerCase();
   if (["openai_responses", "responses", "response"].includes(explicit)) return "responses";
   if (["openai_chat", "chat", "openai_chat_completions"].includes(explicit)) return "chat";
+  if (["anthropic", "anthropic_messages", "messages"].includes(explicit)) return "anthropic";
+  if (["gemini", "google_gemini", "generate_content"].includes(explicit)) return "gemini";
   try {
     const path = new URL(normalizeBaseUrl(provider.baseUrl)).pathname.replace(/\/+$/, "") || "/";
+    if (/\/messages$/i.test(path)) return "anthropic";
+    if (/:generateContent$/i.test(path)) return "gemini";
+    if (/\/chat\/completions$/i.test(path)) return "chat";
+    if (/\/responses$/i.test(path)) return "responses";
     if (path === "/") return "responses";
     if (path === "/v1" || path.endsWith("/v1")) return "chat";
   } catch {}
@@ -97,16 +114,30 @@ function inferApiFormat(baseUrl) {
   return resolveProviderWireApi({ baseUrl });
 }
 
-function providerRequestUrl(provider) {
+function appendApiPath(baseUrl, rootPath, versionedPath = rootPath) {
+  const base = normalizeBaseUrl(baseUrl);
+  const parsed = new URL(base);
+  const path = parsed.pathname.replace(/\/+$/, "") || "/";
+  parsed.pathname = `${path === "/" ? "" : path}${path === "/" ? versionedPath : rootPath}`;
+  return parsed.toString().replace(/\/$/, "");
+}
+
+export function providerRequestUrl(provider) {
   const base = normalizeBaseUrl(provider.baseUrl);
-  return resolveProviderWireApi(provider) === "responses" ? `${base}/responses` : `${base}/chat/completions`;
+  if (provider.fullUrlMode === true) return base;
+  const wireApi = resolveProviderWireApi(provider);
+  if (wireApi === "responses") return appendApiPath(base, "/responses");
+  if (wireApi === "anthropic") return appendApiPath(base, "/messages", "/v1/messages");
+  if (wireApi === "gemini") {
+    const encodedModel = encodeURIComponent(String(provider.model || "").trim());
+    return appendApiPath(base, `/models/${encodedModel}:generateContent`, `/v1beta/models/${encodedModel}:generateContent`);
+  }
+  return appendApiPath(base, "/chat/completions", "/v1/chat/completions");
 }
 
 function chatCompletionsBody(provider, messages) {
   return {
     model: provider.model,
-    temperature: 0,
-    response_format: { type: "json_object" },
     messages,
   };
 }
@@ -114,8 +145,6 @@ function chatCompletionsBody(provider, messages) {
 function responsesBody(provider, messages) {
   return {
     model: provider.model,
-    temperature: 0,
-    store: false,
     input: messages.map((message) => ({
       role: message.role === "assistant" ? "assistant" : message.role === "system" ? "system" : "user",
       content: String(message.content || ""),
@@ -123,7 +152,49 @@ function responsesBody(provider, messages) {
   };
 }
 
-function extractModelText(payload) {
+function anthropicBody(provider, messages, options = {}) {
+  const system = messages.filter((message) => message.role === "system").map((message) => String(message.content || "")).join("\n\n");
+  return {
+    model: provider.model,
+    max_tokens: Math.min(8192, Math.max(1, Number(options.maxOutputTokens) || 4096)),
+    ...(system ? { system } : {}),
+    messages: messages
+      .filter((message) => message.role !== "system")
+      .map((message) => ({ role: message.role === "assistant" ? "assistant" : "user", content: String(message.content || "") })),
+  };
+}
+
+function geminiBody(messages) {
+  const system = messages.filter((message) => message.role === "system").map((message) => String(message.content || "")).join("\n\n");
+  return {
+    ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+    contents: messages
+      .filter((message) => message.role !== "system")
+      .map((message) => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: String(message.content || "") }],
+      })),
+  };
+}
+
+function providerHeaders(provider, apiKey) {
+  const wireApi = resolveProviderWireApi(provider);
+  if (wireApi === "anthropic") {
+    return { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" };
+  }
+  if (wireApi === "gemini") return { "content-type": "application/json", "x-goog-api-key": apiKey };
+  return { "content-type": "application/json", authorization: `Bearer ${apiKey}` };
+}
+
+function providerRequestBody(provider, messages, options = {}) {
+  const wireApi = resolveProviderWireApi(provider);
+  if (wireApi === "responses") return responsesBody(provider, messages);
+  if (wireApi === "anthropic") return anthropicBody(provider, messages, options);
+  if (wireApi === "gemini") return geminiBody(messages);
+  return chatCompletionsBody(provider, messages);
+}
+
+export function extractModelText(payload) {
   if (typeof payload?.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
   if (Array.isArray(payload?.output)) {
     const texts = [];
@@ -134,6 +205,14 @@ function extractModelText(payload) {
       }
     }
     if (texts.join("").trim()) return texts.join("").trim();
+  }
+  if (Array.isArray(payload?.content)) {
+    const text = payload.content.map((part) => typeof part?.text === "string" ? part.text : "").join("").trim();
+    if (text) return text;
+  }
+  if (Array.isArray(payload?.candidates?.[0]?.content?.parts)) {
+    const text = payload.candidates[0].content.parts.map((part) => typeof part?.text === "string" ? part.text : "").join("").trim();
+    if (text) return text;
   }
   return String(payload?.choices?.[0]?.message?.content || "").trim();
 }
@@ -160,6 +239,9 @@ export function publicProvider(provider) {
     model: provider.model,
     baseUrl: provider.baseUrl,
     apiFormat: resolveProviderWireApi(provider),
+    fullUrlMode: provider.fullUrlMode === true,
+    modelsUrl: provider.modelsUrl || "",
+    models: normalizeModels(provider.models, provider.model),
     configured: Boolean(provider.encryptedKey),
     keyPreview: provider.keyPreview || maskSecret(decryptSecret(provider.encryptedKey)),
     status: provider.status || "未验证",
@@ -171,38 +253,108 @@ export function createProvider(payload, existing = null) {
   const hasApiKey = Object.prototype.hasOwnProperty.call(payload, "apiKey");
   const key = hasApiKey ? String(payload.apiKey || "").trim() : decryptSecret(existing?.encryptedKey);
   const baseUrl = normalizeBaseUrl(payload.baseUrl ?? existing?.baseUrl);
+  const modelsUrl = normalizeOptionalUrl(payload.modelsUrl ?? existing?.modelsUrl);
   const hasId = Object.prototype.hasOwnProperty.call(payload, "id");
   const id = hasId ? String(payload.id || `provider_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`) : existing?.id || `provider_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const model = String(payload.model ?? existing?.model ?? "default").trim();
+  if (!model) throw new Error("PROVIDER_MODEL_REQUIRED");
+  const apiFormat = resolveProviderWireApi({
+    apiFormat: payload.apiFormat ?? existing?.apiFormat ?? inferApiFormat(baseUrl),
+    baseUrl,
+  });
+  const fullUrlMode = payload.fullUrlMode === undefined ? existing?.fullUrlMode === true : payload.fullUrlMode === true;
+  const connectionChanged = !existing
+    || hasApiKey
+    || baseUrl !== existing.baseUrl
+    || model !== existing.model
+    || apiFormat !== resolveProviderWireApi(existing)
+    || fullUrlMode !== (existing.fullUrlMode === true);
   return {
     id,
     providerKey: String(payload.providerKey ?? existing?.providerKey ?? (payload.id || id)),
     ownerUserId: String(existing?.ownerUserId || ""),
     name: String(payload.name ?? existing?.name ?? "自定义 Provider").trim(),
-    model: String(payload.model ?? existing?.model ?? "default").trim(),
+    model,
+    models: normalizeModels(payload.models ?? existing?.models, model),
     baseUrl,
-    apiFormat: String(payload.apiFormat ?? existing?.apiFormat ?? inferApiFormat(baseUrl)),
+    apiFormat,
+    fullUrlMode,
+    modelsUrl,
     encryptedKey: key ? encryptSecret(key) : "",
     keyPreview: key ? maskSecret(key) : "",
-    status: key ? "待验证" : "未配置",
+    status: key ? (connectionChanged ? "待验证" : existing?.status || "待验证") : "未配置",
   };
 }
 
 export async function verifyProvider(provider, { timeoutMs = 8000 } = {}) {
   const apiKey = providerApiKey(provider);
   const baseUrl = normalizeBaseUrl(provider?.baseUrl);
-  if (!apiKey || !baseUrl) return { ok: false, code: "PROVIDER_NOT_READY", status: "未配置" };
+  const model = String(provider?.model || "").trim();
+  if (!apiKey || !baseUrl || !model) return { ok: false, code: "PROVIDER_NOT_READY", status: "未配置", message: "接口地址、模型和 API Key 均为必填项" };
   try {
-    const response = await fetch(`${baseUrl}/models`, {
-      method: "GET",
-      headers: { authorization: `Bearer ${apiKey}` },
+    const response = await fetch(providerRequestUrl(provider), {
+      method: "POST",
+      headers: providerHeaders(provider, apiKey),
+      body: JSON.stringify(providerRequestBody(provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8 })),
       signal: AbortSignal.timeout(Math.min(15000, Math.max(1000, Number(timeoutMs) || 8000))),
     });
-    if (response.ok) return { ok: true, code: "PROVIDER_OK", status: "已验证", httpStatus: response.status };
-    if (response.status === 401 || response.status === 403) return { ok: false, code: "PROVIDER_AUTH_FAILED", status: "Endpoint 可达，Key 无效", httpStatus: response.status };
-    return { ok: false, code: "PROVIDER_HTTP_ERROR", status: `Endpoint 返回 HTTP ${response.status}`, httpStatus: response.status };
+    const payload = await readJsonPayload(response);
+    if (response.ok) {
+      const content = extractModelText(payload);
+      return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: content ? "模型已返回推理结果" : "模型请求成功" };
+    }
+    const detail = String(payload?.error?.message || payload?.error?.status || payload?.message || "").trim().slice(0, 240);
+    if (response.status === 401 || response.status === 403) return { ok: false, code: "PROVIDER_AUTH_FAILED", status: "Key 无效", httpStatus: response.status, message: detail || "Provider 拒绝了 API Key" };
+    if (response.status === 404) return { ok: false, code: "PROVIDER_ENDPOINT_OR_MODEL_NOT_FOUND", status: "接口或模型不存在", httpStatus: response.status, message: detail || "请检查协议、完整 URL 和模型 ID" };
+    if ((response.status === 400 || response.status === 422) && /model|模型/i.test(detail)) return { ok: false, code: "PROVIDER_MODEL_INVALID", status: "模型不可用", httpStatus: response.status, message: detail || "Provider 不支持该模型 ID" };
+    if (response.status === 429) return { ok: false, code: "PROVIDER_RATE_LIMITED", status: "额度不足或限流", httpStatus: response.status, message: detail || "Provider 拒绝了本次推理请求" };
+    return { ok: false, code: "PROVIDER_HTTP_ERROR", status: `模型请求失败（HTTP ${response.status}）`, httpStatus: response.status, message: detail || "请检查协议和请求地址" };
   } catch (error) {
-    return { ok: false, code: "PROVIDER_UNREACHABLE", status: "Endpoint 不可达", message: error?.message || "请求失败" };
+    return { ok: false, code: "PROVIDER_UNREACHABLE", status: "模型连接失败", message: error?.message || "请求失败" };
   }
+}
+
+function inferredModelsUrl(provider) {
+  if (provider.modelsUrl) return normalizeBaseUrl(provider.modelsUrl);
+  const base = normalizeBaseUrl(provider.baseUrl);
+  const parsed = new URL(base);
+  const wireApi = resolveProviderWireApi(provider);
+  if (provider.fullUrlMode === true) {
+    if (wireApi === "gemini") parsed.pathname = parsed.pathname.replace(/\/models\/[^/]+:generateContent$/i, "/models");
+    else parsed.pathname = parsed.pathname.replace(/\/(?:chat\/completions|responses|messages)$/i, "/models");
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  }
+  if (wireApi === "gemini") return appendApiPath(base, "/models", "/v1beta/models");
+  return appendApiPath(base, "/models", "/v1/models");
+}
+
+function parseProviderModels(payload) {
+  const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
+  return [...new Set(rows.map((item) => {
+    const value = typeof item === "string" ? item : item?.id || item?.name || item?.model;
+    return String(value || "").replace(/^models\//, "").trim();
+  }).filter(Boolean))].slice(0, 500);
+}
+
+export async function listProviderModels(provider, { timeoutMs = 10000 } = {}) {
+  const apiKey = providerApiKey(provider);
+  if (!apiKey || !provider?.baseUrl) throw new Error("PROVIDER_NOT_READY");
+  const endpoint = inferredModelsUrl(provider);
+  const response = await fetch(endpoint, {
+    method: "GET",
+    headers: providerHeaders(provider, apiKey),
+    signal: AbortSignal.timeout(Math.min(20000, Math.max(1000, Number(timeoutMs) || 10000))),
+  });
+  const payload = await readJsonPayload(response);
+  if (!response.ok) {
+    const detail = String(payload?.error?.message || payload?.message || "").trim();
+    throw new Error(detail ? `模型列表 HTTP ${response.status}: ${detail.slice(0, 180)}` : `模型列表 HTTP ${response.status}`);
+  }
+  const models = parseProviderModels(payload);
+  if (!models.length) throw new Error("Provider 未返回可用模型；可在编辑页手动填写任意模型 ID");
+  return { ok: true, code: "PROVIDER_MODELS_OK", models, endpoint };
 }
 
 function normalizeDecision(value) {
@@ -249,11 +401,10 @@ function providerReady(provider) {
 async function requestProviderJson(provider, messages, options = {}) {
   const apiKey = providerApiKey(provider);
   if (!apiKey || !provider?.baseUrl) return null;
-  const wireApi = resolveProviderWireApi(provider);
   const response = await fetch(providerRequestUrl(provider), {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify(wireApi === "responses" ? responsesBody(provider, messages) : chatCompletionsBody(provider, messages)),
+    headers: providerHeaders(provider, apiKey),
+    body: JSON.stringify(providerRequestBody(provider, messages, options)),
     signal: AbortSignal.timeout(Math.min(120000, Math.max(1000, Number(options.timeoutMs) || 45000))),
   });
   const payload = await readJsonPayload(response);

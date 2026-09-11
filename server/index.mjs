@@ -983,7 +983,28 @@ app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess
   }
   addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, userId: request.auth.user.id, code: verification.code, httpStatus: verification.httpStatus });
   broadcast();
-  return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus } };
+  return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus, message: verification.message || "" } };
+});
+app.post("/api/providers/:providerId/models", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
+  const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
+  if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  let discovery;
+  try {
+    discovery = await callProviderMethod("listProviderModels", request.auth.user.id, { provider, options: { timeoutMs: 10000 } });
+  } catch (error) {
+    return reply.code(400).send({ error: error.message || "PROVIDER_MODELS_FAILED" });
+  }
+  const previousModels = provider.models;
+  provider.models = [...new Set([provider.model, ...(discovery.models || [])].map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 500);
+  try {
+    await persistProvider(provider);
+  } catch {
+    provider.models = previousModels;
+    return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
+  }
+  addEvent("provider_models_synced", `Provider ${provider.name} 已同步 ${provider.models.length} 个模型`, { providerId: provider.id, userId: request.auth.user.id, count: provider.models.length });
+  broadcast();
+  return { provider: publicProvider(provider), models: provider.models, endpoint: discovery.endpoint || "" };
 });
 app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);

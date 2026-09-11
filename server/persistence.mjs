@@ -98,6 +98,10 @@ async function createMySqlAdapter() {
   await pool.query("ALTER TABLE providers ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN provider_key VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN api_format VARCHAR(32) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("ALTER TABLE providers ADD COLUMN models_json JSON NULL").catch(() => {});
+  await pool.query("ALTER TABLE providers ADD COLUMN models_url VARCHAR(1024) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("ALTER TABLE providers ADD COLUMN full_url_mode TINYINT(1) NOT NULL DEFAULT 0").catch(() => {});
+  await pool.query("ALTER TABLE providers MODIFY COLUMN base_url VARCHAR(1024) NOT NULL").catch(() => {});
   await pool.query("DELETE FROM skill_chunks WHERE skill_id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
   await pool.query("DELETE FROM skills WHERE id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS connectors (
@@ -361,10 +365,10 @@ async function createMySqlAdapter() {
     },
     async saveProvider(provider) {
       await pool.execute(
-        `INSERT INTO providers (id, owner_user_id, provider_key, name, model, base_url, api_format, encrypted_key, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), provider_key=VALUES(provider_key), name=VALUES(name), model=VALUES(model), base_url=VALUES(base_url), api_format=VALUES(api_format), encrypted_key=VALUES(encrypted_key), status=VALUES(status), updated_at=NOW()`,
-        [provider.id, provider.ownerUserId || "", provider.providerKey || provider.id, provider.name, provider.model, provider.baseUrl, provider.apiFormat || "", provider.encryptedKey || "", provider.status || "未验证"],
+        `INSERT INTO providers (id, owner_user_id, provider_key, name, model, models_json, base_url, api_format, models_url, full_url_mode, encrypted_key, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), provider_key=VALUES(provider_key), name=VALUES(name), model=VALUES(model), models_json=VALUES(models_json), base_url=VALUES(base_url), api_format=VALUES(api_format), models_url=VALUES(models_url), full_url_mode=VALUES(full_url_mode), encrypted_key=VALUES(encrypted_key), status=VALUES(status), updated_at=NOW()`,
+        [provider.id, provider.ownerUserId || "", provider.providerKey || provider.id, provider.name, provider.model, json(provider.models || [provider.model]), provider.baseUrl, provider.apiFormat || "", provider.modelsUrl || "", provider.fullUrlMode === true ? 1 : 0, provider.encryptedKey || "", provider.status || "未验证"],
       );
     },
     async deleteProvider(providerId) {
@@ -559,7 +563,7 @@ async function createMySqlAdapter() {
           };
         }),
         skills: skillRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", title: row.title, kind: row.kind, source: row.source, status: row.status, version: row.version, tags: parse(row.tags_json, []), chunks: row.chunk_count || 0, updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || new Date().toISOString()), summary: String(row.content || "").slice(0, 120), content: row.content })),
-        providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, baseUrl: row.base_url, apiFormat: row.api_format || "", encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
+        providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, models: parse(row.models_json, [row.model]), baseUrl: row.base_url, apiFormat: row.api_format || "", modelsUrl: row.models_url || "", fullUrlMode: row.full_url_mode === 1 || row.full_url_mode === true, encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
         connectors: connectorRows.map((row) => ({ ...parse(row.profile_json, { connectorId: row.connector_id, type: row.type, target: row.target_value, name: row.name, adapterId: row.adapter_id, adapterVersion: row.adapter_version, status: row.status }), ownerUserId: row.owner_user_id || "" })),
         orders: orderRows.map((row) => parse(row.order_json, { id: row.id, idempotencyKey: row.idempotency_key, taskId: row.task_id, symbol: row.symbol, action: row.action, mode: row.mode, status: row.status })),
         events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))),

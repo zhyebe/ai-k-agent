@@ -107,6 +107,10 @@ test("connector test enforces task binding and clears credentials on target chan
     const secondProviders = await request(baseUrl, "/api/providers", { headers: secondHeaders });
     assert.equal(secondProviders.status, 200);
     assert.equal(secondProviders.body.providers.some((provider) => provider.name === "Boundary Provider"), false);
+    const foreignProviderEdit = await request(baseUrl, "/api/providers", { method: "POST", headers: secondHeaders, body: JSON.stringify({ id: userProvider.body.provider.id, name: "stolen", baseUrl: "https://example.invalid/v1", model: "stolen" }) });
+    assert.equal(foreignProviderEdit.status, 404);
+    const foreignProviderModels = await request(baseUrl, `/api/providers/${userProvider.body.provider.id}/models`, { method: "POST", headers: secondHeaders, body: "{}" });
+    assert.equal(foreignProviderModels.status, 404);
     const secondSkills = await request(baseUrl, "/api/skills", { headers: secondHeaders });
     assert.equal(secondSkills.status, 200);
     assert.equal(secondSkills.body.skills.some((skill) => skill.title === "boundary skill"), false);

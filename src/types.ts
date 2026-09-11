@@ -299,8 +299,11 @@ export interface Provider {
   id: string;
   name: string;
   model: string;
+  models?: string[];
   baseUrl: string;
   apiFormat?: string;
+  fullUrlMode?: boolean;
+  modelsUrl?: string;
   configured: boolean;
   keyPreview: string;
   status: string;

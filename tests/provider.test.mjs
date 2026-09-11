@@ -1,25 +1,29 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, providerIdentityKey, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, listProviderModels, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
-test("provider verification checks an OpenAI-compatible models endpoint", async () => {
-  const server = http.createServer((request, response) => {
-    assert.equal(request.url, "/v1/models");
+test("provider verification performs a real inference with the configured model", async () => {
+  const server = http.createServer(async (request, response) => {
+    assert.equal(request.url, "/v1/chat/completions");
+    assert.equal(request.method, "POST");
     assert.equal(request.headers.authorization, "Bearer provider-secret");
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    assert.equal(JSON.parse(body).model, "arbitrary-model-id");
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify({ data: [] }));
+    response.end(JSON.stringify({ choices: [{ message: { content: "OK" } }] }));
   });
   const port = await listen(server);
   try {
-    const provider = createProvider({ name: "Local", model: "demo", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "provider-secret" });
+    const provider = createProvider({ name: "Local", model: "arbitrary-model-id", baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "provider-secret" });
     const result = await verifyProvider(provider);
     assert.equal(result.ok, true);
-    assert.equal(result.status, "已验证");
+    assert.equal(result.status, "模型可用");
     assert.equal(publicProvider(provider).keyPreview, "pro***ret");
     assert.equal("encryptedKey" in publicProvider(provider), false);
   } finally {
@@ -46,6 +50,94 @@ test("desktop users can create an owned provider and keep the wire format", () =
   assert.equal(published.apiFormat, "responses");
   assert.equal("encryptedKey" in published, false);
   assert.equal("apiKey" in published, false);
+});
+
+test("editing a provider keeps its encrypted key when the key is omitted", () => {
+  const provider = createProvider({ name: "Old", baseUrl: "https://gateway.example.test/v1", model: "first-model", apiKey: "stored-secret" });
+  const edited = createProvider({ id: provider.id, name: "New", model: "any-new-model" }, provider);
+  assert.equal(providerApiKey(edited), "stored-secret");
+  assert.equal(edited.name, "New");
+  assert.equal(edited.model, "any-new-model");
+  assert.deepEqual(edited.models, ["any-new-model", "first-model"]);
+});
+
+test("model discovery accepts OpenAI and Gemini model list shapes", async () => {
+  let shape = "openai";
+  const server = http.createServer((request, response) => {
+    assert.equal(request.url, "/v1/models");
+    response.setHeader("content-type", "application/json");
+    response.end(shape === "openai"
+      ? JSON.stringify({ data: [{ id: "deepseek-flash" }, { id: "custom/model" }] })
+      : JSON.stringify({ models: [{ name: "models/gemini-custom" }] }));
+  });
+  const port = await listen(server);
+  try {
+    const openai = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "manual-model", apiKey: "key", apiFormat: "chat" });
+    assert.deepEqual((await listProviderModels(openai)).models, ["deepseek-flash", "custom/model"]);
+    shape = "gemini";
+    const gemini = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, modelsUrl: `http://127.0.0.1:${port}/v1/models`, model: "gemini-custom", apiKey: "key", apiFormat: "gemini" });
+    assert.deepEqual((await listProviderModels(gemini)).models, ["gemini-custom"]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("verification rejects a missing configured model even if model listing works", async () => {
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    if (request.method === "GET") return response.end(JSON.stringify({ data: [{ id: "real-model" }] }));
+    response.statusCode = 404;
+    return response.end(JSON.stringify({ error: { message: "model fake-model not found" } }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "fake-model", apiKey: "key", apiFormat: "chat" });
+    assert.deepEqual((await listProviderModels(provider)).models, ["real-model"]);
+    const result = await verifyProvider(provider);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "PROVIDER_ENDPOINT_OR_MODEL_NOT_FOUND");
+    assert.equal(result.status, "接口或模型不存在");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("protocol adapters and full URL mode preserve arbitrary endpoints", () => {
+  assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "m", apiFormat: "chat" }), "https://api.example.com/v1/chat/completions");
+  assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com/v1", model: "m", apiFormat: "anthropic" }), "https://api.example.com/v1/messages");
+  assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "gemini/custom", apiFormat: "gemini" }), "https://api.example.com/v1beta/models/gemini%2Fcustom:generateContent");
+  assert.equal(providerRequestUrl({ baseUrl: "https://custom.example.test/infer?mode=fast", model: "m", apiFormat: "chat", fullUrlMode: true }), "https://custom.example.test/infer?mode=fast");
+});
+
+test("Anthropic and Gemini adapters send their native authentication and payloads", async () => {
+  const seen = [];
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    seen.push({ url: request.url, headers: request.headers, body: JSON.parse(body) });
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/v1/messages") {
+      response.end(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ action: "BUY", confidence: 0.6 }) }] }));
+      return;
+    }
+    response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ action: "SELL", confidence: 0.7 }) }] } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const anthropic = createProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "claude-custom", apiKey: "anthropic-key", apiFormat: "anthropic" });
+    const gemini = createProvider({ baseUrl: `http://127.0.0.1:${port}`, model: "gemini-custom", apiKey: "gemini-key", apiFormat: "gemini" });
+    assert.equal((await requestDecision(anthropic, { evidenceIds: [] })).action, "BUY");
+    assert.equal((await requestDecision(gemini, { evidenceIds: [] })).action, "SELL");
+    assert.equal(seen[0].headers["x-api-key"], "anthropic-key");
+    assert.equal(seen[0].headers["anthropic-version"], "2023-06-01");
+    assert.equal(seen[0].body.model, "claude-custom");
+    assert.ok(seen[0].body.system);
+    assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
+    assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
+    assert.ok(seen[1].body.systemInstruction);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("owned providers with the same name, model and URL share an identity", () => {

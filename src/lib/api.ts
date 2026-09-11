@@ -253,10 +253,16 @@ export async function saveProvider(payload: Record<string, unknown>): Promise<Pr
   return (await request<{ provider: Provider }>("/api/providers", { method: "POST", body: JSON.stringify(payload) })).provider;
 }
 
-export async function testProvider(providerId: string): Promise<Provider> {
-  return (await request<{ provider: Provider; verification?: { ok: boolean; code: string; httpStatus?: number } }>(`/api/providers/${providerId}/test`, { method: "POST", body: "{}" })).provider;
+export type ProviderVerification = { ok: boolean; code: string; httpStatus?: number; message?: string };
+
+export async function testProvider(providerId: string) {
+  return request<{ provider: Provider; verification: ProviderVerification }>(`/api/providers/${encodeURIComponent(providerId)}/test`, { method: "POST", body: "{}" });
+}
+
+export async function syncProviderModels(providerId: string) {
+  return request<{ provider: Provider; models: string[]; endpoint: string }>(`/api/providers/${encodeURIComponent(providerId)}/models`, { method: "POST", body: "{}" });
 }
 
 export async function deleteProvider(providerId: string) {
-  return request<{ ok: boolean }>(`/api/providers/${providerId}`, { method: "DELETE" });
+  return request<{ ok: boolean }>(`/api/providers/${encodeURIComponent(providerId)}`, { method: "DELETE" });
 }

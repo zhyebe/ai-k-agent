@@ -1,4 +1,4 @@
-import { requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider, providerApiKey } from "./provider.mjs";
+import { listProviderModels, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider, providerApiKey } from "./provider.mjs";
 
 const socketsByUser = new Map();
 const pendingCalls = new Map();
@@ -91,6 +91,8 @@ export function desktopProviderPayload(provider) {
     model: provider?.model || "",
     baseUrl: provider?.baseUrl || "",
     apiFormat: resolveProviderWireApi(provider),
+    fullUrlMode: provider?.fullUrlMode === true,
+    modelsUrl: provider?.modelsUrl || "",
     apiKey: providerApiKey(provider),
   };
 }
@@ -143,6 +145,7 @@ export async function callProviderMethod(method, userId, payload = {}) {
   if (method === "requestDecision") return requestDecision(payload.provider, payload.context, payload.options);
   if (method === "requestSegmentReview") return requestSegmentReview(payload.provider, payload.segment, payload.context, payload.options);
   if (method === "verifyProvider") return verifyProvider(payload.provider, payload.options);
+  if (method === "listProviderModels") return listProviderModels(payload.provider, payload.options);
   throw new Error("AI_METHOD_UNKNOWN");
 }
 

@@ -76,6 +76,7 @@ import {
   setTaskProvider,
   startTask,
   stopTask,
+  syncProviderModels,
   takeoverPendingAction,
   testConnector,
   testProvider,
@@ -420,6 +421,7 @@ function App() {
   const busyLock = useRef(false);
   const [toast, setToast] = useState<string | null>(null);
   const [modal, setModal] = useState<"task" | "task-edit" | "skill" | "provider" | null>(null);
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -795,14 +797,16 @@ function App() {
   async function handleProviderSave(payload: Record<string, unknown>) {
     await withBusy("provider-save", async () => {
       try {
+        const editing = Boolean(payload.id);
         const provider = await saveProvider(payload);
         setWorkspace((current) => ({ ...current, providers: [...current.providers.filter((item) => item.id !== provider.id), provider] }));
         setModal(null);
-        if (task) {
+        setEditingProvider(null);
+        if (task && !editing) {
           const next = await setTaskProvider(task.id, provider.id);
           replaceTask(next);
         }
-        notify(task ? `${provider.name} 已保存，并设为当前分析模型` : "Provider 已加密保存到你的桌面账号");
+        notify(editing ? `${provider.name} 已更新` : task ? `${provider.name} 已保存，并设为当前分析模型` : "Provider 已加密保存到你的桌面账号");
       } catch (error) {
         notify(`保存失败：${error instanceof Error ? error.message : "请检查接口地址、模型和密钥"}`);
         throw error;
@@ -813,17 +817,29 @@ function App() {
   async function handleProviderTest(provider: Provider) {
     await withBusy(`provider-test:${provider.id}`, async () => {
       try {
-        const next = await testProvider(provider.id);
+        const { provider: next, verification } = await testProvider(provider.id);
         setWorkspace((current) => ({ ...current, providers: current.providers.map((item) => item.id === next.id ? next : item) }));
-        notify(`${next.name}：${displayLabel(next.status, providerStatusLabels, "待确认")}`);
+        notify(`${next.name}：${displayLabel(next.status, providerStatusLabels, "待确认")}${verification.message ? `；${verification.message}` : ""}`);
       } catch (error) {
         notify(`验证失败：${error instanceof Error ? error.message : "请检查接口地址和密钥"}`);
       }
     });
   }
 
+  async function handleProviderModels(provider: Provider) {
+    await withBusy(`provider-models:${provider.id}`, async () => {
+      try {
+        const result = await syncProviderModels(provider.id);
+        setWorkspace((current) => ({ ...current, providers: current.providers.map((item) => item.id === result.provider.id ? result.provider : item) }));
+        notify(`${provider.name}：已同步 ${result.models.length} 个模型`);
+      } catch (error) {
+        notify(`同步失败：${error instanceof Error ? error.message : "该 Provider 未提供模型列表，可手动编辑模型 ID"}`);
+      }
+    });
+  }
+
   async function handleProviderDelete(provider: Provider) {
-    if (!provider.owned) return;
+    if (!provider.owned || !window.confirm(`确定删除“${provider.name}”吗？关联任务将取消使用该 Provider，此操作无法恢复。`)) return;
     await withBusy(`provider-delete:${provider.id}`, async () => {
       try {
         await deleteProvider(provider.id);
@@ -937,7 +953,7 @@ function App() {
           {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={() => setStreamOpen(true)} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
-          {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => setModal("provider")} onProviderTest={handleProviderTest} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
+          {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
           {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
         </div>
       </main>
@@ -949,7 +965,7 @@ function App() {
       {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} savedCredentials={workspace.credentials || []} />}
       {modal === "task-edit" && task && <TaskEditModal task={task} onClose={() => setModal(null)} onSave={handleTaskUpdate} />}
       {modal === "skill" && <SkillModal onClose={() => setModal(null)} onSave={handleSkillSave} />}
-      {modal === "provider" && <ProviderModal onClose={() => setModal(null)} onSave={handleProviderSave} />}
+      {modal === "provider" && <ProviderModal provider={editingProvider} onClose={() => { setModal(null); setEditingProvider(null); }} onSave={handleProviderSave} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={16} /><span>{toast}</span><button aria-label="关闭提示" onClick={() => setToast(null)}><X size={14} /></button></div>}
     </div>
   );
@@ -1170,8 +1186,8 @@ function SkillsView({ skills, rag, onCreate, onApprove, onDelete, busyAction }: 
 function SummaryTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: string }) { return <article className="summary-tile"><span className={`summary-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong className="tabular">{value}</strong></div></article>; }
 function SkillRow({ skill, onApprove, onDelete, busyAction }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{skill.chunks} 个切片</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
 
-function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderTest, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderTest: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见，保存在服务端数据库。{task ? "保存后可点「使用」作为本任务分析模型。" : "有任务后可点「使用」绑定分析模型。"}</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
+function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderEdit, onProviderTest, onProviderModels, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderEdit: (provider: Provider) => void; onProviderTest: (provider: Provider) => void; onProviderModels: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />MySQL 账号级托管</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>支持任意模型 ID、OpenAI Responses / Chat Completions、Anthropic Messages、Gemini 及完整请求 URL。配置和模型列表只保存到当前账号的服务端数据库。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
@@ -1200,7 +1216,7 @@ function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task;
   return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "当前账号的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用当前账号凭据" : "写入当前账号的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>凭据绑定当前登录用户。同一网站下次创建任务或重新登录会自动复用，其他账号看不到。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><RefreshCw size={15} />{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
 }
 
-function ProviderRow({ provider, selected, onTest, onDelete, onSelect, canSelect, busy, testing }: { provider: Provider; selected: boolean; onTest: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; canSelect: boolean; busy: boolean; testing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.configured ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured || !canSelect} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onTest(provider)}><RefreshCw size={13} />{testing ? "验证中" : "验证"}</button>{provider.owned ? <button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button> : null}</div></div>; }
+function ProviderRow({ provider, selected, onEdit, onTest, onModels, onDelete, onSelect, canSelect, busy, testing, syncing }: { provider: Provider; selected: boolean; onEdit: (provider: Provider) => void; onTest: (provider: Provider) => void; onModels: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; canSelect: boolean; busy: boolean; testing: boolean; syncing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.status === "模型可用" ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured || !canSelect} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onEdit(provider)}><Pencil size={13} />编辑</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onModels(provider)}><Download size={13} />{syncing ? "同步中" : "模型"}</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onTest(provider)}><RefreshCw size={13} />{testing ? "推理中" : "验证"}</button>{provider.owned ? <button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button> : null}</div></div>; }
 function PermissionItem({ icon, label, status, tone }: { icon: React.ReactNode; label: string; status: string; tone: string }) { return <div className="permission-item"><span className={`permission-icon ${tone}`}>{icon}</span><span>{label}</span><b className={`text-${tone}`}>{status}</b></div>; }
 function EyeIcon() { return <Eye size={16} />; }
 
@@ -1288,12 +1304,15 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
 
 function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><FileText size={15} />{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
 
-function ProviderModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
-  const [name, setName] = useState("");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
+function ProviderModal({ provider, onClose, onSave }: { provider: Provider | null; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
+  const [name, setName] = useState(provider?.name || "");
+  const [baseUrl, setBaseUrl] = useState(provider?.baseUrl || "");
+  const [model, setModel] = useState(provider?.model || "");
+  const [models, setModels] = useState((provider?.models || []).filter((item) => item !== provider?.model).join("\n"));
+  const [modelsUrl, setModelsUrl] = useState(provider?.modelsUrl || "");
   const [apiKey, setApiKey] = useState("");
-  const [apiFormat, setApiFormat] = useState("auto");
+  const [apiFormat, setApiFormat] = useState(provider?.apiFormat || "auto");
+  const [fullUrlMode, setFullUrlMode] = useState(provider?.fullUrlMode === true);
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   async function submit(event: FormEvent) {
@@ -1302,13 +1321,25 @@ function ProviderModal({ onClose, onSave }: { onClose: () => void; onSave: (payl
     lock.current = true;
     setBusy(true);
     try {
-      await onSave({ name: name.trim() || "我的 Provider", baseUrl, model, apiKey, apiFormat: apiFormat === "auto" ? undefined : apiFormat });
+      const payload: Record<string, unknown> = {
+        ...(provider ? { id: provider.id } : {}),
+        name: name.trim() || "我的 Provider",
+        baseUrl,
+        model,
+        models,
+        modelsUrl,
+        fullUrlMode,
+        apiFormat: apiFormat === "auto" ? undefined : apiFormat,
+      };
+      if (apiKey.trim()) payload.apiKey = apiKey;
+      await onSave(payload);
     } catch {
       lock.current = false;
       setBusy(false);
     }
   }
-  return <ModalShell title="添加自己的 AI Provider" subtitle="每个桌面账号独立保存。密钥加密进数据库，后台管理员看不到明文。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>接口地址<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" type="url" required disabled={busy} /></label><div className="form-row"><label>模型<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="your-model" required disabled={busy} /></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="openai_responses">OpenAI Responses</option><option value="openai_chat">Chat Completions</option></select></label></div><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只保存在服务端" type="password" autoComplete="new-password" required disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />根地址（无路径或 /）走 Responses；带 /v1 的地址走 Chat Completions。也可在协议里手动指定。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><KeyRound size={15} />{busy ? "保存中" : "保存到我的账号"}</button></div></form></ModalShell>;
+  const knownModels = [...new Set([model, ...(provider?.models || []), ...models.split(/[\n,]/)].map((item) => item.trim()).filter(Boolean))];
+  return <ModalShell title={provider ? "编辑 AI Provider" : "添加 AI Provider"} subtitle="配置与模型列表绑定当前桌面账号，加密保存在服务端 MySQL；不写入本地配置。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>{fullUrlMode ? "完整模型请求 URL" : "接口根地址"}<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={fullUrlMode ? "https://api.example.com/v1/chat/completions" : "https://api.example.com/v1"} type="url" required disabled={busy} /></label><label className="checkbox-label"><input type="checkbox" checked={fullUrlMode} onChange={(event) => setFullUrlMode(event.target.checked)} disabled={busy} /><span>完整 URL 模式（不自动拼接请求路径）</span></label><div className="form-row"><label>默认模型<input value={model} onChange={(event) => setModel(event.target.value)} list={`provider-models-${provider?.id || "new"}`} placeholder="任意模型 ID" required disabled={busy} /><datalist id={`provider-models-${provider?.id || "new"}`}>{knownModels.map((item) => <option value={item} key={item} />)}</datalist></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select></label></div><label>其他可用模型（可选，每行一个）<textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-chat&#10;deepseek-reasoner" rows={3} disabled={busy} /></label><label>模型列表 URL（可选）<input value={modelsUrl} onChange={(event) => setModelsUrl(event.target.value)} placeholder="留空时根据协议自动推导 /models" type="url" disabled={busy} /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider ? "留空保持原密钥不变" : "加密保存到当前账号"} type="password" autoComplete="new-password" required={!provider} disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />模型 ID 不设白名单。保存后可点「模型」从 Provider 同步列表，点「验证」会调用当前模型完成一次真实推理，不再只检查 /models。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><KeyRound size={15} />{busy ? "保存中" : provider ? "保存修改" : "保存到我的账号"}</button></div></form></ModalShell>;
 }
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {

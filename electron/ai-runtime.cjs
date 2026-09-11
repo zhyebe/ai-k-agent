@@ -41,6 +41,7 @@ async function executeCall(app, message) {
   const provider = message.provider || {};
   const options = message.options || {};
   if (message.method === "verifyProvider") return providerApi.verifyProvider(provider, options);
+  if (message.method === "listProviderModels") return providerApi.listProviderModels(provider, options);
   if (message.method === "requestSegmentReview") {
     return providerApi.requestSegmentReview(provider, message.segment, message.context || {}, options);
   }
