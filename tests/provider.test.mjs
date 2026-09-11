@@ -290,6 +290,29 @@ test("root gateway URLs use Chat Completions by default; Responses stays explici
   }
 });
 
+test("legacy root Responses configs fall back to CC Switch Chat endpoint", async () => {
+  const seen = [];
+  const server = http.createServer(async (request, response) => {
+    seen.push(request.url);
+    if (request.url !== "/chat/completions") {
+      response.statusCode = 404;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", confidence: 0.5 }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const result = await requestDecision({ baseUrl: `http://127.0.0.1:${port}`, model: "demo", apiKey: "key", apiFormat: "responses" }, { evidenceIds: [] });
+    assert.equal(result.action, "HOLD");
+    assert.deepEqual(seen, ["/responses", "/v1/responses", "/chat/completions"]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("plaintext apiKey is enough for a local model request without encryptedKey", async () => {
   let seenAuth = "";
   const server = http.createServer(async (request, response) => {

@@ -143,6 +143,19 @@ export function providerRequestUrl(provider) {
   return appendApiPath(base, "/chat/completions", "/chat/completions");
 }
 
+function providerRequestCandidates(provider) {
+  const primary = { provider, url: providerRequestUrl(provider) };
+  if (provider.fullUrlMode === true || resolveProviderWireApi(provider) !== "responses") return [primary];
+  let path = "";
+  try { path = new URL(normalizeBaseUrl(provider.baseUrl)).pathname.replace(/\/+$/, "") || "/"; } catch {}
+  if (path !== "/") return [primary];
+  // Older Axiom versions persisted auto-detected root URLs as Responses.
+  // Keep explicit Responses working, but recover legacy/root CC Switch Chat configs.
+  const responsesV1 = { ...provider, fullUrlMode: true, baseUrl: `${normalizeBaseUrl(provider.baseUrl)}/v1/responses` };
+  const chat = { ...provider, apiFormat: "chat" };
+  return [primary, { provider: responsesV1, url: providerRequestUrl(responsesV1) }, { provider: chat, url: providerRequestUrl(chat) }];
+}
+
 function chatCompletionsBody(provider, messages) {
   return {
     model: provider.model,
@@ -300,18 +313,25 @@ export async function verifyProvider(provider, { timeoutMs = 8000 } = {}) {
   const model = String(provider?.model || "").trim();
   if (!apiKey || !baseUrl || !model) return { ok: false, code: "PROVIDER_NOT_READY", status: "未配置", message: "接口地址、模型和 API Key 均为必填项" };
   try {
-    const response = await fetch(providerRequestUrl(provider), {
-      method: "POST",
-      headers: providerHeaders(provider, apiKey),
-      body: JSON.stringify(providerRequestBody(provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8 })),
-      signal: AbortSignal.timeout(Math.min(15000, Math.max(1000, Number(timeoutMs) || 8000))),
-    });
-    const payload = await readJsonPayload(response);
-    if (response.ok) {
-      const content = extractModelText(payload);
-      return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: content ? "模型已返回推理结果" : "模型请求成功" };
+    let lastFailure = null;
+    for (const candidate of providerRequestCandidates(provider)) {
+      const response = await fetch(candidate.url, {
+        method: "POST",
+        headers: providerHeaders(candidate.provider, apiKey),
+        body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8 })),
+        signal: AbortSignal.timeout(Math.min(15000, Math.max(1000, Number(timeoutMs) || 8000))),
+      });
+      const payload = await readJsonPayload(response);
+      if (response.ok) {
+        const content = extractModelText(payload);
+        return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: content ? "模型已返回推理结果" : "模型请求成功" };
+      }
+      const detail = String(payload?.error?.message || payload?.error?.status || payload?.message || "").trim().slice(0, 240);
+      lastFailure = { response, detail };
+      if (![404, 405].includes(response.status)) break;
     }
-    const detail = String(payload?.error?.message || payload?.error?.status || payload?.message || "").trim().slice(0, 240);
+    const response = lastFailure.response;
+    const detail = lastFailure.detail;
     if (response.status === 401 || response.status === 403) return { ok: false, code: "PROVIDER_AUTH_FAILED", status: "Key 无效", httpStatus: response.status, message: detail || "Provider 拒绝了 API Key" };
     if (response.status === 404) return { ok: false, code: "PROVIDER_ENDPOINT_OR_MODEL_NOT_FOUND", status: "接口或模型不存在", httpStatus: response.status, message: detail || "请检查协议、完整 URL 和模型 ID" };
     if ((response.status === 400 || response.status === 422) && /model|模型/i.test(detail)) return { ok: false, code: "PROVIDER_MODEL_INVALID", status: "模型不可用", httpStatus: response.status, message: detail || "Provider 不支持该模型 ID" };
@@ -425,19 +445,26 @@ function providerReady(provider) {
 async function requestProviderJson(provider, messages, options = {}) {
   const apiKey = providerApiKey(provider);
   if (!apiKey || !provider?.baseUrl) return null;
-  const response = await fetch(providerRequestUrl(provider), {
-    method: "POST",
-    headers: providerHeaders(provider, apiKey),
-    body: JSON.stringify(providerRequestBody(provider, messages, options)),
-    signal: AbortSignal.timeout(Math.min(120000, Math.max(1000, Number(options.timeoutMs) || 45000))),
-  });
-  const payload = await readJsonPayload(response);
-  if (!response.ok) {
-    const detail = String(payload?.error?.message || payload?.message || "").trim();
-    throw new Error(detail ? `Provider HTTP ${response.status}: ${detail.slice(0, 180)}` : `Provider HTTP ${response.status}`);
+  let lastResponse = null;
+  let lastPayload = null;
+  for (const candidate of providerRequestCandidates(provider)) {
+    const response = await fetch(candidate.url, {
+      method: "POST",
+      headers: providerHeaders(candidate.provider, apiKey),
+      body: JSON.stringify(providerRequestBody(candidate.provider, messages, options)),
+      signal: AbortSignal.timeout(Math.min(120000, Math.max(1000, Number(options.timeoutMs) || 45000))),
+    });
+    const payload = await readJsonPayload(response);
+    if (response.ok) {
+      const content = extractModelText(payload);
+      return { content, parsed: parseModelContent(content) };
+    }
+    lastResponse = response;
+    lastPayload = payload;
+    if (![404, 405].includes(response.status)) break;
   }
-  const content = extractModelText(payload);
-  return { content, parsed: parseModelContent(content) };
+  const detail = String(lastPayload?.error?.message || lastPayload?.message || "").trim();
+  throw new Error(detail ? `Provider HTTP ${lastResponse.status}: ${detail.slice(0, 180)}` : `Provider HTTP ${lastResponse.status}`);
 }
 
 function boundedText(value, limit = 1800) {
