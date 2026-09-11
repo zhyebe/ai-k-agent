@@ -7,7 +7,7 @@ import { createPersistence } from "./persistence.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
 import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { openMarketBrowser, observeMarket } from "./market.mjs";
 import { browserLogin, browserLoginStatus } from "./tools.mjs";
@@ -410,6 +410,14 @@ async function migrateTenantOwnership() {
       await persistConnector(ownedConnector);
       await persistTask(task);
     }
+  }
+  const unownedConnectorIds = state.connectors
+    .filter((connector) => !connector.ownerUserId)
+    .map((connector) => connector.connectorId);
+  for (const connectorId of unownedConnectorIds) await persistDeletedConnector(connectorId);
+  if (unownedConnectorIds.length) {
+    const removed = new Set(unownedConnectorIds);
+    state.connectors = state.connectors.filter((connector) => !removed.has(connector.connectorId));
   }
 }
 

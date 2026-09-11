@@ -262,6 +262,10 @@ export function persistConnector(connector) {
   return persistValue("saveConnector", connector);
 }
 
+export function persistDeletedConnector(connectorId) {
+  return persistValue("deleteConnector", connectorId);
+}
+
 export function persistOrder(order) {
   return persistValue("saveOrder", order);
 }

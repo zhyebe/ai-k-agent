@@ -62,6 +62,7 @@ function createMemoryAdapter() {
     async deleteSkill() {},
     async saveProvider() {},
     async saveConnector() {},
+    async deleteConnector() {},
     async saveCredential() {},
     async saveOrder() {},
     async saveAnalysis() {},
@@ -82,7 +83,7 @@ function createMemoryAdapter() {
     async loadAssignments() { return []; },
     async close() {},
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMySqlAdapter() {
@@ -330,6 +331,9 @@ async function createMySqlAdapter() {
         [connector.connectorId, connector.ownerUserId || "", connector.type, connector.target, connector.name, connector.adapterId, connector.adapterVersion, connector.status, json(connector)],
       );
     },
+    async deleteConnector(connectorId) {
+      await pool.execute("DELETE FROM connectors WHERE connector_id = ?", [connectorId]);
+    },
     async saveCredential(record) {
       await pool.execute(
         `INSERT INTO credentials (credential_ref, owner_user_id, username_ciphertext, password_ciphertext, target_json, label, updated_at)
@@ -534,7 +538,7 @@ async function createMySqlAdapter() {
     },
     close: () => pool.end(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMongoAdapter() {
@@ -585,6 +589,7 @@ async function createMongoAdapter() {
     saveProvider: (provider) => collections.providers.replaceOne({ _id: provider.id }, { ...provider, _id: provider.id }, { upsert: true }),
     deleteProvider: (id) => collections.providers.deleteOne({ _id: id }),
     saveConnector: (connector) => collections.connectors.replaceOne({ _id: connector.connectorId }, { ...connector, _id: connector.connectorId }, { upsert: true }),
+    deleteConnector: (id) => collections.connectors.deleteOne({ _id: id }),
     saveCredential: (record) => collections.credentials.replaceOne({ _id: record.id }, { ...record, _id: record.id }, { upsert: true }),
     saveOrder: (order) => collections.orders.replaceOne({ _id: order.id }, { ...order, _id: order.id }, { upsert: true }),
     saveAnalysis: (analysis) => collections.analyses.replaceOne({ _id: analysis.id }, { ...analysis, _id: analysis.id }, { upsert: true }),
@@ -644,7 +649,7 @@ async function createMongoAdapter() {
     },
     close: () => client.close(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 export async function createPersistence() {
