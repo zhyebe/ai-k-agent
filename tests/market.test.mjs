@@ -16,7 +16,7 @@ import {
   resolveBoardInstruments,
   resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
-import { extractHaohanPageInstrument, normalizeHqChartCandle, parseHaohanPageSnapshot, uniquePageInstruments } from "../server/haohan.mjs";
+import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, uniquePageInstruments } from "../server/haohan.mjs";
 
 test("浩瀚 K 线按真实列位解析 OHLC、成交量和库存", () => {
   const candle = normalizeHaohanKlineRow([1700000000000, 100, 101, 105, 99, 103, 200, 20600, 50]);
@@ -199,6 +199,20 @@ test("同一盘口的完整标识与下拉盘名不会重复计数", () => {
     { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "" },
     { symbol: "", symbolName: "丹桂康砖（二期）", instrumentId: "" },
   ]);
+});
+
+test("Vuex 商品列表会解析出两个真实盘口并忽略图表内部代码", () => {
+  const boards = uniquePageInstruments([
+    instrumentFromMarketDetail({ symbol: "丹桂金尖（二期）", commodityCode: "DGJJ", symbolId: "536" }),
+    instrumentFromMarketDetail({ symbol: "丹桂康砖（二期）", commodityCode: "DGKZ", symbolId: "537" }),
+    instrumentFromMarketDetail({ symbol: "536_32.sh", symbolId: "536_32.sh" }),
+  ].filter(Boolean));
+  assert.equal(boards.length, 2);
+  assert.equal(boards[0].symbol, "DGJJ");
+  assert.equal(boards[0].symbolName, "丹桂金尖（二期）");
+  assert.equal(boards[0].instrumentId, "536");
+  assert.equal(boards[1].symbol, "DGKZ");
+  assert.equal(boards[1].symbolName, "丹桂康砖（二期）");
 });
 
 test("浩瀚只读采集并行保留全部分析周期历史", async () => {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
-import { extractHaohanPageInstrument, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
+import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -272,25 +272,28 @@ async function readVisibleInstrumentOptions(page) {
     const texts = [];
     const instruments = [];
     const seenInstances = new Set();
-    const queue = [...document.querySelectorAll("*")].map((node) => node.__vue__).filter(Boolean);
-    while (queue.length && seenInstances.size < 3000) {
+    const pushDetails = (details) => {
+      if (!Array.isArray(details)) return;
+      for (const option of details) {
+        if (option && typeof option === "object") instruments.push(option);
+      }
+    };
+    const vueRoot = () => {
+      let instance = document.querySelector("#app")?.__vue__;
+      while (instance?.$parent) instance = instance.$parent;
+      return instance || null;
+    };
+    const root = vueRoot();
+    try { pushDetails(root?.$store?.state?.hqData?.marketDetails); } catch {}
+    const queue = [root, ...[...document.querySelectorAll("*")].map((node) => node.__vue__)].filter(Boolean);
+    while (queue.length && seenInstances.size < 4000) {
       const instance = queue.shift();
       if (!instance || seenInstances.has(instance)) continue;
       seenInstances.add(instance);
       if (instance.$parent) queue.push(instance.$parent);
       if (Array.isArray(instance.$children)) queue.push(...instance.$children);
-      let options = [];
-      try { options = Array.isArray(instance.commodityOptions) ? instance.commodityOptions : []; } catch {}
-      for (const option of options) {
-        if (!option || typeof option !== "object") continue;
-        const rawSymbol = String(option.symbol || "").trim();
-        const symbol = /^[A-Z][A-Z0-9_-]{1,15}$/.test(rawSymbol)
-          ? rawSymbol
-          : [option.commodityCode, option.symbolCode, option.code].map((value) => String(value || "").trim()).find((value) => /^[A-Z][A-Z0-9_-]{1,15}$/.test(value)) || "";
-        const symbolName = String(option.commodityName || option.name || option.unit || option.symbolName || option.label || (!symbol ? rawSymbol : "")).replace(/\s+/g, " ").trim();
-        const instrumentId = String(option.symbolId ?? option.contractId ?? "").trim();
-        if (symbol || symbolName || instrumentId) instruments.push({ symbol, symbolName, instrumentId });
-      }
+      try { pushDetails(instance.commodityOptions); } catch {}
+      try { pushDetails(instance.$store?.state?.hqData?.marketDetails); } catch {}
     }
     const selectors = [
       "[role='option']",
@@ -321,12 +324,20 @@ async function readVisibleInstrumentOptions(page) {
     return { texts, instruments };
   }).catch(() => ({ texts: [], instruments: [] }));
   return uniquePageInstruments([
-    ...(Array.isArray(raw.instruments) ? raw.instruments : []),
+    ...(Array.isArray(raw.instruments) ? raw.instruments.map((item) => instrumentFromMarketDetail(item)).filter(Boolean) : []),
     ...(Array.isArray(raw.texts) ? raw.texts.map((text) => extractInstrumentOption(text, true)).filter(Boolean) : []),
   ]);
 }
 
 async function openProductMenu(page) {
+  try {
+    const select = page.locator(".selectEl input, .selectEl .el-input__inner, .selectEl, .el-select input").first();
+    if (await select.count()) {
+      await select.click({ timeout: 2500, force: true });
+      await page.waitForTimeout(400);
+      if (await page.locator(".el-select-dropdown__item, .el-select-dropdown .el-option").count()) return true;
+    }
+  } catch {}
   const clicked = await page.evaluate(() => {
     const nodes = [...document.querySelectorAll("span, div, p, button, a, h1, h2, h3")];
     const visible = (el) => {
@@ -438,10 +449,8 @@ export async function readVisiblePage(sessionId = "default") {
     const chart = await collectHqChart(session.page);
     const chartSamples = (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
     const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });
-    const chartInstrument = chart.symbol
-      ? (/^\d+$/.test(String(chart.symbol))
-        ? { symbol: "", symbolName: "", instrumentId: String(chart.symbol) }
-        : { symbol: String(chart.symbol), symbolName: "", instrumentId: "" })
+    const chartInstrument = chart.symbol && /^\d+$/.test(String(chart.symbol))
+      ? { symbol: "", symbolName: "", instrumentId: String(chart.symbol) }
       : null;
     const currentInstrument = {
       symbol: instrument.symbol || chartInstrument?.symbol || "",

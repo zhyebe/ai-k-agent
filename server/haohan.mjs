@@ -135,11 +135,37 @@ export function normalizeHqChartCandle(row) {
   return validCandle(candle) ? candle : null;
 }
 
+export function isInternalChartSymbol(value) {
+  const text = String(value || "").trim();
+  return /^\d+$/.test(text) || /\d+_\d+\.[a-z]+$/i.test(text);
+}
+
+export function instrumentFromMarketDetail(value) {
+  if (!value || typeof value !== "object") return null;
+  const rawSymbol = String(value.symbol || "").trim();
+  const code = [value.commodityCode, value.symbolCode, value.code, rawSymbol]
+    .map((item) => String(item || "").trim())
+    .find((item) => /^[A-Z][A-Z0-9_-]{1,15}$/.test(item) && !isInternalChartSymbol(item)) || "";
+  const rawName = String(value.commodityName || value.name || value.symbolName || value.unit || value.label || (!isInternalChartSymbol(rawSymbol) && !/^[A-Z][A-Z0-9_-]{1,15}$/.test(rawSymbol) ? rawSymbol : "")).replace(/\s+/g, " ").trim();
+  const symbolName = /F10/.test(rawName) || isInternalChartSymbol(rawName) ? "" : rawName;
+  const instrumentId = String(value.symbolId ?? value.contractId ?? value.instrumentId ?? "").trim();
+  return normalizePageInstrument({
+    symbol: code,
+    symbolName,
+    instrumentId: /^\d+$/.test(instrumentId) ? instrumentId : "",
+  });
+}
+
 export function normalizePageInstrument(value) {
   if (!value || typeof value !== "object") return null;
-  const symbol = String(value.symbol || value.symbolCode || value.code || "").trim();
+  let symbol = String(value.symbol || value.symbolCode || value.code || "").trim();
   const symbolName = String(value.symbolName || value.name || value.label || "").replace(/\s+/g, " ").trim();
-  const instrumentId = String(value.instrumentId || value.symbolId || value.contractId || "").trim();
+  let instrumentId = String(value.instrumentId || value.symbolId || value.contractId || "").trim();
+  if (isInternalChartSymbol(symbol)) {
+    if (/^\d+$/.test(symbol) && !instrumentId) instrumentId = symbol;
+    symbol = "";
+  }
+  if (isInternalChartSymbol(instrumentId) && !/^\d+$/.test(instrumentId)) instrumentId = "";
   if (!symbol && !symbolName && !instrumentId) return null;
   if (symbolName === "F10") return symbol || instrumentId ? { symbol, symbolName: "", instrumentId } : null;
   return { symbol, symbolName: symbolName.slice(0, 120), instrumentId };
