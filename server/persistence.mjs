@@ -1,3 +1,5 @@
+const LEGACY_DEMO_SKILL_IDS = ["skill_trend_1", "skill_guardrail_2"];
+
 function json(value) {
   return JSON.stringify(value ?? {});
 }
@@ -55,7 +57,9 @@ function createMemoryAdapter() {
     },
     async recordAudit() {},
     async saveTask() {},
+    async deleteTaskData() {},
     async saveSkill() {},
+    async deleteSkill() {},
     async saveProvider() {},
     async saveConnector() {},
     async saveCredential() {},
@@ -64,6 +68,7 @@ function createMemoryAdapter() {
     async saveAgentRun() {},
     async saveAgentOutput() {},
     async saveUser() {},
+    async deleteUserData() {},
     async saveUserSession() {},
     async deleteUserSession() {},
     async saveAssignment() {},
@@ -77,7 +82,7 @@ function createMemoryAdapter() {
     async loadAssignments() { return []; },
     async close() {},
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "saveSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMySqlAdapter() {
@@ -85,12 +90,17 @@ async function createMySqlAdapter() {
   const pool = createPool(process.env.MYSQL_URL || "mysql://root:password@127.0.0.1:3306/axiom_agent");
   await pool.query("SELECT 1");
   await pool.query("ALTER TABLE tasks ADD COLUMN runtime_json JSON NULL").catch(() => {});
+  await pool.query("ALTER TABLE tasks ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("CREATE INDEX idx_tasks_owner ON tasks (owner_user_id, updated_at)").catch(() => {});
   await pool.query("ALTER TABLE skills ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN provider_key VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN api_format VARCHAR(32) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("DELETE FROM skill_chunks WHERE skill_id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
+  await pool.query("DELETE FROM skills WHERE id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS connectors (
     connector_id VARCHAR(96) PRIMARY KEY,
+    owner_user_id VARCHAR(96) NOT NULL DEFAULT '',
     type VARCHAR(16) NOT NULL,
     target_value VARCHAR(1024) NOT NULL,
     name VARCHAR(200) NOT NULL,
@@ -101,6 +111,8 @@ async function createMySqlAdapter() {
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   )`);
+  await pool.query("ALTER TABLE connectors ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query("CREATE INDEX idx_connectors_owner ON connectors (owner_user_id, updated_at)").catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS credentials (
     credential_ref VARCHAR(96) PRIMARY KEY,
     owner_user_id VARCHAR(96) NOT NULL DEFAULT '',
@@ -134,6 +146,21 @@ async function createMySqlAdapter() {
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, task_id)
   )`);
+  await pool.query(`
+    UPDATE tasks t
+    JOIN task_assignments a ON a.task_id = t.id
+    SET t.owner_user_id = a.user_id
+    WHERE t.owner_user_id = ''
+  `).catch(() => {});
+  await pool.query(`
+    UPDATE connectors
+    SET owner_user_id = COALESCE(
+      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(profile_json, '$.ownerUserId')), ''),
+      NULLIF(JSON_UNQUOTE(JSON_EXTRACT(profile_json, '$.ownerUserIds[0]')), ''),
+      ''
+    )
+    WHERE owner_user_id = ''
+  `).catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS analysis_runs (
     id VARCHAR(96) PRIMARY KEY,
     task_id VARCHAR(64) NOT NULL,
@@ -226,11 +253,41 @@ async function createMySqlAdapter() {
         credentialRef: task.target?.credentialRef || "",
       };
       await pool.execute(
-        `INSERT INTO tasks (id, name, status, mode, symbol, timeframe, target_json, risk_profile, stop_locked, runtime_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE name=VALUES(name), status=VALUES(status), mode=VALUES(mode), symbol=VALUES(symbol), timeframe=VALUES(timeframe), target_json=VALUES(target_json), risk_profile=VALUES(risk_profile), stop_locked=VALUES(stop_locked), runtime_json=VALUES(runtime_json), updated_at=NOW()`,
-        [task.id, task.name, task.status, task.mode, task.symbol, task.timeframe, json(task.target), task.riskProfile, Boolean(task.stopLocked), json(runtime)],
+        `INSERT INTO tasks (id, owner_user_id, name, status, mode, symbol, timeframe, target_json, risk_profile, stop_locked, runtime_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), name=VALUES(name), status=VALUES(status), mode=VALUES(mode), symbol=VALUES(symbol), timeframe=VALUES(timeframe), target_json=VALUES(target_json), risk_profile=VALUES(risk_profile), stop_locked=VALUES(stop_locked), runtime_json=VALUES(runtime_json), updated_at=NOW()`,
+        [task.id, task.ownerUserId || "", task.name, task.status, task.mode, task.symbol, task.timeframe, json(task.target), task.riskProfile, Boolean(task.stopLocked), json(runtime)],
       );
+    },
+    async deleteTaskData({ taskId, ownerUserId }) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        const [owned] = await connection.execute(
+          "SELECT id FROM tasks WHERE id = ? AND owner_user_id = ? FOR UPDATE",
+          [taskId, ownerUserId],
+        );
+        if (!owned.length) throw new Error("TASK_NOT_FOUND");
+        const [decisions] = await connection.execute("SELECT id FROM agent_decisions WHERE task_id = ?", [taskId]);
+        const decisionIds = decisions.map((row) => row.id);
+        if (decisionIds.length) {
+          await connection.execute(`DELETE FROM risk_checks WHERE decision_id IN (${decisionIds.map(() => "?").join(",")})`, decisionIds);
+        }
+        for (const table of ["agent_output", "agent_runs", "analysis_runs", "orders", "rules", "agent_decisions", "task_assignments"]) {
+          await connection.execute(`DELETE FROM ${table} WHERE task_id = ?`, [taskId]);
+        }
+        await connection.execute("DELETE FROM tasks WHERE id = ? AND owner_user_id = ?", [taskId, ownerUserId]);
+        await connection.execute(
+          "DELETE FROM audit_logs WHERE JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.metadata.taskId')) = ?",
+          [taskId],
+        );
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
     },
     async saveSkill(skill) {
       await pool.execute(
@@ -239,6 +296,20 @@ async function createMySqlAdapter() {
          ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), title=VALUES(title), kind=VALUES(kind), source=VALUES(source), status=VALUES(status), version=VALUES(version), tags_json=VALUES(tags_json), content=VALUES(content), chunk_count=VALUES(chunk_count), updated_at=NOW()`,
         [skill.id, skill.ownerUserId || "", skill.title, skill.kind, skill.source, skill.status, skill.version, json(skill.tags), skill.content, skill.chunks || 0],
       );
+    },
+    async deleteSkill(skillId) {
+      const connection = await pool.getConnection();
+      try {
+        await connection.beginTransaction();
+        await connection.execute("DELETE FROM skill_chunks WHERE skill_id = ?", [skillId]);
+        await connection.execute("DELETE FROM skills WHERE id = ?", [skillId]);
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
     },
     async saveProvider(provider) {
       await pool.execute(
@@ -253,10 +324,10 @@ async function createMySqlAdapter() {
     },
     async saveConnector(connector) {
       await pool.execute(
-        `INSERT INTO connectors (connector_id, type, target_value, name, adapter_id, adapter_version, status, profile_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE type=VALUES(type), target_value=VALUES(target_value), name=VALUES(name), adapter_id=VALUES(adapter_id), adapter_version=VALUES(adapter_version), status=VALUES(status), profile_json=VALUES(profile_json), updated_at=NOW()`,
-        [connector.connectorId, connector.type, connector.target, connector.name, connector.adapterId, connector.adapterVersion, connector.status, json(connector)],
+        `INSERT INTO connectors (connector_id, owner_user_id, type, target_value, name, adapter_id, adapter_version, status, profile_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE owner_user_id=VALUES(owner_user_id), type=VALUES(type), target_value=VALUES(target_value), name=VALUES(name), adapter_id=VALUES(adapter_id), adapter_version=VALUES(adapter_version), status=VALUES(status), profile_json=VALUES(profile_json), updated_at=NOW()`,
+        [connector.connectorId, connector.ownerUserId || "", connector.type, connector.target, connector.name, connector.adapterId, connector.adapterVersion, connector.status, json(connector)],
       );
     },
     async saveCredential(record) {
@@ -307,6 +378,51 @@ async function createMySqlAdapter() {
         [user.id, user.username, user.displayName, user.passwordHash, user.status],
       );
     },
+    async deleteUserData({ userId, taskIds = [] }) {
+      const connection = await pool.getConnection();
+      const ids = [...new Set(taskIds.map(String).filter(Boolean))];
+      const placeholders = ids.map(() => "?").join(",");
+      try {
+        await connection.beginTransaction();
+        if (ids.length) {
+          const decisionRows = await connection.query(`SELECT id FROM agent_decisions WHERE task_id IN (${placeholders})`, ids);
+          const decisionIds = decisionRows[0].map((row) => row.id);
+          if (decisionIds.length) {
+            await connection.execute(`DELETE FROM risk_checks WHERE decision_id IN (${decisionIds.map(() => "?").join(",")})`, decisionIds);
+          }
+          for (const table of ["agent_output", "agent_runs", "analysis_runs", "orders", "rules", "agent_decisions"]) {
+            await connection.execute(`DELETE FROM ${table} WHERE task_id IN (${placeholders})`, ids);
+          }
+          await connection.execute(`DELETE FROM task_assignments WHERE task_id IN (${placeholders})`, ids);
+          await connection.execute(`DELETE FROM tasks WHERE id IN (${placeholders})`, ids);
+        }
+        await connection.execute("DELETE sc FROM skill_chunks sc JOIN skills s ON s.id = sc.skill_id WHERE s.owner_user_id = ?", [userId]);
+        await connection.execute("DELETE FROM skills WHERE owner_user_id = ?", [userId]);
+        await connection.execute("DELETE FROM providers WHERE owner_user_id = ?", [userId]);
+        await connection.execute("DELETE FROM credentials WHERE owner_user_id = ?", [userId]);
+        await connection.execute("DELETE FROM user_sessions WHERE user_id = ?", [userId]);
+        await connection.execute("DELETE FROM task_assignments WHERE user_id = ?", [userId]);
+        await connection.execute("DELETE FROM connectors WHERE owner_user_id = ?", [userId]);
+        if (ids.length) {
+          await connection.execute(
+            `DELETE FROM audit_logs WHERE actor_id = ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.metadata.userId')) = ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.metadata.taskId')) IN (${placeholders})`,
+            [userId, userId, ...ids],
+          );
+        } else {
+          await connection.execute(
+            "DELETE FROM audit_logs WHERE actor_id = ? OR JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.metadata.userId')) = ?",
+            [userId, userId],
+          );
+        }
+        await connection.execute("DELETE FROM users WHERE id = ?", [userId]);
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      } finally {
+        connection.release();
+      }
+    },
     async saveUserSession(session) {
       await pool.execute(
         `INSERT INTO user_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)
@@ -350,6 +466,7 @@ async function createMySqlAdapter() {
           const runtime = parse(row.runtime_json, {});
           return {
             id: row.id,
+            ownerUserId: row.owner_user_id || "",
             name: row.name,
             status: row.status,
             mode: row.mode,
@@ -389,7 +506,7 @@ async function createMySqlAdapter() {
         }),
         skills: skillRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", title: row.title, kind: row.kind, source: row.source, status: row.status, version: row.version, tags: parse(row.tags_json, []), chunks: row.chunk_count || 0, updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || new Date().toISOString()), summary: String(row.content || "").slice(0, 120), content: row.content })),
         providers: providerRows.map((row) => ({ id: row.id, ownerUserId: row.owner_user_id || "", providerKey: row.provider_key || row.id, name: row.name, model: row.model, baseUrl: row.base_url, apiFormat: row.api_format || "", encryptedKey: row.encrypted_key, keyPreview: "", status: row.status })),
-        connectors: connectorRows.map((row) => parse(row.profile_json, { connectorId: row.connector_id, type: row.type, target: row.target_value, name: row.name, adapterId: row.adapter_id, adapterVersion: row.adapter_version, status: row.status })),
+        connectors: connectorRows.map((row) => ({ ...parse(row.profile_json, { connectorId: row.connector_id, type: row.type, target: row.target_value, name: row.name, adapterId: row.adapter_id, adapterVersion: row.adapter_version, status: row.status }), ownerUserId: row.owner_user_id || "" })),
         orders: orderRows.map((row) => parse(row.order_json, { id: row.id, idempotencyKey: row.idempotency_key, taskId: row.task_id, symbol: row.symbol, action: row.action, mode: row.mode, status: row.status })),
         events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))),
         users: userRows.map((row) => ({ id: row.id, username: row.username, displayName: row.display_name, passwordHash: row.password_hash, status: row.status, createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ""), updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || "") })),
@@ -417,7 +534,7 @@ async function createMySqlAdapter() {
     },
     close: () => pool.end(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "saveSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMongoAdapter() {
@@ -440,6 +557,7 @@ async function createMongoAdapter() {
     agentRuns: database.collection("agent_runs"),
     agentOutput: database.collection("agent_output"),
   };
+  await collections.skills.deleteMany({ _id: { $in: LEGACY_DEMO_SKILL_IDS } });
   const adapter = {
     mode: "mongo",
     available: true,
@@ -449,7 +567,21 @@ async function createMongoAdapter() {
     },
     recordAudit: (event) => collections.audit.replaceOne({ _id: event.id }, { ...event, _id: event.id }, { upsert: true }),
     saveTask: (task) => collections.tasks.replaceOne({ _id: task.id }, { ...task, _id: task.id }, { upsert: true }),
+    async deleteTaskData({ taskId, ownerUserId }) {
+      const owned = await collections.tasks.findOne({ _id: taskId, ownerUserId });
+      if (!owned) throw new Error("TASK_NOT_FOUND");
+      await Promise.all([
+        collections.tasks.deleteOne({ _id: taskId, ownerUserId }),
+        collections.assignments.deleteMany({ taskId }),
+        collections.orders.deleteMany({ taskId }),
+        collections.analyses.deleteMany({ taskId }),
+        collections.agentRuns.deleteMany({ taskId }),
+        collections.agentOutput.deleteMany({ taskId }),
+        collections.audit.deleteMany({ "metadata.taskId": taskId }),
+      ]);
+    },
     saveSkill: (skill) => collections.skills.replaceOne({ _id: skill.id }, { ...skill, _id: skill.id }, { upsert: true }),
+    deleteSkill: (id) => collections.skills.deleteOne({ _id: id }),
     saveProvider: (provider) => collections.providers.replaceOne({ _id: provider.id }, { ...provider, _id: provider.id }, { upsert: true }),
     deleteProvider: (id) => collections.providers.deleteOne({ _id: id }),
     saveConnector: (connector) => collections.connectors.replaceOne({ _id: connector.connectorId }, { ...connector, _id: connector.connectorId }, { upsert: true }),
@@ -459,6 +591,24 @@ async function createMongoAdapter() {
     saveAgentRun: (run) => collections.agentRuns.replaceOne({ _id: run.id }, { ...run, _id: run.id }, { upsert: true }),
     saveAgentOutput: (line) => collections.agentOutput.replaceOne({ _id: line.id }, { ...line, _id: line.id }, { upsert: true }),
     saveUser: (user) => collections.users.replaceOne({ _id: user.id }, { ...user, _id: user.id }, { upsert: true }),
+    async deleteUserData({ userId, taskIds = [] }) {
+      const ids = [...new Set(taskIds.map(String).filter(Boolean))];
+      await Promise.all([
+        collections.skills.deleteMany({ ownerUserId: userId }),
+        collections.providers.deleteMany({ ownerUserId: userId }),
+        collections.credentials.deleteMany({ ownerUserId: userId }),
+        collections.connectors.deleteMany({ ownerUserId: userId }),
+        collections.sessions.deleteMany({ userId }),
+        collections.assignments.deleteMany({ $or: [{ userId }, { taskId: { $in: ids } }] }),
+        collections.tasks.deleteMany({ _id: { $in: ids } }),
+        collections.orders.deleteMany({ taskId: { $in: ids } }),
+        collections.analyses.deleteMany({ taskId: { $in: ids } }),
+        collections.agentRuns.deleteMany({ taskId: { $in: ids } }),
+        collections.agentOutput.deleteMany({ taskId: { $in: ids } }),
+        collections.audit.deleteMany({ $or: [{ "metadata.userId": userId }, { "metadata.taskId": { $in: ids } }] }),
+        collections.users.deleteOne({ _id: userId }),
+      ]);
+    },
     saveUserSession: (session) => collections.sessions.replaceOne({ _id: session.tokenHash }, { ...session, _id: session.tokenHash }, { upsert: true }),
     deleteUserSession: (tokenHash) => collections.sessions.deleteOne({ _id: tokenHash }),
     saveAssignment: (assignment) => collections.assignments.replaceOne({ _id: `${assignment.userId}:${assignment.taskId}` }, { ...assignment, _id: `${assignment.userId}:${assignment.taskId}` }, { upsert: true }),
@@ -494,7 +644,7 @@ async function createMongoAdapter() {
     },
     close: () => client.close(),
   };
-  return adapter;
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
 }
 
 export async function createPersistence() {

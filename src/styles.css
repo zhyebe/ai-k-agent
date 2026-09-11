@@ -375,3 +375,21 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .resize-nw { top: 0; left: 0; cursor: nw-resize; }
 .resize-se { right: 0; bottom: 0; cursor: se-resize; }
 .resize-sw { bottom: 0; left: 0; cursor: sw-resize; }
+
+.task-management-grid { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.task-management-grid .workflow-overview { margin-bottom: 34px; }
+.task-list-panel { min-width: 0; padding: 18px; }
+.owned-task-list { display: grid; gap: 7px; }
+.owned-task-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 4px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--surface-raised); }
+.owned-task-row.active { border-color: rgba(77, 218, 138, 0.42); background: var(--green-soft); }
+.owned-task-select { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 8px; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.owned-task-select > span { min-width: 0; }
+.owned-task-select strong, .owned-task-select small { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.owned-task-select strong { color: var(--text-strong); font-size: 10px; }
+.owned-task-select small { margin-top: 5px; color: var(--muted); font-size: 9px; }
+.owned-task-actions { display: flex; gap: 2px; }
+.owned-task-actions .icon-button { width: 28px; height: 28px; }
+
+@media (max-width: 1240px) {
+  .task-management-grid { grid-template-columns: 1fr; }
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { buildDecisionContext, enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -19,6 +19,46 @@ test("风险上限只阻断执行路由，不把真实 BUY 意图改成 HOLD", (
   assert.equal(decision.targetPositionPct, 42);
   assert.equal(decision.maxOrderValuePct, 12);
   assert.ok(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"));
+});
+
+test("最终决策上下文包含当前页面、账户、时间戳和全部盘口", () => {
+  const books = [
+    { symbol: "DGKZ", symbolName: "第一个盘口", timeframes: { "1m": { history: [] } } },
+    { symbol: "DGJJ", symbolName: "第二个盘口", timeframes: { "1m": { history: [] } } },
+  ];
+  const market = {
+    symbol: "DGKZ",
+    symbolName: "第一个盘口",
+    source: "browser-dom",
+    sourceKind: "LIVE_PAGE",
+    dataAt: "2026-09-11T01:58:00.000Z",
+    observedAt: "2026-09-11T01:58:01.000Z",
+    latest: { price: 123.45 },
+    account: { availableFunds: 8888, equity: 9999 },
+    pageView: { route: "/transcc", visibleInstrument: "DGKZ" },
+    page: { visibleText: "当前实盘页面", view: { route: "/transcc" } },
+    books,
+    bookCount: books.length,
+    timeframes: {},
+    availableTimeframes: [],
+    analysisLayers: { timezone: "Asia/Shanghai", layers: [] },
+  };
+  const task = {
+    id: "context-task",
+    market,
+    metrics: { exposurePct: 5 },
+    rules: [],
+    decision: { action: "HOLD" },
+  };
+  const context = buildDecisionContext(task, market, [], "manual", market);
+  assert.equal(context.market.books.length, 2);
+  assert.equal(context.market.bookCount, 2);
+  assert.deepEqual(context.market.pageView, market.pageView);
+  assert.equal(context.market.source, "browser-dom");
+  assert.equal(context.market.dataAt, market.dataAt);
+  assert.equal(context.market.observedAt, market.observedAt);
+  assert.equal(context.account.availableFunds, 8888);
+  assert.equal(context.account.equity, 9999);
 });
 
 function insertNorthstarTask(id) {
@@ -270,9 +310,21 @@ test("成功轮次按 nextPollAt 递归调度，显式停止后不再运行", as
 test("停止后立即重启时，旧异步轮次不会写回新生命周期", async () => {
   const taskId = `task_generation_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
+  const connector = {
+    connectorId: `connector_generation_${Date.now()}`,
+    type: "website",
+    target: "https://smyw.haohandahan.cn/client/#/transcc",
+    name: "浩瀚数贸",
+    adapterId: "haohan-readonly",
+    adapterVersion: "1.0.0",
+    status: "DISCOVERED",
+    reviewStatus: "APPROVED",
+    capabilities: ["read_visible_market"],
+  };
+  state.connectors.unshift(connector);
   Object.assign(task.target, {
     url: "https://smyw.haohandahan.cn/client/#/transcc",
-    connectorId: "connector_haohan_readonly",
+    connectorId: connector.connectorId,
     adapterId: "haohan-readonly",
     connectionStatus: "readonly_ready",
   });
@@ -314,6 +366,7 @@ test("停止后立即重启时，旧异步轮次不会写回新生命周期", as
   } finally {
     stopController(taskId);
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
+    state.connectors = state.connectors.filter((item) => item.connectorId !== connector.connectorId);
   }
 });
 

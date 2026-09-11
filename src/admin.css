@@ -763,6 +763,55 @@
   height: 28px;
 }
 
+.admin-delete-confirm {
+  display: grid;
+  gap: 9px;
+  max-width: 560px;
+  margin-top: 10px;
+  padding: 11px;
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 112, 112, 0.28);
+  border-radius: 6px;
+}
+
+.admin-delete-confirm > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-delete-confirm > div:first-child {
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.admin-delete-confirm > div:last-child {
+  justify-content: flex-end;
+}
+
+.admin-delete-confirm label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-strong);
+  font-size: 10px;
+}
+
+.admin-delete-confirm input {
+  width: 100%;
+  min-height: 32px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  outline: 0;
+}
+
+.admin-delete-confirm input:focus {
+  border-color: var(--red);
+}
+
 .button,
 .text-button,
 .admin-shell select,

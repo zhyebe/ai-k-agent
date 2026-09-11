@@ -38,13 +38,14 @@ function normalizedTaskIds(taskIds) {
 
 export function publicTask(task) {
   if (!task) return task;
+  const { ownerUserId, ...safeTask } = task;
   const target = task.target ? { ...task.target, credentialRef: "" } : task.target;
   if (target) {
     delete target.credentialOwnerUserId;
     delete target.browserSessionId;
   }
   return {
-    ...task,
+    ...safeTask,
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
@@ -63,7 +64,7 @@ export function publicConnector(connector) {
 export function publicSkill(skill) {
   if (!skill) return skill;
   const { ownerUserId, ...safeSkill } = skill;
-  return safeSkill;
+  return { ...safeSkill, owned: Boolean(ownerUserId) };
 }
 
 export function publicProvider(provider) {
@@ -113,152 +114,15 @@ export function resolveDefaultProviderId(userId = "", preferredId = "") {
 }
 
 export const state = {
-  tasks: [
-    {
-      id: "task_demo_001",
-      name: "浩瀚数贸观察",
-      status: "READY",
-      mode: "LIVE",
-      symbol: "DGJJ",
-      timeframe: "15m",
-      target: {
-        type: "website",
-        name: "浩瀚数贸",
-        url: "https://smyw.haohandahan.cn/client/#/transcc",
-        installPath: "",
-        connectorId: "connector_haohan_readonly",
-        adapterId: "haohan-readonly",
-        credentialRef: "",
-        accountLabel: "未配置",
-        credentialStatus: "未配置",
-        connectionStatus: "disconnected",
-        adapterStatus: "浩瀚数贸（网页） v1.0.0",
-        discoveryStatus: "已发现",
-      },
-      riskProfile: "Balanced",
-      workflow: [
-        { key: "connect", label: "连接目标", status: "pending", detail: "等待连接" },
-        { key: "login", label: "登录验证", status: "pending", detail: "等待凭据" },
-        { key: "collect", label: "数据采集", status: "pending", detail: "等待只读行情" },
-        { key: "analyze", label: "趋势分析", status: "pending", detail: "等待触发" },
-        { key: "rules", label: "规则裁决", status: "pending", detail: "等待当前轮次" },
-        { key: "action", label: "执行动作", status: "pending", detail: "建议需弹窗确认后才会下单" },
-      ],
-      rules: [
-        { id: "rule_01", order: 1, name: "数据新鲜度 < 5 秒", mode: "AUTO", status: "standby", detail: "等待实时数据" },
-        { id: "rule_02", order: 2, name: "单品种仓位 ≤ 30%", mode: "AUTO", status: "standby", detail: "等待账户对账" },
-        { id: "rule_03", order: 3, name: "突破后需人工复核", mode: "REVIEW", status: "standby", detail: "未触发" },
-        { id: "rule_04", order: 4, name: "异常波动立即停止", mode: "BLOCK", status: "standby", detail: "未触发" },
-      ],
-      decision: {
-        action: "HOLD",
-        confidence: 0,
-        targetPositionPct: 0,
-        maxOrderValuePct: 0,
-        reasonCodes: [],
-        evidenceIds: [],
-        invalidation: "完成一次真实分析后更新",
-        riskFlags: ["NOT_ANALYZED"],
-        createdAt: isoNow(),
-        ttlSec: 300,
-      },
-      metrics: { equity: 0, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
-      nextTrigger: "等待启动",
-      updatedAt: isoNow(),
-      stopLocked: false,
-      automationAuthorized: false,
-      autoDecisionEnabled: false,
-      autoDecisionCountdownSec: 30,
-      providerId: "",
-      pendingAction: null,
-      activeRunId: null,
-      monitoringEnabled: false,
-      monitorGeneration: 0,
-      monitoringRound: 0,
-      monitorFailureCount: 0,
-      lastObservedFingerprint: "",
-      lastAnalyzedFingerprint: "",
-      lastAnalysisSucceeded: false,
-      lastPolledAt: null,
-      lastCycleAt: null,
-      nextPollAt: null,
-      analysisCoverage: null,
-    },
-  ],
-  skills: [
-    {
-      id: "skill_trend_1",
-      ownerUserId: "",
-      title: "趋势突破与回撤红线",
-      kind: "expert",
-      source: "专家复盘 · 交易组 A",
-      status: "APPROVED",
-      version: "v1.3",
-      tags: ["BTC/USDT", "15m", "趋势", "红线"],
-      chunks: 4,
-      updatedAt: "2026-09-06T08:20:00Z",
-      summary: "突破须有成交量确认；跌破 EMA20 时禁止追单。",
-      content: "适用于 BTC/USDT 15m 趋势行情。突破前高且成交量高于 20 根均值 1.4 倍时，可考虑小仓位买入。跌破 EMA20、数据延迟超过 5 秒或连续两次信号冲突时禁止追单并保持 HOLD。任何异常波动需要人工复核。",
-    },
-    {
-      id: "skill_guardrail_2",
-      ownerUserId: "",
-      title: "模拟盘账户红线",
-      kind: "guardrail",
-      source: "风险委员会",
-      status: "REVIEW",
-      version: "draft-2",
-      tags: ["风控", "模拟盘", "人工复核"],
-      chunks: 0,
-      updatedAt: "2026-09-07T06:10:00Z",
-      summary: "单笔金额、日亏损和异常波动需明确处理路径。",
-      content: "单笔订单金额不得超过账户权益 8%，单日亏损达到 3% 时停止自动交易并通知人工。",
-    },
-  ],
+  tasks: [],
+  skills: [],
   providers: [],
   events: [],
   runs: [],
   analyses: [],
   agentRuns: [],
   agentOutput: [],
-  connectors: [
-    {
-      connectorId: "connector_demo_northstar",
-      type: "website",
-      target: "https://demo.exchange.local",
-      name: "Northstar Exchange",
-      adapterId: "northstar-web",
-      adapterVersion: "1.0.0",
-      status: "DISCOVERED",
-      discoveryStatus: "已发现",
-      adapterStatus: "Northstar Exchange v1.0.0",
-      reviewStatus: "APPROVED",
-      capabilities: ["navigate", "login", "read_history", "observe_orders", "paper_trade"],
-      actionMapping: "模拟动作已映射",
-      executionModes: ["PAPER", "SHADOW"],
-      liveExecution: false,
-      pathStatus: "unknown",
-      discoveredAt: isoNow(),
-    },
-    {
-      connectorId: "connector_haohan_readonly",
-      type: "website",
-      target: "https://smyw.haohandahan.cn/client/#/transcc",
-      name: "浩瀚数贸",
-      adapterId: "haohan-readonly",
-      adapterVersion: "1.0.0",
-      status: "DISCOVERED",
-      discoveryStatus: "已发现",
-      adapterStatus: "浩瀚数贸（网页） v1.0.0",
-      reviewStatus: "APPROVED",
-      capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account", "submit_confirmed_trade"],
-      actionMapping: "确认后提交已登录会话订单",
-      executionModes: ["PAPER", "SHADOW", "LIVE"],
-      liveExecution: true,
-      pathStatus: "unknown",
-      discoveredAt: isoNow(),
-    },
-  ],
+  connectors: [],
   orders: [],
 };
 
@@ -303,88 +167,15 @@ function sanitizeHydratedTask(task) {
     lastAnalysisSucceeded: task.lastAnalysisSucceeded === undefined ? false : Boolean(task.lastAnalysisSucceeded),
     target: task.target ? { ...task.target } : task.target,
   };
-  if (safeTask.id !== "task_demo_001") return safeTask;
-  const flags = safeTask.decision?.riskFlags || [];
-  if (safeTask.decision?.action !== "BUY" || flags.length) return safeTask;
-  return {
-    ...safeTask,
-    name: "浩瀚数贸观察",
-    status: "READY",
-    symbol: task.symbol === "BTC/USDT" ? "DGJJ" : task.symbol,
-    stopLocked: false,
-    automationAuthorized: false,
-    autoDecisionEnabled: false,
-    autoDecisionCountdownSec: 30,
-    pendingAction: null,
-    monitoringEnabled: false,
-    monitorGeneration: 0,
-    monitoringRound: 0,
-    monitorFailureCount: 0,
-    lastObservedFingerprint: "",
-    lastAnalyzedFingerprint: "",
-    lastAnalysisSucceeded: false,
-    lastPolledAt: null,
-    lastCycleAt: null,
-    nextPollAt: null,
-    nextTrigger: "等待启动",
-    target: {
-      ...task.target,
-      type: "website",
-      name: "浩瀚数贸",
-      url: "https://smyw.haohandahan.cn/client/#/transcc",
-      connectorId: "connector_haohan_readonly",
-      adapterId: "haohan-readonly",
-      credentialRef: "",
-      accountLabel: "未配置",
-      credentialStatus: "未配置",
-      connectionStatus: "disconnected",
-    },
-    decision: {
-      action: "HOLD",
-      confidence: 0,
-      targetPositionPct: 0,
-      maxOrderValuePct: 0,
-      reasonCodes: [],
-      evidenceIds: [],
-      invalidation: "完成一次真实分析后更新",
-      riskFlags: ["NOT_ANALYZED"],
-      createdAt: isoNow(),
-      ttlSec: 300,
-    },
-    metrics: { equity: 0, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
-  };
+  return safeTask;
 }
 
 export function hydrateState(snapshot) {
   if (!snapshot) return;
-  if (Array.isArray(snapshot.tasks)) state.tasks = snapshot.tasks.length ? snapshot.tasks.map(sanitizeHydratedTask) : state.tasks;
-  if (Array.isArray(snapshot.skills)) state.skills = snapshot.skills.length ? snapshot.skills : state.skills;
-  if (Array.isArray(snapshot.providers)) state.providers = snapshot.providers.length ? snapshot.providers : state.providers;
-  if (Array.isArray(snapshot.connectors)) state.connectors = snapshot.connectors.length ? snapshot.connectors : state.connectors;
-  if (!state.connectors.some((item) => item.adapterId === "haohan-readonly")) {
-    const seeded = state.connectors;
-    state.connectors = [
-      {
-        connectorId: "connector_haohan_readonly",
-        type: "website",
-        target: "https://smyw.haohandahan.cn/client/#/transcc",
-        name: "浩瀚数贸",
-        adapterId: "haohan-readonly",
-        adapterVersion: "1.0.0",
-        status: "DISCOVERED",
-        discoveryStatus: "已发现",
-        adapterStatus: "浩瀚数贸（网页） v1.0.0",
-        reviewStatus: "APPROVED",
-        capabilities: ["navigate", "login", "observe_visible_page", "read_visible_history", "read_visible_market", "read_visible_account", "submit_confirmed_trade"],
-        actionMapping: "确认后提交已登录会话订单",
-        executionModes: ["PAPER", "SHADOW", "LIVE"],
-        liveExecution: true,
-        pathStatus: "unknown",
-        discoveredAt: isoNow(),
-      },
-      ...seeded,
-    ];
-  }
+  if (Array.isArray(snapshot.tasks)) state.tasks = snapshot.tasks.map(sanitizeHydratedTask);
+  if (Array.isArray(snapshot.skills)) state.skills = snapshot.skills;
+  if (Array.isArray(snapshot.providers)) state.providers = snapshot.providers;
+  if (Array.isArray(snapshot.connectors)) state.connectors = snapshot.connectors;
   if (Array.isArray(snapshot.orders)) state.orders = snapshot.orders;
   if (Array.isArray(snapshot.events)) state.events = snapshot.events;
   if (Array.isArray(snapshot.runs) && snapshot.runs.length) state.runs = snapshot.runs;
@@ -406,8 +197,16 @@ export function persistTask(task) {
   return persistValue("saveTask", task);
 }
 
+export function persistDeletedTask(payload) {
+  return persistValue("deleteTaskData", payload);
+}
+
 export function persistSkill(skill) {
   return persistValue("saveSkill", skill);
+}
+
+export function persistDeletedSkill(skillId) {
+  return persistValue("deleteSkill", skillId);
 }
 
 export function persistProvider(provider) {
@@ -569,28 +368,35 @@ export function addEvent(type, message, metadata = {}) {
 }
 
 export function publicState({ taskIds = null, userId = null, includeEvents = false } = {}) {
-  const visibleTaskIds = normalizedTaskIds(taskIds);
-  const tasks = visibleTaskIds ? state.tasks.filter((task) => visibleTaskIds.has(String(task.id))) : state.tasks;
-  const visibleConnectorIds = visibleTaskIds ? new Set(tasks.map((task) => String(task.target?.connectorId || "")).filter(Boolean)) : null;
-  const visibleEvents = visibleTaskIds && userId
+  const normalizedUserId = String(userId || "");
+  const requestedTaskIds = normalizedTaskIds(taskIds);
+  const tasks = normalizedUserId
+    ? state.tasks.filter((task) => String(task.ownerUserId || "") === normalizedUserId)
+    : requestedTaskIds
+      ? state.tasks.filter((task) => requestedTaskIds.has(String(task.id)))
+      : state.tasks;
+  const visibleTaskIds = normalizedUserId || requestedTaskIds
+    ? new Set(tasks.map((task) => String(task.id)))
+    : null;
+  const visibleEvents = visibleTaskIds && normalizedUserId
     ? state.events.filter((event) => {
       const eventTaskId = String(event.metadata?.taskId || "");
       const eventUserId = String(event.metadata?.userId || "");
-      return (eventTaskId && visibleTaskIds.has(eventTaskId)) || (eventUserId && eventUserId === String(userId));
+      return (eventTaskId && visibleTaskIds.has(eventTaskId)) || (eventUserId && eventUserId === normalizedUserId);
     })
     : visibleTaskIds
       ? state.events.filter((event) => visibleTaskIds.has(String(event.metadata?.taskId || "")))
       : state.events;
-  const visibleSkills = visibleTaskIds && userId
-    ? state.skills.filter((skill) => (skill.status === "APPROVED" && !skill.ownerUserId) || String(skill.ownerUserId || "") === String(userId))
+  const visibleSkills = normalizedUserId
+    ? state.skills.filter((skill) => String(skill.ownerUserId || "") === normalizedUserId)
     : state.skills;
-  const visibleConnectors = visibleConnectorIds
-    ? state.connectors.filter((connector) => visibleConnectorIds.has(String(connector.connectorId)) || (userId && (String(connector.ownerUserId || "") === String(userId) || connector.ownerUserIds?.includes(String(userId)))))
+  const visibleConnectors = normalizedUserId
+    ? state.connectors.filter((connector) => String(connector.ownerUserId || "") === normalizedUserId)
     : state.connectors;
   return {
     tasks: tasks.map(publicTask),
     skills: visibleSkills.map(publicSkill),
-    providers: userId ? publicProviderList(userId) : state.providers.map(publicProvider),
+    providers: normalizedUserId ? publicProviderList(normalizedUserId) : state.providers.map(publicProvider),
     events: includeEvents ? visibleEvents : [],
     runs: visibleTaskIds ? state.runs.filter((run) => visibleTaskIds.has(String(run.taskId || ""))) : state.runs,
     connectors: visibleConnectors.map(publicConnector),

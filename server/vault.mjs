@@ -180,6 +180,20 @@ export async function removeCredential(credentialRef, options = {}) {
   return deleted;
 }
 
+export async function removeOwnedCredentials(ownerUserId) {
+  await ensureReady();
+  const owner = String(ownerUserId || "");
+  if (!owner) return 0;
+  let removed = 0;
+  for (const [credentialRef, record] of records) {
+    if (ownerIdOf(record) !== owner) continue;
+    records.delete(credentialRef);
+    removed += 1;
+  }
+  if (removed) await persist();
+  return removed;
+}
+
 export function vaultStatus() {
   return { configured: Boolean(vaultFile), count: records.size, file: vaultFile ? path.basename(vaultFile) : "" };
 }

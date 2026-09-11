@@ -292,6 +292,7 @@ export interface Skill {
   updatedAt: string;
   summary: string;
   content: string;
+  owned?: boolean;
 }
 
 export interface Provider {
@@ -387,7 +388,6 @@ export interface WorkspaceUser {
   id: string;
   username: string;
   displayName: string;
-  assignedTaskIds: string[];
 }
 
 export interface SavedCredential {
@@ -412,6 +412,7 @@ export interface Workspace {
   orders?: OrderItem[];
   analyses?: Array<Record<string, unknown>>;
   agentRuns?: AgentRun[];
+  agentOutput?: AgentOutputLine[];
   credentials?: SavedCredential[];
   health?: { db: string; dbAvailable: boolean; persistentSecret: boolean };
   rag?: { indexedChunks: number; mode: string; vectorProvider: string };

@@ -56,6 +56,23 @@ export function detachDesktopAiSocket(userId, socket) {
   if (!group.size) socketsByUser.delete(key);
 }
 
+export function disconnectDesktopAiUser(userId, reason = "USER_SESSION_REVOKED") {
+  const key = String(userId || "");
+  const group = socketsByUser.get(key);
+  if (group) {
+    for (const socket of group) {
+      try { socket.close(1008, reason); } catch {}
+    }
+    socketsByUser.delete(key);
+  }
+  for (const [id, waiter] of pendingCalls) {
+    if (waiter.userId !== key) continue;
+    clearTimeout(waiter.timer);
+    pendingCalls.delete(id);
+    waiter.reject(new Error(reason));
+  }
+}
+
 export function handleDesktopAiMessage(message) {
   if (!message || message.type !== "ai.result" || !message.id) return false;
   const waiter = pendingCalls.get(message.id);
@@ -102,7 +119,7 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
       pendingCalls.delete(id);
       reject(new Error("DESKTOP_AI_TIMEOUT"));
     }, timeoutMs);
-    pendingCalls.set(id, { resolve, reject, timer });
+    pendingCalls.set(id, { resolve, reject, timer, userId: String(userId || "") });
     try {
       socket.send(JSON.stringify({
         type: "ai.call",

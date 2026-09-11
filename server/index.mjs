@@ -1,24 +1,25 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
-import { searchKnowledge, getRagStats, indexSkill } from "./rag.mjs";
+import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedProvider, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
-import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopTask, takeoverPendingAction } from "./engine.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
+import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { openMarketBrowser, observeMarket } from "./market.mjs";
 import { browserLogin, browserLoginStatus } from "./tools.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
-import { credentialExists, findOwnedCredential, initVault, listCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
+import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
-import { assignTask, assignedTaskIds, canAccessTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, requireUser, revokeUserSession, setUserPersistence, unassignTask, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
+import { assignTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, removeTaskAssignmentState, removeUserState, requireUser, revokeUserSession, setUserPersistence, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
-import { attachDesktopAiSocket, callProviderMethod } from "./desktop-ai.mjs";
+import { attachDesktopAiSocket, callProviderMethod, disconnectDesktopAiUser } from "./desktop-ai.mjs";
 import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
 import { Readable } from "node:stream";
-import { closeAllBrowserSessions } from "./browser.mjs";
+import { closeAllBrowserSessions, closeBrowserSession } from "./browser.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 await app.register(cors, {
@@ -111,7 +112,8 @@ function applyConnectorToTask(task, profile) {
 
 function ownerOptions(auth, taskId = "") {
   if (auth?.type !== "user") return {};
-  return { ownerUserId: auth.user.id, ownerUserIds: taskId ? userIdsForTask(taskId) : [auth.user.id] };
+  const task = taskId ? getTask(taskId) : null;
+  return { ownerUserId: task?.ownerUserId || auth.user.id };
 }
 
 function credentialTargetFromProfile(profile) {
@@ -188,9 +190,18 @@ async function resolveOwnedCredential({ auth, task = null, profile, username = "
 
 function rememberConnector(profile, auth) {
   if (auth?.type !== "user") return profile;
-  const existing = state.connectors.find((item) => item.connectorId === profile.connectorId);
-  const ownerUserIds = [...new Set([...(existing?.ownerUserIds || []), existing?.ownerUserId, ...(profile.ownerUserIds || []), profile.ownerUserId, auth.user.id].filter(Boolean).map(String))];
-  return { ...profile, ownerUserIds, ownerUserId: auth.user.id };
+  const ownerUserId = String(auth.user.id);
+  const existing = state.connectors.find((item) =>
+    String(item.ownerUserId || "") === ownerUserId
+    && String(item.type || "") === String(profile.type || "")
+    && String(item.target || "") === String(profile.target || "")
+    && String(item.adapterId || "") === String(profile.adapterId || ""),
+  );
+  const sourceId = String(profile.connectorId || "connector");
+  const connectorId = existing?.connectorId || `${sourceId.slice(0, 70)}_${crypto.createHash("sha256").update(`${ownerUserId}:${sourceId}`).digest("hex").slice(0, 16)}`;
+  const next = { ...profile, connectorId, ownerUserId };
+  delete next.ownerUserIds;
+  return next;
 }
 
 function upsertConnector(profile, auth) {
@@ -230,7 +241,8 @@ async function requireTaskAccess(request, reply) {
   const auth = userAuthFromRequest(request);
   if (!auth || auth.type !== "user") return reply.code(401).send({ error: "USER_AUTH_REQUIRED" });
   const taskId = String(request.params?.taskId || request.body?.taskId || request.query?.taskId || "");
-  if (taskId && !canAccessTask(auth.user.id, taskId)) return reply.code(403).send({ error: "TASK_ACCESS_DENIED" });
+  const task = taskId ? getTask(taskId) : null;
+  if (taskId && (!task || String(task.ownerUserId || "") !== String(auth.user.id))) return reply.code(403).send({ error: "TASK_ACCESS_DENIED" });
   request.auth = auth;
 }
 
@@ -240,14 +252,14 @@ async function requireConnectorAccess(request, reply) {
   const taskId = String(request.body?.taskId || "");
   const task = taskId ? getTask(taskId) : null;
   if (taskId && !task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
-  if (taskId && !canAccessTask(auth.user.id, taskId)) return reply.code(403).send({ error: "TASK_ACCESS_DENIED" });
+  if (taskId && String(task.ownerUserId || "") !== String(auth.user.id)) return reply.code(403).send({ error: "TASK_ACCESS_DENIED" });
   const requestedConnectorId = String(request.body?.connectorId || "");
   if (task && requestedConnectorId && requestedConnectorId !== String(task.target?.connectorId || "")) {
     return reply.code(403).send({ error: "CONNECTOR_TASK_MISMATCH" });
   }
   if (!taskId && request.body?.connectorId) {
     const connector = state.connectors.find((item) => item.connectorId === String(request.body.connectorId));
-    const owned = connector && (String(connector.ownerUserId || "") === auth.user.id || connector.ownerUserIds?.includes(auth.user.id));
+    const owned = connector && String(connector.ownerUserId || "") === auth.user.id;
     if (connector && !owned) return reply.code(403).send({ error: "CONNECTOR_ACCESS_DENIED" });
   }
   request.auth = auth;
@@ -255,25 +267,65 @@ async function requireConnectorAccess(request, reply) {
 
 function snapshot(auth = null) {
   const currentUser = auth?.type === "user" ? getUserSession(auth.token)?.user || auth.user : null;
-  const taskIds = currentUser ? assignedTaskIds(currentUser.id) : null;
   return {
-    ...publicState({ taskIds, userId: currentUser?.id || null }),
+    ...publicState({ userId: currentUser?.id || null }),
     health: { db: persistence.mode, dbAvailable: persistence.available, persistentSecret: hasPersistentSecret(), vault: vaultStatus() },
-    rag: getRagStats(),
+    rag: getRagStats(currentUser ? { ownerUserId: currentUser.id } : {}),
     credentials: currentUser ? publicOwnedCredentials({ type: "user", user: currentUser }) : [],
-    auth: currentUser ? { type: "user", user: { ...currentUser, assignedTaskIds: taskIds } } : auth ? { type: auth.type, username: auth.username } : null,
+    auth: currentUser ? { type: "user", user: currentUser } : auth ? { type: auth.type, username: auth.username } : null,
   };
 }
 
 function broadcast(authFilter = null) {
   for (const entry of streams) {
     try {
+      if (entry.auth?.type === "user") {
+        const current = getUserSession(entry.auth.token);
+        if (!current) {
+          try { entry.socket.close(1008, "USER_SESSION_REVOKED"); } catch {}
+          streams.delete(entry);
+          continue;
+        }
+        entry.auth.user = current.user;
+      }
       if (authFilter && entry.auth?.type === "user" && entry.auth.user.id !== authFilter) continue;
       entry.socket.send(JSON.stringify({ type: "workspace.updated", payload: snapshot(entry.auth) }));
     } catch {
       streams.delete(entry);
     }
   }
+}
+
+function disconnectUserConnections(userId, reason = "USER_SESSION_REVOKED") {
+  const key = String(userId || "");
+  for (const entry of streams) {
+    if (entry.auth?.type !== "user" || String(entry.auth.user.id) !== key) continue;
+    try { entry.socket.close(1008, reason); } catch {}
+    streams.delete(entry);
+  }
+  for (const client of sseClients) {
+    if (client.auth?.type !== "user" || String(client.auth.user.id) !== key) continue;
+    try { client.reply.raw.end(); } catch {}
+    sseClients.delete(client);
+  }
+  disconnectDesktopAiUser(key, reason);
+}
+
+function adminAccount(user) {
+  const { assignedTaskIds, ...account } = user;
+  return account;
+}
+
+function removeTaskFromMemory(taskId) {
+  const key = String(taskId || "");
+  state.tasks = state.tasks.filter((item) => String(item.id) !== key);
+  state.runs = state.runs.filter((item) => String(item.taskId || "") !== key);
+  state.analyses = state.analyses.filter((item) => String(item.taskId || "") !== key);
+  state.agentRuns = state.agentRuns.filter((item) => String(item.taskId || "") !== key);
+  state.agentOutput = state.agentOutput.filter((item) => String(item.taskId || "") !== key);
+  state.orders = state.orders.filter((item) => String(item.taskId || "") !== key);
+  state.events = state.events.filter((item) => String(item.metadata?.taskId || "") !== key);
+  removeTaskAssignmentState(key);
 }
 
 function sendStream(message) {
@@ -283,7 +335,7 @@ function sendStream(message) {
   for (const entry of streams) {
     try {
       if (!entry.auth) continue;
-      if (entry.auth.type === "user" && ((taskId && !canAccessTask(entry.auth.user.id, taskId)) || (!taskId && eventUserId !== entry.auth.user.id))) continue;
+      if (entry.auth.type === "user" && ((taskId && String(getTask(taskId)?.ownerUserId || "") !== String(entry.auth.user.id)) || (!taskId && eventUserId !== entry.auth.user.id))) continue;
       entry.socket.send(JSON.stringify(message));
     } catch {
       streams.delete(entry);
@@ -293,7 +345,7 @@ function sendStream(message) {
     try {
       if (!client.auth) continue;
       if (taskId && client.taskId && client.taskId !== taskId) continue;
-      if (client.auth.type === "user" && ((taskId && !canAccessTask(client.auth.user.id, taskId)) || (!taskId && eventUserId !== client.auth.user.id))) continue;
+      if (client.auth.type === "user" && ((taskId && String(getTask(taskId)?.ownerUserId || "") !== String(client.auth.user.id)) || (!taskId && eventUserId !== client.auth.user.id))) continue;
       client.reply.raw.write(`event: ${message.type}\ndata: ${JSON.stringify(message.payload)}\n\n`);
     } catch {
       sseClients.delete(client);
@@ -320,13 +372,45 @@ async function persistHydratedDefaults() {
 }
 
 async function bootstrapDesktopUser() {
-  if (listUsers().length) return;
+  if (listUsers().length || !state.tasks.length) return;
   const username = String(process.env.DESKTOP_USERNAME || "").trim();
   const password = String(process.env.DESKTOP_PASSWORD || "");
   if (!username || !password) return;
   const user = await createUser({ username, password, displayName: process.env.DESKTOP_DISPLAY_NAME || username });
-  for (const task of state.tasks) await assignTask(user.id, task.id);
+  for (const task of state.tasks) {
+    task.ownerUserId = user.id;
+    await persistTask(task);
+    await assignTask(user.id, task.id);
+  }
   addEvent("user_bootstrapped", `已创建桌面用户 ${user.username}`, { userId: user.id });
+}
+
+async function migrateTenantOwnership() {
+  const accounts = listUsers();
+  for (const task of state.tasks) {
+    if (!task.ownerUserId) {
+      const legacyOwners = userIdsForTask(task.id);
+      const owner = legacyOwners.length === 1 ? legacyOwners[0] : accounts.length === 1 ? accounts[0].id : "";
+      if (!owner) continue;
+      task.ownerUserId = owner;
+      await persistTask(task);
+    }
+    if (!userIdsForTask(task.id).includes(task.ownerUserId)) await assignTask(task.ownerUserId, task.id);
+    const connector = state.connectors.find((item) => item.connectorId === task.target?.connectorId);
+    if (connector && !connector.ownerUserId) {
+      connector.ownerUserId = task.ownerUserId;
+      delete connector.ownerUserIds;
+      await persistConnector(connector);
+    } else if (connector && String(connector.ownerUserId) !== String(task.ownerUserId)) {
+      const owner = accounts.find((item) => item.id === task.ownerUserId);
+      if (!owner) continue;
+      const ownedConnector = rememberConnector(connector, { type: "user", user: owner });
+      state.connectors.unshift(ownedConnector);
+      task.target.connectorId = ownedConnector.connectorId;
+      await persistConnector(ownedConnector);
+      await persistTask(task);
+    }
+  }
 }
 
 if (stateLoadFailed) {
@@ -334,6 +418,7 @@ if (stateLoadFailed) {
 } else {
   if (restoredState) await persistHydratedDefaults();
   await bootstrapDesktopUser();
+  await migrateTenantOwnership();
 }
 
 app.get("/api/health", async () => ({ ok: true, service: "axiom-api", uptimeSec: Math.round(process.uptime()), persistence: await persistence.health(), persistentSecret: hasPersistentSecret(), vault: vaultStatus(), adapters: listConnectorAdapters().length }));
@@ -381,12 +466,12 @@ app.post("/api/user/login", async (request, reply) => {
 app.get("/api/user/session", { preHandler: requireUser }, async (request) => ({ authenticated: true, ...request.userSession, config: userAuthStatus() }));
 app.post("/api/user/logout", { preHandler: requireUser }, async (request) => { await revokeUserSession(userTokenFromRequest(request)); return { ok: true }; });
 
-app.get("/api/admin/users", { preHandler: requireAdmin }, async () => ({ users: listUsers() }));
+app.get("/api/admin/users", { preHandler: requireAdmin }, async () => ({ users: listUsers().map(adminAccount) }));
 app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply) => {
   try {
     const user = await createUser(request.body || {});
     addEvent("user_created", `已创建桌面用户 ${user.username}`, { userId: user.id });
-    return reply.code(201).send({ user });
+    return reply.code(201).send({ user: adminAccount(user) });
   } catch (error) {
     return reply.code(400).send({ error: error.message });
   }
@@ -394,34 +479,50 @@ app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply
 app.patch("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
   try {
     const user = await updateUser(request.params.userId, request.body || {});
+    if (user.status === "DISABLED" || request.body?.password) {
+      disconnectUserConnections(user.id, user.status === "DISABLED" ? "USER_DISABLED" : "USER_PASSWORD_CHANGED");
+    }
+    if (user.status === "DISABLED") {
+      for (const taskId of state.tasks.filter((task) => String(task.ownerUserId || "") === String(user.id)).map((task) => task.id)) {
+        try { stopTask(taskId); } catch {}
+      }
+    }
     addEvent("user_updated", `已更新用户 ${user.username}`, { userId: user.id, status: user.status });
-    return { user };
+    return { user: adminAccount(user) };
   } catch (error) {
     return reply.code(400).send({ error: error.message });
   }
 });
-app.post("/api/admin/users/:userId/tasks", { preHandler: requireAdmin }, async (request, reply) => {
-  try {
-    const taskId = String(request.body?.taskId || "").trim();
-    if (!taskId) return reply.code(400).send({ error: "TASK_ID_REQUIRED" });
-    if (!getTask(taskId)) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
-    const user = await assignTask(request.params.userId, taskId);
-    addEvent("task_assigned", `已向 ${user.username} 分配任务`, { userId: user.id, taskId });
-    broadcast();
-    return { user };
-  } catch (error) {
-    return reply.code(400).send({ error: error.message });
+app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
+  const user = listUsers().find((item) => item.id === request.params.userId);
+  if (!user) return reply.code(404).send({ error: "USER_NOT_FOUND" });
+  if (String(request.body?.username || "") !== user.username) {
+    return reply.code(400).send({ error: "USER_DELETE_CONFIRMATION_MISMATCH" });
   }
-});
-app.delete("/api/admin/users/:userId/tasks/:taskId", { preHandler: requireAdmin }, async (request, reply) => {
-  try {
-    const user = await unassignTask(request.params.userId, request.params.taskId);
-    addEvent("task_unassigned", `已取消 ${user.username} 的任务分配`, { userId: user.id, taskId: request.params.taskId });
-    broadcast();
-    return { user };
-  } catch (error) {
-    return reply.code(400).send({ error: error.message });
+  const ownedTasks = state.tasks.filter((task) => String(task.ownerUserId || "") === String(user.id));
+  const taskIds = ownedTasks.map((task) => task.id);
+  disconnectUserConnections(user.id, "USER_DELETED");
+  for (const task of ownedTasks) {
+    try { stopTask(task.id); } catch { stopController(task.id); }
+    await closeBrowserSession(task.target?.browserSessionId || `task:${task.id}`).catch(() => {});
   }
+  try {
+    await persistence.deleteUserData({ userId: user.id, taskIds });
+  } catch (error) {
+    console.error("deleteUserData failed", error);
+    return reply.code(503).send({ error: "USER_DELETE_FAILED" });
+  }
+  for (const skill of state.skills.filter((item) => String(item.ownerUserId || "") === String(user.id))) removeSkill(skill.id);
+  state.skills = state.skills.filter((item) => String(item.ownerUserId || "") !== String(user.id));
+  state.providers = state.providers.filter((item) => String(item.ownerUserId || "") !== String(user.id));
+  state.connectors = state.connectors.filter((item) => String(item.ownerUserId || "") !== String(user.id));
+  for (const taskId of taskIds) removeTaskFromMemory(taskId);
+  state.events = state.events.filter((item) => String(item.metadata?.userId || "") !== String(user.id));
+  await removeOwnedCredentials(user.id).catch((error) => console.error("removeOwnedCredentials failed", error));
+  removeUserState(user.id);
+  addEvent("user_deleted", `已删除桌面用户 ${user.username} 及其全部账号数据`, { username: user.username });
+  broadcast();
+  return { ok: true };
 });
 
 app.get("/api/workspace", { preHandler: requireWorkspaceAccess }, async (request) => snapshot(request.auth));
@@ -478,7 +579,8 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     }
   }
   const task = {
-    id: `task_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: `task_${crypto.randomUUID()}`,
+    ownerUserId: request.auth.user.id,
     name: String(body.name || "新建观察任务"),
     status: "READY",
     mode: body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : "LIVE",
@@ -530,10 +632,49 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
   };
   state.tasks.unshift(task);
   await persistTask(task);
-  if (request.auth?.type === "user") await assignTask(request.auth.user.id, task.id);
-  addEvent("task_created", `已创建任务：${task.name}`, { taskId: task.id });
+  addEvent("task_created", `已创建任务：${task.name}`, { taskId: task.id, userId: request.auth.user.id });
   broadcast();
   return reply.code(201).send({ task: publicTask(task) });
+});
+
+app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (request, reply) => {
+  const task = getTask(request.params.taskId);
+  if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
+  if (["STARTING", "MONITORING", "ANALYZING", "RISK_CHECK", "EXECUTING", "STOPPING"].includes(task.status)) {
+    return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
+  }
+  const body = request.body || {};
+  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, updatedAt: task.updatedAt };
+  task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
+  task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
+  task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;
+  task.mode = body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : body.mode === "LIVE" ? "LIVE" : task.mode;
+  task.updatedAt = new Date().toISOString();
+  try {
+    await persistTask(task);
+  } catch {
+    Object.assign(task, previous);
+    return reply.code(503).send({ error: "TASK_UPDATE_FAILED" });
+  }
+  addEvent("task_updated", `已更新任务：${task.name}`, { taskId: task.id, userId: request.auth.user.id });
+  broadcast(request.auth.user.id);
+  return { task: publicTask(task) };
+});
+
+app.delete("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (request, reply) => {
+  const task = getTask(request.params.taskId);
+  if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
+  try { stopTask(task.id); } catch { stopController(task.id); }
+  await closeBrowserSession(task.target?.browserSessionId || `task:${task.id}`).catch(() => {});
+  try {
+    await persistDeletedTask({ taskId: task.id, ownerUserId: request.auth.user.id });
+  } catch {
+    return reply.code(503).send({ error: "TASK_DELETE_FAILED" });
+  }
+  removeTaskFromMemory(task.id);
+  addEvent("task_deleted", `已删除任务：${task.name}`, { userId: request.auth.user.id });
+  broadcast(request.auth.user.id);
+  return { ok: true };
 });
 
 app.post("/api/tasks/:taskId/start", { preHandler: requireTaskAccess }, async (request, reply) => {
@@ -613,7 +754,8 @@ app.get("/api/tasks/:taskId/agent-stream", { preHandler: requireTaskAccess }, as
 app.post("/api/tasks/:taskId/browser/open", { preHandler: requireTaskAccess }, async (request, reply) => {
   const task = getTask(request.params.taskId);
   if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
-  const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId);
+  const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId && String(item.ownerUserId || "") === request.auth.user.id);
+  if (task.target.connectorId && !connector) return reply.code(404).send({ error: "CONNECTOR_NOT_FOUND" });
   const result = await openMarketBrowser(task, connector);
   if (result.ok) {
     task.target.browserSessionId = result.sessionId;
@@ -627,7 +769,8 @@ app.post("/api/tasks/:taskId/browser/open", { preHandler: requireTaskAccess }, a
 app.post("/api/tasks/:taskId/browser/observe", { preHandler: requireTaskAccess }, async (request, reply) => {
   const task = getTask(request.params.taskId);
   if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
-  const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId);
+  const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId && String(item.ownerUserId || "") === request.auth.user.id);
+  if (task.target.connectorId && !connector) return reply.code(404).send({ error: "CONNECTOR_NOT_FOUND" });
   return observeMarket(task, connector);
 });
 
@@ -644,7 +787,7 @@ app.post("/api/connectors/discover", { preHandler: requireConnectorAccess }, asy
       applyConnectorToTask(task, profile);
       persistTask(task);
     }
-    addEvent("connector_discovered", `已发现${profile.type === "website" ? "网站" : "桌面 App"}目标：${profile.name}`, { connectorId: profile.connectorId, adapterId: profile.adapterId, reviewStatus: profile.reviewStatus });
+    addEvent("connector_discovered", `已发现${profile.type === "website" ? "网站" : "桌面 App"}目标：${profile.name}`, { userId: request.auth.user.id, connectorId: profile.connectorId, adapterId: profile.adapterId, reviewStatus: profile.reviewStatus });
     broadcast();
     return publicConnector(profile);
   } catch (error) {
@@ -668,7 +811,8 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
           : null;
     if (!profile) return reply.code(404).send({ error: "CONNECTOR_NOT_FOUND" });
     if (task && !hasTarget && profile.connectorId !== task.target?.connectorId) return reply.code(403).send({ error: "CONNECTOR_TASK_MISMATCH" });
-    if (request.auth.type === "user" && !task && profile.ownerUserId && profile.ownerUserId !== request.auth.user.id && !profile.ownerUserIds?.includes(request.auth.user.id)) return reply.code(403).send({ error: "CONNECTOR_ACCESS_DENIED" });
+    if (!hasTarget && String(profile.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "CONNECTOR_ACCESS_DENIED" });
+    if (request.auth.type === "user" && !task && String(profile.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "CONNECTOR_ACCESS_DENIED" });
     const targetChanged = Boolean(task && task.target?.connectorId && task.target.connectorId !== profile.connectorId);
     const resolved = await resolveOwnedCredential({
       auth: request.auth,
@@ -726,7 +870,6 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
             sessionId,
             credentialRef,
             ownerUserId: credentialOptions.ownerUserId,
-            ownerUserIds: credentialOptions.ownerUserIds,
             adapterId: profile.adapterId,
             targetUrl: profile.target,
             automationAuthorized: true,
@@ -795,13 +938,11 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
   const existing = providerId
     ? state.providers.find((item) => item.id === providerId && String(item.ownerUserId || "") === request.auth.user.id)
     : findOwnedProviderMatch(request.auth.user.id, body);
-  const template = providerId ? state.providers.find((item) => item.id === providerId) : null;
+  if (providerId && !existing) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
   let provider;
   try {
-    const payload = existing || !template ? body : { ...body, id: "", providerKey: template.providerKey || template.id };
-    provider = createProvider(payload, existing || template);
+    provider = createProvider(body, existing);
     provider.ownerUserId = request.auth.user.id;
-    if (!existing && template) provider.providerKey = template.providerKey || template.id;
   } catch (error) { return reply.code(400).send({ error: error.message || "PROVIDER_INVALID" }); }
   state.providers = state.providers.filter((item) => item.id !== provider.id);
   state.providers.push(provider);
@@ -811,7 +952,7 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
     if (!existing) state.providers = state.providers.filter((item) => item.id !== provider.id);
     return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
   }
-  addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id });
+  addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id, userId: request.auth.user.id });
   broadcast();
   return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider) });
 });
@@ -832,7 +973,7 @@ app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess
     provider.status = previousStatus;
     return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
   }
-  addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, code: verification.code, httpStatus: verification.httpStatus });
+  addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, userId: request.auth.user.id, code: verification.code, httpStatus: verification.httpStatus });
   broadcast();
   return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus } };
 });
@@ -847,11 +988,11 @@ app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess },
     return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
   }
   for (const task of state.tasks) {
-    if (task.providerId !== provider.id) continue;
+    if (task.providerId !== provider.id || String(task.ownerUserId || "") !== request.auth.user.id) continue;
     task.providerId = "";
     persistTask(task);
   }
-  addEvent("provider_deleted", `已删除 Provider：${provider.name}`, { providerId: provider.id });
+  addEvent("provider_deleted", `已删除 Provider：${provider.name}`, { providerId: provider.id, userId: request.auth.user.id });
   broadcast();
   return { ok: true };
 });
@@ -862,7 +1003,7 @@ app.post("/api/skills", { preHandler: requireWorkspaceAccess }, async (request, 
   const content = String(body.content || "").trim();
   if (!content) return reply.code(400).send({ error: "SKILL_CONTENT_REQUIRED" });
   const skill = {
-    id: `skill_${Date.now()}`,
+    id: `skill_${crypto.randomUUID()}`,
     title: String(body.title || body.filename || "未命名专家经验"),
     kind: body.kind === "rule" ? "rule" : body.kind === "redline" || body.kind === "guardrail" ? "guardrail" : "expert",
     source: String(body.filename || "手动输入"),
@@ -875,59 +1016,73 @@ app.post("/api/skills", { preHandler: requireWorkspaceAccess }, async (request, 
     content,
     ownerUserId: request.auth.user.id,
   };
+  try {
+    await persistSkill(skill);
+  } catch {
+    return reply.code(503).send({ error: "SKILL_PERSIST_FAILED" });
+  }
   state.skills.unshift(skill);
-  persistSkill(skill);
-  addEvent("skill_ingested", `已解析专家经验，等待审核：${skill.title}`, { skillId: skill.id, chunks: 0 });
+  addEvent("skill_ingested", `已解析专家经验，等待审核：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id, chunks: 0 });
   broadcast();
   return reply.code(201).send({ skill: publicSkill(skill) });
 });
 app.post("/api/skills/:skillId/approve", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const skill = state.skills.find((item) => item.id === request.params.skillId);
   if (!skill) return reply.code(404).send({ error: "SKILL_NOT_FOUND" });
-  if (skill.ownerUserId && String(skill.ownerUserId) !== request.auth.user.id) return reply.code(403).send({ error: "SKILL_ACCESS_DENIED" });
-  if (!skill.ownerUserId && skill.status !== "APPROVED") return reply.code(403).send({ error: "SKILL_ACCESS_DENIED" });
+  if (String(skill.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "SKILL_ACCESS_DENIED" });
+  const previous = { status: skill.status, version: skill.version, chunks: skill.chunks };
   skill.status = "APPROVED";
   skill.version = `v${Date.now().toString().slice(-3)}`;
   skill.chunks = indexSkill(skill);
-  persistSkill(skill);
-  addEvent("skill_approved", `Skill 已审核发布：${skill.title}`, { skillId: skill.id, version: skill.version, chunks: skill.chunks });
+  try {
+    await persistSkill(skill);
+  } catch {
+    Object.assign(skill, previous);
+    if (skill.status === "APPROVED") indexSkill(skill);
+    else removeSkill(skill.id);
+    return reply.code(503).send({ error: "SKILL_PERSIST_FAILED" });
+  }
+  addEvent("skill_approved", `Skill 已审核发布：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id, version: skill.version, chunks: skill.chunks });
   broadcast();
   return { skill: publicSkill(skill) };
 });
-app.get("/api/rag/search", { preHandler: requireWorkspaceAccess }, async (request) => ({ query: request.query?.q || "", results: searchKnowledge(request.query?.q || "", { ownerUserId: request.auth.user.id }, 8), stats: getRagStats() }));
+app.delete("/api/skills/:skillId", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
+  const skill = state.skills.find((item) =>
+    item.id === request.params.skillId
+    && String(item.ownerUserId || "") === request.auth.user.id,
+  );
+  if (!skill) return reply.code(404).send({ error: "SKILL_NOT_FOUND" });
+  try {
+    await persistDeletedSkill(skill.id);
+  } catch {
+    return reply.code(503).send({ error: "SKILL_DELETE_FAILED" });
+  }
+  state.skills = state.skills.filter((item) => item.id !== skill.id);
+  removeSkill(skill.id);
+  addEvent("skill_deleted", `已删除经验：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id });
+  broadcast(request.auth.user.id);
+  return { ok: true };
+});
+app.get("/api/rag/search", { preHandler: requireWorkspaceAccess }, async (request) => ({ query: request.query?.q || "", results: searchKnowledge(request.query?.q || "", { ownerUserId: request.auth.user.id }, 8), stats: getRagStats({ ownerUserId: request.auth.user.id }) }));
 
 app.get("/api/admin/summary", { preHandler: requireAdmin }, async () => {
-  const accounts = listUsers();
-  const tasks = state.tasks.map((task) => ({
-    id: task.id,
-    name: task.name,
-    status: task.status,
-    assignedUserCount: userIdsForTask(task.id).length,
-    updatedAt: task.updatedAt,
-  }));
-  const assignments = accounts.reduce((total, account) => total + account.assignedTaskIds.length, 0);
-  const assignedTasks = tasks.filter((task) => task.assignedUserCount > 0).length;
+  const accounts = listUsers().map(adminAccount);
+  const events = state.events.filter((event) => /^(admin_|user_)/.test(String(event.type || "")));
   return {
-    scope: "accounts_assignments_audit",
+    scope: "accounts_audit",
     users: accounts.length,
     activeUsers: accounts.filter((account) => account.status === "ACTIVE").length,
     disabledUsers: accounts.filter((account) => account.status === "DISABLED").length,
-    activeTasks: tasks.filter((task) => ["MONITORING", "ANALYZING", "EXECUTING"].includes(task.status)).length,
-    totalTasks: tasks.length,
-    assignedTasks,
-    unassignedTasks: tasks.length - assignedTasks,
-    assignments,
-    auditEvents: state.events.length,
+    auditEvents: events.length,
     accounts,
-    tasks,
-    events: state.events,
+    events,
     persistence: await persistence.health(),
   };
 });
 
 const port = Number(process.env.PORT || 8787);
 const host = String(process.env.HOST || "127.0.0.1");
-for (const task of state.tasks) if (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && task.status === "MONITORING")) startController(task.id, { userId: userIdsForTask(task.id)[0] || "" });
+for (const task of state.tasks) if (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && task.status === "MONITORING")) startController(task.id, { userId: task.ownerUserId || "" });
 try {
   await app.listen({ port, host });
   console.log(`Axiom API listening on http://${host}:${port}`);

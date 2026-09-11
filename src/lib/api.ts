@@ -121,24 +121,17 @@ export async function userLogout() {
 }
 
 export async function listAdminUsers() {
-  return request<{ users: Array<{ id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] }> }>("/api/admin/users");
+  return request<{ users: AdminAccount[] }>("/api/admin/users");
 }
 
-export type AdminAccount = { id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] };
-export type AdminTaskSummary = { id: string; name: string; status: string; assignedUserCount: number; updatedAt?: string };
+export type AdminAccount = { id: string; username: string; displayName: string; status: string; createdAt?: string; updatedAt?: string };
 export type AdminSummary = {
-  scope: "accounts_assignments_audit";
+  scope: "accounts_audit";
   users: number;
   activeUsers: number;
   disabledUsers: number;
-  activeTasks: number;
-  totalTasks: number;
-  assignedTasks: number;
-  unassignedTasks: number;
-  assignments: number;
   auditEvents: number;
   accounts: AdminAccount[];
-  tasks: AdminTaskSummary[];
   events: EventItem[];
   persistence: { mode: string; available: boolean; detail?: string };
 };
@@ -148,19 +141,15 @@ export async function fetchAdminSummary(): Promise<AdminSummary> {
 }
 
 export async function createAdminUser(payload: Record<string, unknown>) {
-  return request<{ user: { id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] } }>("/api/admin/users", { method: "POST", body: JSON.stringify(payload) });
+  return request<{ user: AdminAccount }>("/api/admin/users", { method: "POST", body: JSON.stringify(payload) });
 }
 
 export async function updateAdminUser(userId: string, payload: Record<string, unknown>) {
-  return request<{ user: { id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] } }>(`/api/admin/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  return request<{ user: AdminAccount }>(`/api/admin/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) });
 }
 
-export async function assignAdminTask(userId: string, taskId: string) {
-  return request<{ user: { id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] } }>(`/api/admin/users/${encodeURIComponent(userId)}/tasks`, { method: "POST", body: JSON.stringify({ taskId }) });
-}
-
-export async function unassignAdminTask(userId: string, taskId: string) {
-  return request<{ user: { id: string; username: string; displayName: string; status: string; assignedTaskIds: string[] } }>(`/api/admin/users/${encodeURIComponent(userId)}/tasks/${encodeURIComponent(taskId)}`, { method: "DELETE" });
+export async function deleteAdminUser(userId: string, username: string) {
+  return request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify({ username }) });
 }
 
 export async function fetchWorkspace(): Promise<Workspace> {
@@ -177,6 +166,14 @@ export async function startTask(taskId: string): Promise<Task> {
 
 export async function createTask(payload: Record<string, unknown>): Promise<Task> {
   return (await request<{ task: Task }>("/api/tasks", { method: "POST", body: JSON.stringify(payload) })).task;
+}
+
+export async function updateTask(taskId: string, payload: Record<string, unknown>): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) })).task;
+}
+
+export async function deleteTask(taskId: string) {
+  return request<{ ok: boolean }>(`/api/tasks/${taskId}`, { method: "DELETE" });
 }
 
 export async function stopTask(taskId: string): Promise<Task> {
@@ -246,6 +243,10 @@ export async function saveSkill(payload: Record<string, unknown>): Promise<Skill
 
 export async function approveSkill(skillId: string): Promise<Skill> {
   return (await request<{ skill: Skill }>(`/api/skills/${skillId}/approve`, { method: "POST", body: "{}" })).skill;
+}
+
+export async function deleteSkill(skillId: string) {
+  return request<{ ok: boolean }>(`/api/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
 }
 
 export async function saveProvider(payload: Record<string, unknown>): Promise<Provider> {

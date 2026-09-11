@@ -199,6 +199,22 @@ export async function revokeUserSessions(userId) {
   for (const key of keys) sessions.delete(key);
 }
 
+export function removeUserState(userId) {
+  const key = String(userId || "");
+  if (!key) return false;
+  for (const [token, session] of sessions) {
+    if (session.userId === key) sessions.delete(token);
+  }
+  assignments.delete(key);
+  return users.delete(key);
+}
+
+export function removeTaskAssignmentState(taskId) {
+  const key = String(taskId || "");
+  if (!key) return;
+  for (const taskIds of assignments.values()) taskIds.delete(key);
+}
+
 export function userTokenFromRequest(request) {
   const value = request.headers?.["x-user-token"];
   return Array.isArray(value) ? value[0] : value;

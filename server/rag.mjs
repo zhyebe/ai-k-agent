@@ -41,9 +41,7 @@ export function chunkDocument(content, size = 680) {
 }
 
 export function indexSkill(skill) {
-  for (const [id, chunk] of chunks) {
-    if (chunk.skillId === skill.id) chunks.delete(id);
-  }
+  removeSkill(skill.id);
   const pieces = chunkDocument(skill.content);
   pieces.forEach((content, index) => {
     const id = `${skill.id}-chunk-${index + 1}`;
@@ -62,12 +60,22 @@ export function indexSkill(skill) {
   return pieces.length;
 }
 
+export function removeSkill(skillId) {
+  let removed = 0;
+  for (const [id, chunk] of chunks) {
+    if (chunk.skillId !== skillId) continue;
+    chunks.delete(id);
+    removed += 1;
+  }
+  return removed;
+}
+
 export function searchKnowledge(query, filters = {}, limit = 5) {
   const queryTokens = new Set(tokenize(query));
   const matches = [];
   for (const chunk of chunks.values()) {
     if (chunk.status !== "APPROVED") continue;
-    if (filters.ownerUserId && chunk.ownerUserId && chunk.ownerUserId !== String(filters.ownerUserId)) continue;
+    if (filters.ownerUserId && chunk.ownerUserId !== String(filters.ownerUserId)) continue;
     if (filters.skillId && filters.skillId !== chunk.skillId) continue;
     if (filters.tag && !chunk.tags.includes(filters.tag)) continue;
     let overlap = 0;
@@ -87,6 +95,10 @@ export function searchKnowledge(query, filters = {}, limit = 5) {
   return matches.sort((left, right) => right.score - left.score).slice(0, limit);
 }
 
-export function getRagStats() {
-  return { indexedChunks: chunks.size, mode: "local-keyword", vectorProvider: "pluggable" };
+export function getRagStats(filters = {}) {
+  const ownerUserId = String(filters.ownerUserId || "");
+  const indexedChunks = ownerUserId
+    ? [...chunks.values()].filter((chunk) => chunk.ownerUserId === ownerUserId).length
+    : chunks.size;
+  return { indexedChunks, mode: "local-keyword", vectorProvider: "pluggable" };
 }

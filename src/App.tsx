@@ -31,6 +31,7 @@ import {
   Menu,
   Minus,
   Pause,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -59,6 +60,8 @@ import {
   createTask,
   configureApiBaseUrl,
   deleteProvider,
+  deleteSkill,
+  deleteTask,
   discoverConnector,
   fetchApiHealth,
   fetchAgentOutput,
@@ -76,6 +79,7 @@ import {
   takeoverPendingAction,
   testConnector,
   testProvider,
+  updateTask,
   setUserToken,
   userLogin,
   userLogout,
@@ -85,7 +89,7 @@ import type { AgentOutputLine, AgentRun, DesktopUpdateState, MarketCandle, Marke
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "console", label: "任务控制台", icon: LayoutDashboard },
-  { key: "workflows", label: "工作流", icon: Workflow },
+  { key: "workflows", label: "任务管理", icon: Workflow },
   { key: "skills", label: "经验与 Skills", icon: BookOpen },
   { key: "connectors", label: "连接器", icon: Waypoints },
   { key: "runs", label: "运行记录", icon: History },
@@ -237,10 +241,7 @@ function hostnameOf(url = "") {
 function sameWorkspaceUser(left: WorkspaceUser | null | undefined, right: WorkspaceUser | null | undefined) {
   if (left === right) return true;
   if (!left || !right) return false;
-  if (left.id !== right.id || left.username !== right.username || left.displayName !== right.displayName) return false;
-  const current = [...(left.assignedTaskIds || [])].sort();
-  const nextIds = [...(right.assignedTaskIds || [])].sort();
-  return current.length === nextIds.length && current.every((id, index) => id === nextIds[index]);
+  return left.id === right.id && left.username === right.username && left.displayName === right.displayName;
 }
 
 function savedCredentialForTarget(credentials: SavedCredential[] = [], targetType: string, url: string, installPath: string) {
@@ -388,7 +389,7 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
           <div className="auth-heading">
           <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
           <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用管理后台分配的账号登录。实盘出现买卖建议时会弹窗，你确认后才会下单。</p>
+          <p>使用已开通的账号登录。实盘出现买卖建议时会弹窗，你确认后才会下单。</p>
           </div>
           <div className="auth-safety">
             <ShieldCheck size={17} />
@@ -406,7 +407,7 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
             {error && <div className="login-error auth-error"><AlertTriangle size={14} />{error}</div>}
             <button className="button button-primary auth-submit" type="submit" disabled={busy}><LogIn size={15} />{busy ? "验证中" : "登录任务工作台"}</button>
           </form>
-          <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台分配。Provider 密钥加密后写入服务端数据库。</span></div>
+          <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台开通。Provider 密钥加密后写入当前账号的数据空间。</span></div>
         </section>
       </div>
     </>
@@ -418,7 +419,7 @@ function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const busyLock = useRef(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [modal, setModal] = useState<"task" | "skill" | "provider" | null>(null);
+  const [modal, setModal] = useState<"task" | "task-edit" | "skill" | "provider" | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
@@ -428,8 +429,9 @@ function App() {
   const [agentLines, setAgentLines] = useState<AgentOutputLine[]>([]);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState("");
 
-  const task = workspace.tasks[0] || null;
+  const task = workspace.tasks.find((item) => item.id === selectedTaskId) || workspace.tasks[0] || null;
   const isRunning = taskIsMonitoring(task);
 
   useEffect(() => {
@@ -773,6 +775,23 @@ function App() {
     });
   }
 
+  async function handleSkillDelete(skill: Skill) {
+    if (!skill.owned || !window.confirm(`确定删除“${skill.title}”吗？删除后不会再参与 AI 分析，且无法恢复。`)) return;
+    await withBusy(`skill-delete:${skill.id}`, async () => {
+      try {
+        await deleteSkill(skill.id);
+        setWorkspace((current) => ({
+          ...current,
+          skills: current.skills.filter((item) => item.id !== skill.id),
+          rag: current.rag ? { ...current.rag, indexedChunks: Math.max(0, current.rag.indexedChunks - skill.chunks) } : current.rag,
+        }));
+        notify(`已删除 ${skill.title}，并从 AI 经验索引移除`);
+      } catch (error) {
+        notify(`删除失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+      }
+    });
+  }
+
   async function handleProviderSave(payload: Record<string, unknown>) {
     await withBusy("provider-save", async () => {
       try {
@@ -828,12 +847,46 @@ function App() {
         } catch {
           setWorkspace((current) => ({ ...current, tasks: [created, ...current.tasks] }));
         }
+        setSelectedTaskId(created.id);
         setModal(null);
         setView("console");
         notify(created.target.credentialStatus === "已托管" ? `任务已创建，登录凭据已保存到当前账号：${created.name}` : `任务已创建：${created.name}`);
       } catch (error) {
         notify(`创建失败：${error instanceof Error ? error.message : "请检查目标地址"}`);
         throw error;
+      }
+    });
+  }
+
+  async function handleTaskUpdate(payload: Record<string, unknown>) {
+    if (!task) return;
+    await withBusy(`task-update:${task.id}`, async () => {
+      try {
+        const updated = await updateTask(task.id, payload);
+        replaceTask(updated);
+        setModal(null);
+        notify(`任务已更新：${updated.name}`);
+      } catch (error) {
+        notify(`更新失败：${error instanceof Error && error.message === "TASK_MUST_BE_STOPPED" ? "请先停止正在运行的任务" : error instanceof Error ? error.message : "请稍后重试"}`);
+        throw error;
+      }
+    });
+  }
+
+  async function handleTaskDelete(target: Task) {
+    const running = taskIsMonitoring(target);
+    if (!window.confirm(`确定删除“${target.name}”吗？${running ? "运行会立即停止，" : ""}该任务的分析、运行和订单记录会一并永久删除。`)) return;
+    await withBusy(`task-delete:${target.id}`, async () => {
+      try {
+        await deleteTask(target.id);
+        setWorkspace((current) => ({ ...current, tasks: current.tasks.filter((item) => item.id !== target.id), runs: current.runs.filter((item) => item.taskId !== target.id), analyses: (current.analyses || []).filter((item) => String(item.taskId || "") !== target.id), agentRuns: (current.agentRuns || []).filter((item) => item.taskId !== target.id), agentOutput: (current.agentOutput || []).filter((item) => item.taskId !== target.id), orders: (current.orders || []).filter((item) => item.taskId !== target.id) }));
+        if (selectedTaskId === target.id || task?.id === target.id) {
+          setSelectedTaskId(workspace.tasks.find((item) => item.id !== target.id)?.id || "");
+          setStreamOpen(false);
+        }
+        notify(`任务已删除：${target.name}`);
+      } catch (error) {
+        notify(`删除失败：${error instanceof Error ? error.message : "请稍后重试"}`);
       }
     });
   }
@@ -849,7 +902,7 @@ function App() {
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
           <div><strong>axiom</strong><small>agent workspace</small></div>
         </div>
-        <div className="workspace-switcher"><div className="avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><b>{user.displayName || user.username}</b><span>已分配 {user.assignedTaskIds.length} 个任务</span></div></div>
+        <div className="workspace-switcher"><div className="avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><b>{user.displayName || user.username}</b><span>{workspace.tasks.length} 个自建任务</span></div></div>
         <div className="nav-label">工作区</div>
         <nav className="primary-nav" aria-label="主导航">
           {navItems.map(({ key, label, icon: Icon }) => <button key={key} className={view === key ? "nav-item active" : "nav-item"} onClick={() => { setView(key); setSidebarOpen(false); }}><Icon size={17} /><span>{label}</span>{key === "skills" && workspace.skills.some((skill) => skill.status === "REVIEW") && <em>{workspace.skills.filter((skill) => skill.status === "REVIEW").length}</em>}</button>)}
@@ -882,8 +935,8 @@ function App() {
         <div className="content-scroll">
           {loadError && <div className="login-error page-error"><AlertTriangle size={14} />{loadError}</div>}
           {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={() => setStreamOpen(true)} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
-          {view === "workflows" && (task ? <WorkflowsView task={task} onCreate={() => setModal("task")} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
-          {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} />}
+          {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => setModal("provider")} onProviderTest={handleProviderTest} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
           {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
         </div>
@@ -894,6 +947,7 @@ function App() {
         <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
       )}
       {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} savedCredentials={workspace.credentials || []} />}
+      {modal === "task-edit" && task && <TaskEditModal task={task} onClose={() => setModal(null)} onSave={handleTaskUpdate} />}
       {modal === "skill" && <SkillModal onClose={() => setModal(null)} onSave={handleSkillSave} />}
       {modal === "provider" && <ProviderModal onClose={() => setModal(null)} onSave={handleProviderSave} />}
       {toast && <div className="toast" role="status"><CheckCircle2 size={16} /><span>{toast}</span><button aria-label="关闭提示" onClick={() => setToast(null)}><X size={14} /></button></div>}
@@ -1041,7 +1095,7 @@ function RulesPanel({ rules, pendingReview, onAutoJudge, busyAction }: { rules: 
 function WalletIcon() { return <span className="wallet-icon">¥</span>; }
 
 function EmptyTaskState({ onCreate }: { onCreate: () => void }) {
-  return <section className="panel empty-task"><div className="panel-kicker"><Workflow size={14} />尚未分配任务</div><h2>先创建或等待管理员分配任务</h2><p>桌面端只会显示当前账号被分配的任务。创建任务后即可连接目标网站、托管凭据，并执行一次只读分析。</p><button type="button" className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>;
+  return <section className="panel empty-task"><div className="panel-kicker"><Workflow size={14} />还没有任务</div><h2>创建你的第一个任务</h2><p>任务仅属于当前账号。创建后可连接目标网站、托管凭据，并基于实时数据进行分析。</p><button type="button" className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>;
 }
 
 function AgentOutputDrawer({ task, lines, runs, onClose }: { task: Task; lines: AgentOutputLine[]; runs: AgentRun[]; onClose: () => void }) {
@@ -1080,38 +1134,44 @@ function AgentOutputDrawer({ task, lines, runs, onClose }: { task: Task; lines: 
   );
 }
 
-function WorkflowsView({ task, onCreate, onRun, onStop, busyAction }: { task: Task; onCreate: () => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
+function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
   const isRunning = taskIsMonitoring(task);
   return <>
-    <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />任务编排</div><h1>工作流</h1><p>把连接、采集、分析、规则和动作串成可追溯的运行链。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
-    <section className="workflow-overview">
+    <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />我的任务</div><h1>任务管理</h1><p>当前账号自行创建、切换、编辑和删除任务，其他账号无法访问。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
+    <div className="task-management-grid">
+      <section className="panel task-list-panel">
+        <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />任务列表</div><h2>{tasks.length} 个任务</h2></div></div>
+        <div className="owned-task-list">{tasks.map((item) => <div className={`owned-task-row ${item.id === task.id ? "active" : ""}`} key={item.id}><button type="button" className="owned-task-select" onClick={() => onSelect(item.id)}><span><strong>{item.name}</strong><small>{item.symbol} · {item.timeframe} · {displayLabel(item.mode, modeLabels, "观察模式")}</small></span><StatusBadge status={item.status} /></button><div className="owned-task-actions"><IconButton label={`编辑 ${item.name}`} onClick={() => { onSelect(item.id); onEdit(); }} disabled={busyAction !== null}><Pencil size={13} /></IconButton><IconButton label={`删除 ${item.name}`} onClick={() => onDelete(item)} disabled={busyAction !== null}>{busyAction === `task-delete:${item.id}` ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton></div></div>)}</div>
+      </section>
+      <section className="workflow-overview">
       <div className="workflow-overview-main">
         <div className="panel-kicker"><Workflow size={14} />当前工作流</div>
         <div className="overview-title-row"><h2>{task.name}</h2><StatusBadge status={task.status} />{taskIsMonitoring(task) && <span className="monitoring-intent"><Activity size={13} />后台持续监测</span>}</div>
         <p className="overview-description">{task.target.type === "website" ? "网站连接" : "桌面 App 连接"} · {task.target.name} · {task.symbol} · {task.timeframe} · {displayLabel(task.mode, modeLabels, "观察模式")}</p>
         <div className="large-flow">{task.workflow.map((step, index) => <div className={`large-step ${step.status}`} key={step.key}><div className="large-step-number">{step.status === "complete" ? <Check size={15} /> : index + 1}</div><div><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className="large-step-line" />}</div>)}</div>
-        <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><Play size={15} />{busyAction === "start" ? "检查中" : "运行任务"}</>}</button></div>
+        <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><Play size={15} />{busyAction === "start" ? "检查中" : "运行任务"}</>}</button><button type="button" className="button button-secondary" onClick={onEdit} disabled={busyAction !== null}><Pencil size={14} />编辑</button><button type="button" className="button button-danger" onClick={() => onDelete(task)} disabled={busyAction !== null}><Trash2 size={14} />删除</button></div>
       </div>
       <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>{task.mode === "LIVE" ? "确认后下单" : "观察模式不下单"}</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>{task.mode === "LIVE" ? "分析不会自动下单，必须弹窗确认" : "只给出买卖建议，不提交实盘"}</span></div></div></aside>
-    </section>
+      </section>
+    </div>
   </>;
 }
 
-function SkillsView({ skills, rag, onCreate, onApprove }: { skills: Skill[]; rag?: Workspace["rag"]; onCreate: () => void; onApprove: (skill: Skill) => void }) {
+function SkillsView({ skills, rag, onCreate, onApprove, onDelete, busyAction }: { skills: Skill[]; rag?: Workspace["rag"]; onCreate: () => void; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null }) {
   const [query, setQuery] = useState("");
   const approved = skills.filter((skill) => skill.status === "APPROVED").length;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredSkills = normalizedQuery
     ? skills.filter((skill) => [skill.title, skill.summary, skill.source, ...skill.tags].join(" ").toLocaleLowerCase().includes(normalizedQuery))
     : skills;
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>专家经验、规则和红线先审核，再进入 RAG 决策上下文。</p></div><button className="button button-primary" onClick={onCreate}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label="RAG 切片" value={String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value="本地可替换" icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>初始化 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} />) : <div className="empty-state"><CircleDashed size={16} />没有匹配的经验</div>}</div></section></>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>只有当前账号主动导入并审核的经验，才会作为 AI 分析的辅助证据。</p></div><button className="button button-primary" onClick={onCreate} disabled={busyAction !== null}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label="RAG 切片" value={String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value="当前用户" icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>我的 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span><span>操作</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} onDelete={onDelete} busyAction={busyAction} />) : <div className="empty-state"><CircleDashed size={16} />{normalizedQuery ? "没有匹配的经验" : "还没有导入经验；AI 会仅根据本轮实时实盘数据自主分析。"}</div>}</div></section></>;
 }
 
 function SummaryTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: string }) { return <article className="summary-tile"><span className={`summary-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong className="tabular">{value}</strong></div></article>; }
-function SkillRow({ skill, onApprove }: { skill: Skill; onApprove: (skill: Skill) => void }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{skill.chunks} 个切片</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div></div>; }
+function SkillRow({ skill, onApprove, onDelete, busyAction }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{skill.chunks} 个切片</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
 
 function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderTest, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderTest: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号自己添加 Provider 和目标凭据。后台只管账号分配，看不到密钥。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见，保存在服务端数据库。{task ? "保存后可点「使用」作为本任务分析模型。" : "有任务后可点「使用」绑定分析模型。"}</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />服务端托管密钥</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onTest={onProviderTest} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>点「添加 Provider」写入你自己的 Endpoint 和密钥。只对当前桌面账号可见，保存在服务端数据库。{task ? "保存后可点「使用」作为本任务分析模型。" : "有任务后可点「使用」绑定分析模型。"}</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘确认后下单" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode === "LIVE" ? "确认后允许" : "禁止"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
@@ -1146,6 +1206,28 @@ function EyeIcon() { return <Eye size={16} />; }
 
 function RunsView({ runs, agentRuns, orders = [] }: { runs: Workspace["runs"]; agentRuns: AgentRun[]; orders?: Workspace["orders"] }) {
   return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />可观测性</div><h1>运行记录</h1><p>每一轮分析、规则裁决和建议结果均可回放。</p></div></section><div className="run-summary"><SummaryTile label="Agent 运行" value={String(agentRuns.length)} icon={<Activity size={17} />} tone="green" /><SummaryTile label="总决策" value={runs.reduce((sum, run) => sum + run.decisions, 0).toString()} icon={<Bot size={17} />} tone="blue" /><SummaryTile label="交易订单" value={String(orders?.length || 0)} icon={<BarChart3 size={17} />} tone="muted" /><SummaryTile label="规则拦截" value={runs.reduce((sum, run) => sum + run.blocked, 0).toString()} icon={<ShieldCheck size={17} />} tone="amber" /></div><section className="panel runs-panel"><div className="panel-header"><div><div className="panel-kicker"><History size={14} />任务运行</div><h2>运行实例</h2></div></div><div className="run-table"><div className="table-head"><span>运行 ID</span><span>阶段</span><span>开始时间</span><span>建议</span><span>路由</span><span>状态</span></div>{agentRuns.length ? agentRuns.map((run) => <div className="run-row" key={run.id}><span className="run-id tabular">{run.id}</span><span>{displayLabel(run.currentStage, stageLabels, "其他阶段")}</span><span className="tabular">{formatTime(run.startedAt)}</span><span className="tabular">{run.finalAction ? displaySuggestion(run.finalAction) : "--"}</span><span className="tabular">{displayLabel(run.route, routeLabels, "仅输出建议")}</span><span className="approval-label">{displayLabel(run.status, runStatusLabels, "待确认")}</span></div>) : <div className="empty-state"><CircleDashed size={16} />还没有分析运行</div>}</div></section></>;
+}
+
+function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
+  const [name, setName] = useState(task.name);
+  const [symbol, setSymbol] = useState(task.symbol);
+  const [timeframe, setTimeframe] = useState(task.timeframe);
+  const [mode, setMode] = useState<string>(task.mode);
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (lock.current || !name.trim() || !symbol.trim()) return;
+    lock.current = true;
+    setBusy(true);
+    try {
+      await onSave({ name, symbol, timeframe, mode });
+    } catch {
+      lock.current = false;
+      setBusy(false);
+    }
+  }
+  return <ModalShell title="编辑任务" subtitle="修改任务名称和分析参数。运行中的任务请先停止后再编辑。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label><div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><Pencil size={14} />{busy ? "保存中" : "保存修改"}</button></div></form></ModalShell>;
 }
 
 function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void>; savedCredentials?: SavedCredential[] }) {

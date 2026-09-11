@@ -64,13 +64,14 @@ test("connector test enforces task binding and clears credentials on target chan
   const baseUrl = `http://127.0.0.1:${port}`;
   try {
     await waitForApi(baseUrl, child);
-    const login = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-pass" }) });
-    assert.equal(login.status, 200, errors.join(""));
-    const headers = { "x-user-token": login.body.token };
-
     const adminLogin = await request(baseUrl, "/api/admin/login", { method: "POST", body: JSON.stringify({ username: "boundary-admin", password: "boundary-admin-pass" }) });
     assert.equal(adminLogin.status, 200);
     const adminHeaders = { "x-admin-token": adminLogin.body.token };
+    const firstCreated = await request(baseUrl, "/api/admin/users", { method: "POST", headers: adminHeaders, body: JSON.stringify({ username: "boundary-user", displayName: "测试用户", password: "boundary-user-pass" }) });
+    assert.equal(firstCreated.status, 201, errors.join(""));
+    const login = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-pass" }) });
+    assert.equal(login.status, 200, errors.join(""));
+    const headers = { "x-user-token": login.body.token };
     const adminWorkspace = await request(baseUrl, "/api/workspace", { headers: adminHeaders });
     assert.equal(adminWorkspace.status, 401);
     assert.equal(adminWorkspace.body.error, "USER_AUTH_REQUIRED");
@@ -87,10 +88,12 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(userProviders.status, 200);
     const userSkills = await request(baseUrl, "/api/skills", { headers });
     assert.equal(userSkills.status, 200);
+    assert.deepEqual(userSkills.body.skills, []);
     const userCredentials = await request(baseUrl, "/api/credentials", { headers });
     assert.equal(userCredentials.status, 200);
     const userSkill = await request(baseUrl, "/api/skills", { method: "POST", headers, body: JSON.stringify({ title: "boundary skill", content: "boundaryonlytoken 只读观察规则" }) });
     assert.equal(userSkill.status, 201);
+    assert.equal(userSkill.body.skill.owned, true);
     const approvedSkill = await request(baseUrl, `/api/skills/${userSkill.body.skill.id}/approve`, { method: "POST", headers, body: "{}" });
     assert.equal(approvedSkill.status, 200);
     const userProvider = await request(baseUrl, "/api/providers", { method: "POST", headers, body: JSON.stringify({ name: "Boundary Provider", baseUrl: "https://example.invalid/v1", model: "boundary-model", apiKey: "boundary-key" }) });
@@ -111,30 +114,31 @@ test("connector test enforces task binding and clears credentials on target chan
     const secondRag = await request(baseUrl, "/api/rag/search?q=boundaryonlytoken", { headers: secondHeaders });
     assert.ok(firstRag.body.results.some((result) => result.title === "boundary skill"));
     assert.equal(secondRag.body.results.some((result) => result.title === "boundary skill"), false);
+    const deniedDelete = await request(baseUrl, `/api/skills/${userSkill.body.skill.id}`, { method: "DELETE", headers: secondHeaders });
+    assert.equal(deniedDelete.status, 404);
+    const deletedSkill = await request(baseUrl, `/api/skills/${userSkill.body.skill.id}`, { method: "DELETE", headers });
+    assert.equal(deletedSkill.status, 200);
+    const afterDeleteRag = await request(baseUrl, "/api/rag/search?q=boundaryonlytoken", { headers });
+    assert.equal(afterDeleteRag.body.results.some((result) => result.title === "boundary skill"), false);
     const adminSummary = await request(baseUrl, "/api/admin/summary", { headers: adminHeaders });
     assert.equal(adminSummary.status, 200);
-    assert.equal(adminSummary.body.scope, "accounts_assignments_audit");
+    assert.equal(adminSummary.body.scope, "accounts_audit");
     assert.ok(Array.isArray(adminSummary.body.accounts));
-    assert.ok(Array.isArray(adminSummary.body.tasks));
     assert.ok(Array.isArray(adminSummary.body.events));
+    assert.equal("tasks" in adminSummary.body, false);
+    assert.equal("totalTasks" in adminSummary.body, false);
+    assert.equal("activeTasks" in adminSummary.body, false);
     assert.equal("skills" in adminSummary.body, false);
     assert.equal("providers" in adminSummary.body, false);
     assert.equal("connectors" in adminSummary.body, false);
     const listedUsers = await request(baseUrl, "/api/admin/users", { headers: adminHeaders });
-    const assignedUser = listedUsers.body.users.find((user) => user.username === "boundary-user");
-    assert.ok(assignedUser);
-    const removed = await request(baseUrl, `/api/admin/users/${assignedUser.id}/tasks/task_demo_001`, { method: "DELETE", headers: adminHeaders });
-    assert.equal(removed.status, 200, JSON.stringify(removed));
-    assert.deepEqual(removed.body.user.assignedTaskIds, []);
-    const inaccessible = await request(baseUrl, "/api/workspace", { headers });
-    assert.deepEqual(inaccessible.body.tasks, []);
-    assert.equal(inaccessible.body.providers.some((provider) => provider.name === "Boundary Provider"), true);
-    const invalidAssignment = await request(baseUrl, `/api/admin/users/${assignedUser.id}/tasks`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ taskId: "task_missing" }) });
-    assert.equal(invalidAssignment.status, 404);
-    assert.equal(invalidAssignment.body.error, "TASK_NOT_FOUND");
-    const restored = await request(baseUrl, `/api/admin/users/${assignedUser.id}/tasks`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ taskId: "task_demo_001" }) });
-    assert.equal(restored.status, 200);
-    assert.deepEqual(restored.body.user.assignedTaskIds, ["task_demo_001"]);
+    const managedUser = listedUsers.body.users.find((user) => user.username === "boundary-user");
+    assert.ok(managedUser);
+    assert.equal("assignedTaskIds" in managedUser, false);
+    const removedAssignmentRoute = await request(baseUrl, `/api/admin/users/${managedUser.id}/tasks/task_missing`, { method: "DELETE", headers: adminHeaders });
+    assert.equal(removedAssignmentRoute.status, 404);
+    const removedAssignRoute = await request(baseUrl, `/api/admin/users/${managedUser.id}/tasks`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ taskId: "task_missing" }) });
+    assert.equal(removedAssignRoute.status, 404);
 
     const first = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-a", targetType: "website", url: "https://example.com" }) });
     const second = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-b", targetType: "website", url: "https://example.org" }) });
@@ -142,6 +146,23 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(second.status, 201);
     assert.equal(first.body.task.providerId, userProvider.body.provider.id);
     assert.equal(first.body.task.target.credentialStatus, "未配置");
+    const secondTenantTask = await request(baseUrl, "/api/tasks", { method: "POST", headers: secondHeaders, body: JSON.stringify({ name: "second-tenant-task", targetType: "website", url: "https://example.edu" }) });
+    assert.equal(secondTenantTask.status, 201);
+    const firstWorkspaceAfterTasks = await request(baseUrl, "/api/workspace", { headers });
+    const secondWorkspaceAfterTasks = await request(baseUrl, "/api/workspace", { headers: secondHeaders });
+    assert.equal(firstWorkspaceAfterTasks.body.tasks.some((task) => task.id === secondTenantTask.body.task.id), false);
+    assert.equal(secondWorkspaceAfterTasks.body.tasks.some((task) => task.id === first.body.task.id), false);
+    const crossTenantEdit = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers: secondHeaders, body: JSON.stringify({ name: "forbidden" }) });
+    assert.equal(crossTenantEdit.status, 403);
+    const edited = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ name: "boundary-a-edited", symbol: "TEST", timeframe: "1h", mode: "PAPER" }) });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.body.task.name, "boundary-a-edited");
+    const disposable = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "delete-me", targetType: "website", url: "https://example.edu" }) });
+    assert.equal(disposable.status, 201);
+    const deletedTask = await request(baseUrl, `/api/tasks/${disposable.body.task.id}`, { method: "DELETE", headers });
+    assert.equal(deletedTask.status, 200);
+    const afterTaskDelete = await request(baseUrl, "/api/workspace", { headers });
+    assert.equal(afterTaskDelete.body.tasks.some((task) => task.id === disposable.body.task.id), false);
 
     const hosted = await request(baseUrl, "/api/tasks", {
       method: "POST",
@@ -240,7 +261,7 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(updated.target.credentialStatus, "未配置");
     assert.equal(updated.target.accountLabel, "未配置");
 
-    const passwordChanged = await request(baseUrl, `/api/admin/users/${assignedUser.id}`, { method: "PATCH", headers: adminHeaders, body: JSON.stringify({ password: "boundary-user-new-pass" }) });
+    const passwordChanged = await request(baseUrl, `/api/admin/users/${managedUser.id}`, { method: "PATCH", headers: adminHeaders, body: JSON.stringify({ password: "boundary-user-new-pass" }) });
     assert.equal(passwordChanged.status, 200);
     const oldSession = await request(baseUrl, "/api/user/session", { headers });
     assert.equal(oldSession.status, 401);
@@ -255,6 +276,32 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.ok(reloginCreds.body.credentials.some((item) => item.accountLabel === hosted.body.task.target.accountLabel));
     const reloginWorkspace = await request(baseUrl, "/api/workspace", { headers: reloginHeaders });
     assert.ok(reloginWorkspace.body.tasks.some((task) => task.id === hosted.body.task.id && task.target.credentialStatus === "已托管"));
+
+    const disabled = await request(baseUrl, `/api/admin/users/${managedUser.id}`, { method: "PATCH", headers: adminHeaders, body: JSON.stringify({ status: "DISABLED" }) });
+    assert.equal(disabled.status, 200);
+    assert.equal(disabled.body.user.status, "DISABLED");
+    assert.equal((await request(baseUrl, "/api/user/session", { headers: reloginHeaders })).status, 401);
+    assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) })).status, 401);
+    const enabled = await request(baseUrl, `/api/admin/users/${managedUser.id}`, { method: "PATCH", headers: adminHeaders, body: JSON.stringify({ status: "ACTIVE" }) });
+    assert.equal(enabled.status, 200);
+    assert.equal(enabled.body.user.status, "ACTIVE");
+    assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) })).status, 200);
+
+    const secondProvider = await request(baseUrl, "/api/providers", { method: "POST", headers: secondHeaders, body: JSON.stringify({ name: "Second Provider", baseUrl: "https://second.invalid/v1", model: "second", apiKey: "second-key" }) });
+    assert.equal(secondProvider.status, 201);
+    const secondSkill = await request(baseUrl, "/api/skills", { method: "POST", headers: secondHeaders, body: JSON.stringify({ title: "second skill", content: "tenant-specific content" }) });
+    assert.equal(secondSkill.status, 201);
+    const secondCredential = await request(baseUrl, "/api/connectors/test", { method: "POST", headers: secondHeaders, body: JSON.stringify({ taskId: secondTenantTask.body.task.id, connectorId: secondTenantTask.body.task.target.connectorId, username: "second-login", password: "second-password" }) });
+    assert.equal(secondCredential.status, 200);
+    const wrongDelete = await request(baseUrl, `/api/admin/users/${secondCreated.body.user.id}`, { method: "DELETE", headers: adminHeaders, body: JSON.stringify({ username: "wrong" }) });
+    assert.equal(wrongDelete.status, 400);
+    assert.equal(wrongDelete.body.error, "USER_DELETE_CONFIRMATION_MISMATCH");
+    const deletedUser = await request(baseUrl, `/api/admin/users/${secondCreated.body.user.id}`, { method: "DELETE", headers: adminHeaders, body: JSON.stringify({ username: "boundary-second" }) });
+    assert.equal(deletedUser.status, 200);
+    assert.equal((await request(baseUrl, "/api/user/session", { headers: secondHeaders })).status, 401);
+    assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-second", password: "boundary-second-pass" }) })).status, 401);
+    const usersAfterDelete = await request(baseUrl, "/api/admin/users", { headers: adminHeaders });
+    assert.equal(usersAfterDelete.body.users.some((item) => item.id === secondCreated.body.user.id), false);
   } finally {
     child.kill("SIGTERM");
     await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 2000))]);

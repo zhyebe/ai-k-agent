@@ -6,7 +6,6 @@ import { observeMarket, openMarketBrowser } from "./market.mjs";
 import { browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm } from "./tools.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
-import { userIdsForTask } from "./users.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL } from "./haohan.mjs";
 
 const activeCycles = new Set();
@@ -540,7 +539,8 @@ function startupChecks(task) {
     task.target.credentialStatus === "已托管"
     && Boolean(task.target.credentialRef)
     && task.target.credentialRef !== "credential:demo"
-    && credentialExists(task.target.credentialRef, task.target.credentialOwnerUserId ? { ownerUserId: task.target.credentialOwnerUserId } : {} )
+    && Boolean(task.ownerUserId)
+    && credentialExists(task.target.credentialRef, { ownerUserId: task.ownerUserId })
   );
   return [
     { key: "target", label: "目标连接", passed: Boolean(task.target.url || task.target.installPath || task.target.connectorId) },
@@ -607,7 +607,7 @@ export function startTask(taskId) {
   task.updatedAt = new Date().toISOString();
   addEvent("task_monitoring", "启动检查通过，Agent 已进入持续监控；买卖仍只给出建议", { taskId });
   persistTask(task);
-  startController(taskId, { userId: userIdsForTask(taskId)[0] || "" });
+  startController(taskId, { userId: task.ownerUserId || "" });
   return task;
 }
 
@@ -676,7 +676,7 @@ export function autoJudge(taskId) {
     task.heartbeatAt = new Date().toISOString();
     task.leaseExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     addEvent("task_resumed", "人工规则确认完成，任务恢复持续监控", { taskId });
-    startController(taskId, { userId: userIdsForTask(taskId)[0] || "" });
+    startController(taskId, { userId: task.ownerUserId || "" });
   }
   persistTask(task);
   return task;
@@ -725,7 +725,7 @@ async function ensureLoggedIn(task, connector, run, pageResult, runtime, assertC
   const login = await runtime.browserLogin({
     sessionId,
     credentialRef: task.target.credentialRef,
-    ownerUserIds: userIdsForTask(task.id),
+    ownerUserId: task.ownerUserId || "",
     adapterId: task.target.adapterId || connector?.adapterId,
     targetUrl: task.target.url || connector?.target || HAO_HAN_TARGET_URL,
     automationAuthorized: true,
@@ -846,11 +846,14 @@ function recentAnalysisRounds(taskId, limit = 8) {
     }));
 }
 
-function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
+export function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
   const layered = analysisMarket?.analysisLayers ? analysisMarket : buildLayeredAnalysisMarket(analysisMarket || task.market);
   return {
     market: {
       symbol: market.symbol,
+      symbolName: market.symbolName,
+      instrumentId: market.instrumentId,
+      instrument: market.instrument,
       timeframe: layered.timeframe,
       trend: market.trend,
       anomaly: market.anomaly,
@@ -869,7 +872,13 @@ function buildDecisionContext(task, market, evidence, trigger, analysisMarket = 
       missingFields: market.missingFields || [],
       marketClosed: Boolean(market.marketClosed),
       source: market.source,
+      sourceKind: market.sourceKind,
+      dataAt: market.dataAt,
+      observedAt: market.observedAt,
+      books: layered.books || [],
+      bookCount: Number(layered.bookCount || layered.books?.length || 0),
       page: layered.page ?? task.market.page,
+      pageView: layered.pageView ?? task.market.pageView ?? task.market.page?.view ?? null,
       raw: layered.raw,
     },
     account: {
@@ -942,7 +951,7 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
     symbolName: market.symbolName,
     primaryTimeframe: market.timeframe,
     rules: task.rules,
-    expertEvidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score })),
+    evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score })),
     coverage: plan.coverage,
   };
   appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `分层行情已拆分为 ${plan.segments.length} 个 AI 分析片段，覆盖 ${plan.coverage.totalKlineRows} 根 K 线（分钟/小时/日/月，不含秒级逐笔）`, data: { coverage: plan.coverage } });
@@ -1020,7 +1029,7 @@ export function enforceDecisionLimits(decision) {
 export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
-  const resolvedUserId = userId || userIdsForTask(taskId)[0] || "";
+  const resolvedUserId = userId || existing.ownerUserId || "";
   if (desktopAiRequired() && !hasDesktopAi(resolvedUserId) && typeof runtimeOverrides.requestDecision !== "function") {
     throw new Error("DESKTOP_AI_OFFLINE");
   }
@@ -1102,7 +1111,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const qualityIssues = marketQualityIssues(market);
     const automaticRuleFailures = failedAutomaticRules(task);
 
-    logStage(task, run, "analyze", "检索专家经验并请求模型结构化建议");
+    logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
     const analysisMarket = buildLayeredAnalysisMarket(task.market);
     appendAgentOutput({
       taskId,
@@ -1117,7 +1126,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
     ];
-    appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: `检索到 ${knowledge.length} 条已发布经验切片` });
+    appendAgentOutput({
+      taskId,
+      runId: run.id,
+      stage: "analyze",
+      message: knowledge.length
+        ? `使用当前账号已审核的 ${knowledge.length} 条经验切片作为辅助证据`
+        : "当前账号没有已发布经验，本轮仅基于实时实盘数据分析",
+    });
     const resolvedProviderId = resolveDefaultProviderId(userId, providerId || task.providerId);
     const provider = findProviderForUser(resolvedProviderId, userId);
     if (provider?.id) task.providerId = provider.id;
@@ -1354,7 +1370,7 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
   renewLease(task);
   const result = await runAnalysis(taskId, providerId || task.providerId || "", {
     trigger: "controller",
-    userId: userId || userIdsForTask(taskId)[0] || "",
+    userId: userId || task.ownerUserId || "",
     skipIfUnchanged: true,
     runtime,
   });
@@ -1421,7 +1437,7 @@ export function startController(taskId, options = {}) {
   if (controllerLoops.has(taskId)) return;
   const task = getTask(taskId);
   if (!monitoringIntent(task)) return;
-  const userId = options.userId || userIdsForTask(taskId)[0] || "";
+  const userId = options.userId || task.ownerUserId || "";
   const runCycle = typeof options.runCycle === "function"
     ? options.runCycle
     : (id) => runMonitoringCycle(id, { providerId: options.providerId, userId, runtime: options.runtime });
