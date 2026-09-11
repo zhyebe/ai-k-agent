@@ -246,6 +246,7 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .market-timeframe-tabs button { flex: 0 0 auto; min-height: 27px; padding: 0 8px; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 4px; font-size: 10px; white-space: nowrap; }
 .market-timeframe-tabs button:hover { color: var(--text); background: var(--surface-hover); }
 .market-timeframe-tabs button.active { color: var(--text); background: var(--blue-soft); border-color: rgba(126, 185, 238, 0.3); }
+.market-timeframe-tabs button.missing-board { color: var(--amber); border-color: rgba(233, 184, 109, 0.25); cursor: not-allowed; opacity: 0.8; }
 .market-quality { display: inline-flex; align-items: center; min-height: 22px; padding: 0 6px; border-radius: 4px; font-size: 9px; white-space: nowrap; }
 .quality-ok { color: var(--green); background: var(--green-soft); }
 .quality-limited { color: var(--amber); background: var(--amber-soft); }

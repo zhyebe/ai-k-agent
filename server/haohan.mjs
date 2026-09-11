@@ -147,16 +147,16 @@ export function normalizePageInstrument(value) {
 
 export function uniquePageInstruments(values = []) {
   const result = [];
-  const seen = new Set();
   for (const item of Array.isArray(values) ? values : []) {
     const instrument = normalizePageInstrument(item);
     if (!instrument) continue;
-    const key = [instrument.symbol, instrument.symbolName, instrument.instrumentId]
-      .map((part) => normalize(part))
-      .filter(Boolean)
-      .join("|");
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
+    const existing = result.find((candidate) => samePageInstrument(candidate, instrument));
+    if (existing) {
+      existing.symbol ||= instrument.symbol;
+      existing.symbolName ||= instrument.symbolName;
+      existing.instrumentId ||= instrument.instrumentId;
+      continue;
+    }
     result.push(instrument);
   }
   return result;
@@ -334,6 +334,13 @@ export function extractHaohanPageInstrument(snapshot = {}) {
   if (!detected.symbolName) {
     const titleName = String(snapshot.title || "").match(/\d+(?:\.\d+)?\s+([^\s].+?)\s+浩瀚/);
     if (titleName) detected.symbolName = titleName[1].trim();
+  }
+  if (!detected.symbolName) {
+    const standaloneName = lines.find((line) => line.length <= 80
+      && /（二期）|一期|金尖|康砖/.test(line)
+      && !(/金尖/.test(line) && /康砖/.test(line))
+      && !/最新价|涨跌幅|买价|卖价|买量|卖量|持仓|F10/.test(line));
+    if (standaloneName) detected.symbolName = standaloneName;
   }
   return {
     symbol: detected.symbol,

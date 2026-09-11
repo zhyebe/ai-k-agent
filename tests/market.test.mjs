@@ -183,6 +183,24 @@ F10
   assert.equal(resolveObservedHaohanSymbol({ symbol: "" }, "DGJJ"), "DGJJ");
 });
 
+test("页面只显示中文盘名时仍能确认当前盘口", () => {
+  assert.deepEqual(extractHaohanPageInstrument({
+    title: "浩瀚数贸",
+    visibleText: "丹桂康砖（二期）\nF10\n最新价 1168\n涨跌幅 0.78%",
+  }), { symbol: "", symbolName: "丹桂康砖（二期）" });
+});
+
+test("同一盘口的完整标识与下拉盘名不会重复计数", () => {
+  assert.deepEqual(uniquePageInstruments([
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）" },
+    { symbolName: "丹桂金尖（二期）" },
+    { symbolName: "丹桂康砖（二期）" },
+  ]), [
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "" },
+    { symbol: "", symbolName: "丹桂康砖（二期）", instrumentId: "" },
+  ]);
+});
+
 test("浩瀚只读采集并行保留全部分析周期历史", async () => {
   const previousWebSocket = globalThis.WebSocket;
   const previousTimeframes = process.env.HAOHAN_ANALYSIS_TIMEFRAMES;

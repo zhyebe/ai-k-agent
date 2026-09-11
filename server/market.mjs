@@ -1200,7 +1200,8 @@ export async function observeMarket(task, connector) {
   const recordPageSnapshot = (snapshot, intended) => {
     if (!snapshot?.ok) return null;
     const actual = extractHaohanPageInstrument(snapshot);
-    let parsedPage = parseHaohanPageSnapshot(snapshot, { symbol: intended?.symbol || actual.symbol || observedSymbol, timeframe });
+    const requestedSymbol = intended?.symbol || actual.symbol || (samePageInstrument(intended, pageInstrument) ? observedSymbol : "");
+    let parsedPage = parseHaohanPageSnapshot(snapshot, { symbol: requestedSymbol, timeframe });
     if (parsedPage.code === "REAUTH_REQUIRED") return parsedPage;
     if (parsedPage.code === "PAGE_INSTRUMENT_MISMATCH" && actual.symbol) {
       parsedPage = parseHaohanPageSnapshot(snapshot, { symbol: actual.symbol, timeframe });
@@ -1214,6 +1215,7 @@ export async function observeMarket(task, connector) {
   if (cycleTargets.length > 1) {
     const collected = await collectAllPageBoards(sessionId, cycleTargets);
     for (const item of collected) {
+      if (!item.selected) continue;
       const recorded = recordPageSnapshot(item.snapshot, item.instrument);
       if (recorded?.code === "REAUTH_REQUIRED") return recorded;
     }

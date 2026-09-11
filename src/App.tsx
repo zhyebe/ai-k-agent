@@ -86,7 +86,7 @@ import {
   userLogout,
   userSession,
 } from "./lib/api";
-import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "console", label: "任务控制台", icon: LayoutDashboard },
@@ -1026,11 +1026,13 @@ function CandleChart({ candles }: { candles: MarketCandle[] }) {
 function MarketPanel({ task }: { task: Task }) {
   const market = task.market;
   const books = market?.books?.length ? market.books : market ? [market] : [];
-  const [selectedSymbol, setSelectedSymbol] = useState(market?.symbol || task.symbol);
+  const missingBoards = market?.boardCoverage?.missing || [];
+  const boardKey = (book: MarketSnapshot | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
+  const [selectedSymbol, setSelectedSymbol] = useState(boardKey(market) || task.symbol);
   const [selectedTimeframe, setSelectedTimeframe] = useState(task.timeframe);
-  useEffect(() => setSelectedSymbol(market?.symbol || task.symbol), [market?.symbol, market?.observedAt]);
+  useEffect(() => setSelectedSymbol(boardKey(market) || task.symbol), [market?.symbol, market?.symbolName, market?.instrumentId, market?.observedAt]);
   useEffect(() => setSelectedTimeframe(task.timeframe), [task.timeframe]);
-  const selectedBook = books.find((book) => book.symbol === selectedSymbol) || books[0] || market;
+  const selectedBook = books.find((book) => boardKey(book) === selectedSymbol) || books[0] || market;
   const timeframes = selectedBook?.timeframes || market?.timeframes || {};
   const timeframeKeys = Object.keys(timeframes).length ? Object.keys(timeframes) : [task.timeframe];
   const selected: MarketTimeframe | null = timeframes[selectedTimeframe] || timeframes[task.timeframe] || null;
@@ -1041,7 +1043,46 @@ function MarketPanel({ task }: { task: Task }) {
   const indicatorNumber = (key: string) => typeof indicators?.[key as keyof typeof indicators] === "number" ? indicators[key as keyof typeof indicators] as number : null;
   const quality = selected?.dataQuality || selectedBook?.dataQuality || market?.dataQuality || "未知";
   const title = selectedBook?.symbolName || selectedBook?.symbol || task.symbol;
-  return <section className="panel market-panel"><div className="panel-header"><div><div className="panel-kicker"><BarChart3 size={14} />市场状态</div><h2>{title}</h2></div><div className="market-header-actions"><span className={`market-quality ${quality === "VERIFIED" && market?.boardCoverage?.complete !== false ? "quality-ok" : "quality-limited"}`}>{market?.boardCoverage?.complete === false ? "盘口覆盖不完整" : quality === "VERIFIED" ? "数据完整" : "数据受限"}</span><span className="market-meta">{selectedBook?.source || market?.source || "未采集"}</span></div></div><div className="market-quote"><div><strong className="quote-price tabular">{marketNumber(price, 4)}</strong>{change !== null && change !== undefined ? <span className={`quote-change ${change >= 0 ? "positive" : "negative"}`}>{change >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />} {change >= 0 ? "+" : ""}{change.toFixed(2)}%</span> : null}</div><span className="quote-time">{market ? `${market.source} · ${books.length}/${market.expectedBookCount || books.length} 个盘 · ${formatTime(market.observedAt)}` : "等待首次只读采集"}</span></div>{books.length > 1 ? <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">{books.map((book) => <button type="button" role="tab" aria-selected={selectedBook?.symbol === book.symbol} className={selectedBook?.symbol === book.symbol ? "active" : ""} key={book.symbol || book.symbolName} onClick={() => { setSelectedSymbol(book.symbol); setSelectedTimeframe(book.timeframe || task.timeframe); }}>{book.symbolName || book.symbol}</button>)}</div> : null}<div className="market-timeframe-tabs" role="tablist" aria-label="分析周期">{timeframeKeys.map((key) => <button type="button" role="tab" aria-selected={selectedTimeframe === key} className={selectedTimeframe === key ? "active" : ""} key={key} onClick={() => setSelectedTimeframe(key)}>{timeframes[key]?.label || timeframeLabels[key] || key}</button>)}</div><CandleChart candles={candles} /><div className="chart-summary"><span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span><span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span><span>分时 {selectedBook?.ticks?.length || market?.ticks.length || 0} 条</span><span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span></div><div className="indicator-row"><Indicator label="EMA 20" value={marketNumber(indicatorNumber("ema20"))} tone="blue" /><Indicator label="RSI 14" value={marketNumber(indicatorNumber("rsi14"), 1)} tone="amber" /><Indicator label="ATR" value={marketNumber(indicatorNumber("atr14"))} tone="muted" /><Indicator label="量能比" value={indicatorNumber("volumeRatio") === null ? "--" : `${marketNumber(indicatorNumber("volumeRatio"), 2)}x`} tone="green" /></div></section>;
+  return (
+    <section className="panel market-panel">
+      <div className="panel-header">
+        <div><div className="panel-kicker"><BarChart3 size={14} />市场状态</div><h2>{title}</h2></div>
+        <div className="market-header-actions">
+          <span className={`market-quality ${quality === "VERIFIED" && market?.boardCoverage?.complete !== false ? "quality-ok" : "quality-limited"}`}>{market?.boardCoverage?.complete === false ? "盘口覆盖不完整" : quality === "VERIFIED" ? "数据完整" : "数据受限"}</span>
+          <span className="market-meta">{selectedBook?.source || market?.source || "未采集"}</span>
+        </div>
+      </div>
+      <div className="market-quote">
+        <div>
+          <strong className="quote-price tabular">{marketNumber(price, 4)}</strong>
+          {change !== null && change !== undefined ? <span className={`quote-change ${change >= 0 ? "positive" : "negative"}`}>{change >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />} {change >= 0 ? "+" : ""}{change.toFixed(2)}%</span> : null}
+        </div>
+        <span className="quote-time">{market ? `${market.source} · ${books.length}/${market.expectedBookCount || books.length} 个盘 · ${formatTime(market.observedAt)}` : "等待首次只读采集"}</span>
+      </div>
+      {books.length + missingBoards.length > 1 ? (
+        <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">
+          {books.map((book) => <button type="button" role="tab" aria-selected={boardKey(selectedBook) === boardKey(book)} className={boardKey(selectedBook) === boardKey(book) ? "active" : ""} key={boardKey(book)} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(book.timeframe || task.timeframe); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
+          {missingBoards.map((book) => <button type="button" disabled className="missing-board" key={`missing-${book.instrumentId || book.symbol || book.symbolName}`}>{book.symbolName || book.symbol || book.instrumentId} · 未采集</button>)}
+        </div>
+      ) : null}
+      <div className="market-timeframe-tabs" role="tablist" aria-label="分析周期">
+        {timeframeKeys.map((key) => <button type="button" role="tab" aria-selected={selectedTimeframe === key} className={selectedTimeframe === key ? "active" : ""} key={key} onClick={() => setSelectedTimeframe(key)}>{timeframes[key]?.label || timeframeLabels[key] || key}</button>)}
+      </div>
+      <CandleChart candles={candles} />
+      <div className="chart-summary">
+        <span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span>
+        <span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span>
+        <span>分时 {selectedBook?.ticks?.length || market?.ticks.length || 0} 条</span>
+        <span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span>
+      </div>
+      <div className="indicator-row">
+        <Indicator label="EMA 20" value={marketNumber(indicatorNumber("ema20"))} tone="blue" />
+        <Indicator label="RSI 14" value={marketNumber(indicatorNumber("rsi14"), 1)} tone="amber" />
+        <Indicator label="ATR" value={marketNumber(indicatorNumber("atr14"))} tone="muted" />
+        <Indicator label="量能比" value={indicatorNumber("volumeRatio") === null ? "--" : `${marketNumber(indicatorNumber("volumeRatio"), 2)}x`} tone="green" />
+      </div>
+    </section>
+  );
 }
 
 function Indicator({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className="indicator"><span><i className={`indicator-dot ${tone}`} />{label}</span><b className="tabular">{value}</b></div>; }

@@ -256,6 +256,8 @@ function extractInstrumentOption(text, fromMenu = false) {
   const value = productOptionText(text);
   if (!value || value === "F10" || value.length > 80) return null;
   if (/登录|密码|可用资金|最新价|涨跌幅|持仓明细|销售|采购/.test(value)) return null;
+  const pipeMatch = value.match(/^([A-Z][A-Z0-9_.-]{1,24})\s*\|\s*(.+)$/);
+  if (pipeMatch) return { symbol: pipeMatch[1], symbolName: pipeMatch[2], instrumentId: "" };
   const codeMatch = value.match(/^([A-Z][A-Z0-9_-]{1,15})\s+(.+)$/);
   if (codeMatch) return { symbol: codeMatch[1], symbolName: codeMatch[2], instrumentId: "" };
   if (/（二期）|一期|金尖|康砖/.test(value)) return { symbol: "", symbolName: value, instrumentId: "" };
@@ -268,12 +270,30 @@ function extractInstrumentOption(text, fromMenu = false) {
 async function readVisibleInstrumentOptions(page) {
   const raw = await page.evaluate(() => {
     const texts = [];
-    const selectors = ["[role='option']", ".el-select-dropdown__item", ".el-dropdown-menu__item", ".el-popper li", ".ant-select-item", "[class*='dropdown'] li", "[class*='select'] li"];
+    const selectors = [
+      "[role='option']",
+      ".el-select-dropdown__item",
+      ".el-dropdown-menu__item",
+      ".el-popper li",
+      ".el-popper div",
+      ".el-popper span",
+      ".ant-select-item",
+      "[class*='dropdown'] li",
+      "[class*='dropdown'] div",
+      "[class*='dropdown'] span",
+      "[class*='select'] li",
+      "[class*='select'] div",
+      "[class*='select'] span",
+      "body *",
+    ];
     for (const node of selectors.flatMap((selector) => [...document.querySelectorAll(selector)])) {
       const style = window.getComputedStyle(node);
       const rect = node.getBoundingClientRect();
       if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) continue;
       const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+      const isExplicitProduct = /（二期）|一期|金尖|康砖/.test(text)
+        && !/最新价|涨跌幅|买价|卖价|买量|卖量|持仓|销售|采购|可用资金/.test(text);
+      if (selector === "body *" && (!isExplicitProduct || text.length > 80 || (node.children?.length || 0) > 3)) continue;
       if (text) texts.push(text);
     }
     return texts;
@@ -299,7 +319,7 @@ async function openProductMenu(page) {
     trigger.click();
     return true;
   }).catch(() => false);
-  if (clicked) await page.waitForTimeout(280);
+  if (clicked) await page.waitForTimeout(500);
   return clicked;
 }
 
@@ -379,14 +399,19 @@ export async function readVisiblePage(sessionId = "default") {
         ? { symbol: "", symbolName: "", instrumentId: String(chart.symbol) }
         : { symbol: String(chart.symbol), symbolName: "", instrumentId: "" })
       : null;
-    const instruments = uniquePageInstruments([instrument, chartInstrument, ...(await readVisibleInstrumentOptions(session.page))].filter(Boolean));
+    const currentInstrument = {
+      symbol: instrument.symbol || chartInstrument?.symbol || "",
+      symbolName: instrument.symbolName || "",
+      instrumentId: chartInstrument?.instrumentId || "",
+    };
+    const instruments = uniquePageInstruments([currentInstrument, ...(await readVisibleInstrumentOptions(session.page))].filter(Boolean));
     return {
       ok: true,
       sessionId: String(sessionId || "default"),
       url: safeUrl(raw.url),
       title: String(raw.title || "").slice(0, 160),
       visibleText: redact(raw.visibleText),
-      instrument,
+      instrument: currentInstrument,
       instruments,
       klines: Array.isArray(chart.klines) ? chart.klines : [],
       chartSymbol: String(chart.symbol || ""),
@@ -418,44 +443,51 @@ export async function listPageBoardInstruments(sessionId = "default") {
 export async function selectPageBoardInstrument(sessionId, instrument) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session || !instrument) return false;
-  const currentText = await session.page.evaluate(() => document.body?.innerText || "").catch(() => "");
-  const current = extractHaohanPageInstrument({
-    visibleText: currentText,
+  const readCurrent = async () => extractHaohanPageInstrument({
+    visibleText: await session.page.evaluate(() => document.body?.innerText || "").catch(() => ""),
     title: await session.page.title().catch(() => ""),
   });
-  if (samePageInstrument(current, instrument)) return true;
-  await openProductMenu(session.page);
-  const clicked = await session.page.evaluate(({ name, symbol }) => {
-    const nodes = [...document.querySelectorAll("[role='option'], .el-select-dropdown__item, .el-dropdown-menu__item, .el-popper li, .ant-select-item, li, div, span, p, button, a")];
-    const matches = [];
-    for (const node of nodes) {
-      const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-      if (!text || text.length > 80) continue;
-      const hit = (symbol && (text === symbol || text.startsWith(`${symbol} `) || text.includes(symbol)))
-        || (name && (text === name || text.includes(name)));
-      if (!hit) continue;
-      matches.push({ node, text });
+  if (samePageInstrument(await readCurrent(), instrument)) return true;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await openProductMenu(session.page);
+    const clicked = await session.page.evaluate(({ name, symbol }) => {
+      const nodes = [...document.querySelectorAll("[role='option'], .el-select-dropdown__item, .el-dropdown-menu__item, .el-popper li, .el-popper div, .el-popper span, .ant-select-item, [class*='dropdown'] li, [class*='dropdown'] div, [class*='dropdown'] span, [class*='select'] li, [class*='select'] div, [class*='select'] span")];
+      const matches = [];
+      for (const node of nodes) {
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        if (style.visibility === "hidden" || style.display === "none" || rect.width <= 0 || rect.height <= 0) continue;
+        if (node.getAttribute("aria-disabled") === "true" || node.hasAttribute("disabled")) continue;
+        const text = String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
+        if (!text || text.length > 80) continue;
+        let score = 0;
+        if (name && text === name) score = 100;
+        else if (symbol && text === symbol) score = 95;
+        else if (symbol && text.startsWith(`${symbol} `)) score = 85;
+        else if (name && text.includes(name)) score = 75;
+        else if (symbol && text.includes(symbol)) score = 65;
+        if (score) matches.push({ node, text, score });
+      }
+      matches.sort((left, right) => right.score - left.score || left.text.length - right.text.length);
+      if (!matches.length) return false;
+      matches[0].node.click();
+      return true;
+    }, { name: instrument.symbolName || "", symbol: instrument.symbol || "" }).catch(() => false);
+    if (!clicked) {
+      await session.page.keyboard.press("Escape").catch(() => {});
+      continue;
     }
-    matches.sort((left, right) => left.text.length - right.text.length);
-    if (!matches.length) return false;
-    matches[0].node.click();
-    return true;
-  }, { name: instrument.symbolName || "", symbol: instrument.symbol || "" }).catch(() => false);
-  if (!clicked) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      await session.page.waitForTimeout(250);
+      if (samePageInstrument(await readCurrent(), instrument)) {
+        await session.page.waitForTimeout(700);
+        return true;
+      }
+    }
     await session.page.keyboard.press("Escape").catch(() => {});
-    return false;
   }
-  const expected = instrument.symbolName || instrument.symbol;
-  if (expected) {
-    await session.page.waitForFunction((value) => (document.body?.innerText || "").includes(value), expected, { timeout: 4000 }).catch(() => {});
-  }
-  await session.page.waitForTimeout(280);
-  const selectedText = await session.page.evaluate(() => document.body?.innerText || "").catch(() => "");
-  const selectedInstrument = extractHaohanPageInstrument({
-    visibleText: selectedText,
-    title: await session.page.title().catch(() => ""),
-  });
-  return samePageInstrument(selectedInstrument, instrument);
+  return false;
 }
 
 export async function collectAllPageBoards(sessionId, instruments = []) {
