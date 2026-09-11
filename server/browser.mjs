@@ -6,6 +6,9 @@ import { URL } from "node:url";
 import { extractHaohanPageInstrument, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const sessions = new Map();
+const sessionLaunches = new Map();
+const PROFILE_LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+let browserClosing = false;
 
 function configuredValues(name, fallback) {
   const value = process.env[name];
@@ -55,7 +58,60 @@ function profileDirectory(sessionId) {
   return path.join(root, "browser-profiles", key);
 }
 
+function processIsRunning(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (process.platform === "linux") {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const state = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[0];
+      if (state === "Z") return false;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function linkTarget(filePath) {
+  try {
+    const target = fs.readlinkSync(filePath);
+    return path.isAbsolute(target) ? target : path.resolve(path.dirname(filePath), target);
+  } catch {
+    return "";
+  }
+}
+
+export function cleanupStaleChromiumProfileLocks(
+  profileDir,
+  { hostname = os.hostname(), isProcessRunning = processIsRunning, pathExists = fs.existsSync } = {},
+) {
+  const lockPath = path.join(profileDir, "SingletonLock");
+  const lockValue = (() => {
+    try { return fs.readlinkSync(lockPath); } catch { return ""; }
+  })();
+  const owner = lockValue.match(/^(.*)-(\d+)$/);
+  if (owner && owner[1] === hostname && isProcessRunning(Number(owner[2]))) return false;
+  const socketTarget = linkTarget(path.join(profileDir, "SingletonSocket"));
+  if (socketTarget && pathExists(socketTarget)) return false;
+  let removed = false;
+  for (const name of PROFILE_LOCK_FILES) {
+    try {
+      fs.unlinkSync(path.join(profileDir, name));
+      removed = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+  return removed;
+}
+
 async function createSession(sessionId) {
+  if (browserClosing) throw new Error("浏览器服务正在关闭");
   const { chromium } = await import("playwright");
   const cdpUrl = String(process.env.BROWSER_CDP_URL || "").trim();
   if (cdpUrl) {
@@ -76,19 +132,41 @@ async function createSession(sessionId) {
     args.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
   }
   if (args.length) options.args = args;
-  const context = await chromium.launchPersistentContext(profileDirectory(sessionId), options);
+  const profileDir = profileDirectory(sessionId);
+  if (cleanupStaleChromiumProfileLocks(profileDir)) {
+    console.warn(`Removed stale Chromium profile lock for session ${String(sessionId).slice(0, 80)}`);
+  }
+  const context = await chromium.launchPersistentContext(profileDir, options);
   const page = context.pages()[0] || await context.newPage();
   return { context, page, ownsBrowser: true, mode: options.headless ? "headless" : "visible" };
 }
 
-async function getSession(sessionId = "default") {
+async function getSession(sessionId = "default", allowRecreate = true) {
+  if (browserClosing) throw new Error("浏览器服务正在关闭");
   const key = String(sessionId || "default");
   let session = sessions.get(key);
   if (!session) {
-    session = await createSession(key);
-    sessions.set(key, session);
+    let launch = sessionLaunches.get(key);
+    if (!launch) {
+      launch = createSession(key)
+        .then((created) => {
+          sessions.set(key, created);
+          return created;
+        })
+        .finally(() => {
+          if (sessionLaunches.get(key) === launch) sessionLaunches.delete(key);
+        });
+      sessionLaunches.set(key, launch);
+    }
+    session = await launch;
   }
-  if (session.page.isClosed()) session.page = await session.context.newPage();
+  try {
+    if (session.page.isClosed()) session.page = await session.context.newPage();
+  } catch (error) {
+    if (!allowRecreate) throw error;
+    await closeBrowserSession(key);
+    return getSession(key, false);
+  }
   return { ...session, sessionId: key };
 }
 
@@ -278,7 +356,8 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
     const snapshot = await readVisiblePage(sessionId);
     return { ok: true, sessionId: session.sessionId, mode: session.mode, ...snapshot };
   } catch (error) {
-    return { ok: false, code: "BROWSER_NAVIGATION_FAILED", message: error instanceof Error ? error.message : String(error) };
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, code: "BROWSER_NAVIGATION_FAILED", message: message.split("\n")[0].slice(0, 500) };
   }
 }
 
@@ -408,6 +487,14 @@ export async function closeBrowserSession(sessionId = "default") {
     try { await session.browser.close(); } catch {}
   }
   return true;
+}
+
+export async function closeAllBrowserSessions() {
+  browserClosing = true;
+  await Promise.allSettled([...sessionLaunches.values()]);
+  const keys = [...sessions.keys()];
+  await Promise.allSettled(keys.map((key) => closeBrowserSession(key)));
+  return keys.length;
 }
 
 export function browserSessionIds() {

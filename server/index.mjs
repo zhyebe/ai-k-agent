@@ -18,6 +18,7 @@ import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 import { attachDesktopAiSocket, callProviderMethod } from "./desktop-ai.mjs";
 import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
 import { Readable } from "node:stream";
+import { closeAllBrowserSessions } from "./browser.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 await app.register(cors, {
@@ -935,5 +936,13 @@ try {
   process.exit(1);
 }
 
-process.on("SIGTERM", async () => { stopAllControllers(); await persistence.close(); await app.close(); process.exit(0); });
-process.on("SIGINT", async () => { stopAllControllers(); await persistence.close(); await app.close(); process.exit(0); });
+async function shutdown() {
+  stopAllControllers();
+  await closeAllBrowserSessions();
+  await persistence.close();
+  await app.close();
+  process.exit(0);
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
