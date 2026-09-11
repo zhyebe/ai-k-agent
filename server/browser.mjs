@@ -295,7 +295,22 @@ async function readVisibleInstrumentOptions(page) {
       return instance || null;
     };
     const root = vueRoot();
+    const pushSelectOptions = (instance) => {
+      const options = instance?.options || instance?.cachedOptions || [];
+      if (!Array.isArray(options)) return;
+      for (const option of options) {
+        if (!option || typeof option !== "object") continue;
+        instruments.push({
+          symbol: String(option.value ?? option.currentValue ?? option.symbol ?? ""),
+          commodityName: String(option.label ?? option.currentLabel ?? option.symbolName ?? ""),
+          symbolId: String(option.symbolId ?? ""),
+        });
+      }
+    };
     try { pushDetails(root?.$store?.state?.hqData?.marketDetails); } catch {}
+    for (const node of document.querySelectorAll(".el-select, .selectEl")) {
+      try { pushSelectOptions(node.__vue__); } catch {}
+    }
     const queue = [root, ...[...document.querySelectorAll("*")].map((node) => node.__vue__)].filter(Boolean);
     while (queue.length && seenInstances.size < 4000) {
       const instance = queue.shift();
@@ -305,6 +320,7 @@ async function readVisibleInstrumentOptions(page) {
       if (Array.isArray(instance.$children)) queue.push(...instance.$children);
       try { pushDetails(instance.commodityOptions); } catch {}
       try { pushDetails(instance.$store?.state?.hqData?.marketDetails); } catch {}
+      try { pushSelectOptions(instance); } catch {}
     }
     const selectors = [
       "[role='option']",
@@ -341,14 +357,34 @@ async function readVisibleInstrumentOptions(page) {
 }
 
 async function openProductMenu(page) {
-  try {
-    const select = page.locator(".selectEl input, .selectEl .el-input__inner, .selectEl, .el-select input").first();
-    if (await select.count()) {
-      await select.click({ timeout: 2500, force: true });
-      await page.waitForTimeout(400);
-      if (await page.locator(".el-select-dropdown__item, .el-select-dropdown .el-option").count()) return true;
+  const opened = await page.evaluate(() => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    };
+    const f10 = [...document.querySelectorAll("span, div, button, a")].find((el) => String(el.textContent || "").trim() === "F10" && el.children.length === 0 && visible(el));
+    const nearby = f10?.closest(".el-row") || f10?.closest(".el-col")?.parentElement || document;
+    const selects = [...nearby.querySelectorAll(".selectEl, .el-select")].filter(visible);
+    const allSelects = selects.length ? selects : [...document.querySelectorAll(".selectEl, .el-select")].filter(visible);
+    for (const node of allSelects) {
+      const instance = node.__vue__;
+      try {
+        if (instance && typeof instance.toggleMenu === "function") {
+          if (!instance.visible) instance.toggleMenu();
+          if (instance.visible || instance.options?.length) return true;
+        }
+      } catch {}
+      const trigger = node.querySelector("input, .el-input, .el-input__inner") || node;
+      try { trigger.click(); } catch {}
     }
-  } catch {}
+    return document.querySelectorAll(".el-select-dropdown__item, .el-select-dropdown .el-option").length > 0;
+  }).catch(() => false);
+  if (opened) {
+    await page.waitForTimeout(500);
+    return true;
+  }
   const clicked = await page.evaluate(() => {
     const nodes = [...document.querySelectorAll("span, div, p, button, a, h1, h2, h3")];
     const visible = (el) => {
@@ -492,16 +528,18 @@ export async function readVisiblePage(sessionId = "default") {
 export async function listPageBoardInstruments(sessionId = "default") {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return [];
-  const visible = await readVisibleInstrumentOptions(session.page);
-  if (visible.length >= 2) return visible;
-  await openProductMenu(session.page);
-  const opened = await readVisibleInstrumentOptions(session.page);
+  let found = await readVisibleInstrumentOptions(session.page);
+  for (let attempt = 0; attempt < 3 && found.length < 2; attempt += 1) {
+    await openProductMenu(session.page);
+    await session.page.waitForTimeout(350);
+    found = uniquePageInstruments([...found, ...(await readVisibleInstrumentOptions(session.page))]);
+  }
   await session.page.keyboard.press("Escape").catch(() => {});
   const current = extractHaohanPageInstrument({
     visibleText: await session.page.evaluate(() => document.body?.innerText || "").catch(() => ""),
     title: await session.page.title().catch(() => ""),
   });
-  return uniquePageInstruments([current, ...opened, ...visible].filter((item) => item?.symbol || item?.symbolName));
+  return uniquePageInstruments([current, ...found].filter((item) => item?.symbol || item?.symbolName));
 }
 
 export async function selectPageBoardInstrument(sessionId, instrument) {
