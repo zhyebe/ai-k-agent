@@ -19,8 +19,29 @@ export function shouldSubmitLiveOrder(task, source = "manual_confirm") {
     && isTradingSwitchOn();
 }
 
+function normalizedTargetValues(value) {
+  return [value?.symbol, value?.symbolName, value?.instrumentId]
+    .map((item) => String(item || "").trim().toLocaleLowerCase())
+    .filter(Boolean);
+}
+
+export function previewMarketForDecision(task, decision) {
+  const books = Array.isArray(task?.market?.books) ? task.market.books.filter(Boolean) : [];
+  const target = new Set(normalizedTargetValues({
+    symbol: decision?.targetSymbol,
+    symbolName: decision?.targetSymbolName,
+    instrumentId: decision?.targetInstrumentId,
+  }));
+  if (target.size) {
+    const matched = books.find((book) => normalizedTargetValues(book).some((value) => target.has(value)));
+    if (matched) return matched;
+  }
+  return books.length === 1 ? books[0] : task?.market;
+}
+
 export function suggestOrderPreview(task, decision) {
-  const price = Number(task?.market?.latest?.price);
+  const targetMarket = previewMarketForDecision(task, decision);
+  const price = Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);
   const requestedPct = Number(decision?.targetPositionPct || 0);
   const orderPct = Number(decision?.maxOrderValuePct || executionLimits.maxOrderValuePct);
@@ -42,6 +63,9 @@ export function suggestOrderPreview(task, decision) {
     suggestedQty,
     valuePct: pct,
     formSubmitBlocked: true,
+    targetSymbol: String(decision?.targetSymbol || targetMarket?.symbol || ""),
+    targetSymbolName: String(decision?.targetSymbolName || targetMarket?.symbolName || ""),
+    targetInstrumentId: String(decision?.targetInstrumentId || targetMarket?.instrumentId || ""),
   };
 }
 
@@ -55,6 +79,9 @@ export function executeDecision(task, decision, connector) {
     : "买卖建议已生成，等待确认；当前模式不会提交实盘", {
     taskId: task.id,
     action: decision.action,
+    targetSymbol: decision.targetSymbol || "",
+    targetSymbolName: decision.targetSymbolName || "",
+    targetInstrumentId: decision.targetInstrumentId || "",
     mode: task.mode,
     connectorId: connector?.adapterId || "",
     autoDecisionEnabled: task.autoDecisionEnabled === true,

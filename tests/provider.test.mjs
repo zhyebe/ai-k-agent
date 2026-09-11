@@ -173,6 +173,34 @@ test("provider decision receives bounded evidence context", async () => {
   }
 });
 
+test("provider decision preserves target board identity and per-board assessments", async () => {
+  const server = http.createServer(async (_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      action: "BUY",
+      target_symbol: "DGKZ",
+      target_symbol_name: "丹桂康砖（二期）",
+      target_instrument_id: "537",
+      confidence: 0.75,
+      board_assessments: [
+        { symbol: "DGJJ", symbol_name: "丹桂金尖（二期）", instrument_id: "536", action: "HOLD", confidence: 0.4, summary: "等待" },
+        { symbol: "DGKZ", symbol_name: "丹桂康砖（二期）", instrument_id: "537", action: "BUY", confidence: 0.75, summary: "满足条件" },
+      ],
+    }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "board-model", apiKey: "key" });
+    const result = await requestDecision(provider, { market: { books: [] }, evidenceIds: [] });
+    assert.equal(result.targetSymbol, "DGKZ");
+    assert.equal(result.targetInstrumentId, "537");
+    assert.equal(result.boardAssessments.length, 2);
+    assert.equal(result.boardAssessments[0].action, "HOLD");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("continuous monitoring sends prior rounds as bounded conversation context", async () => {
   let received;
   const server = http.createServer(async (request, response) => {

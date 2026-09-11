@@ -597,6 +597,8 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     timeframes,
     analysisLayers: market.analysisLayers || null,
     bookCount: Array.isArray(market.books) ? market.books.length : 0,
+    expectedBookCount: Number(market.expectedBookCount || market.boardCoverage?.expected || market.books?.length || 0),
+    boardCoverage: market.boardCoverage || null,
     books: (Array.isArray(market.books) ? market.books : []).map((book) => ({
       symbol: book.symbol,
       symbolName: book.symbolName,

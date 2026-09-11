@@ -60,14 +60,22 @@ function pendingWaitMessage(task, { auto = false, countdownSec = 0 } = {}) {
   return "请在弹窗中确认建议；观察模式不会下单";
 }
 
+function pendingTargetLabel(pending) {
+  return String(pending?.targetSymbolName || pending?.targetSymbol || pending?.targetInstrumentId || "目标盘口");
+}
+
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const preview = suggestOrderPreview(task, decision);
   const countdownSec = Math.max(5, Math.min(300, Number(task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC)));
   const auto = !isLiveTask(task) && task.autoDecisionEnabled === true;
   const action = decision.action === "SELL" ? "SELL" : "BUY";
+  const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     action,
+    targetSymbol: String(decision.targetSymbol || ""),
+    targetSymbolName: String(decision.targetSymbolName || ""),
+    targetInstrumentId: String(decision.targetInstrumentId || ""),
     status: "WAITING",
     source: null,
     suggestedQty: preview.suggestedQty,
@@ -78,7 +86,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     deadlineAt: auto ? new Date(now + countdownSec * 1000).toISOString() : null,
     countdownSec: auto ? countdownSec : 0,
     resolvedAt: null,
-    message: pendingWaitMessage(task, { auto, countdownSec }),
+    message: `${targetLabel}：${pendingWaitMessage(task, { auto, countdownSec })}`,
   };
 }
 
@@ -129,6 +137,9 @@ async function openPendingAction(task, { runtime, run } = {}) {
       action: task.pendingAction.action,
       price: task.pendingAction.suggestedPrice,
       quantity: task.pendingAction.suggestedQty,
+      symbol: task.pendingAction.targetSymbol,
+      symbolName: task.pendingAction.targetSymbolName,
+      instrumentId: task.pendingAction.targetInstrumentId,
     });
     task.pendingAction.formFilled = filled?.filled === true && filled?.submitted !== true;
     if (filled?.submitted === true) task.pendingAction.formFilled = false;
@@ -141,9 +152,9 @@ async function openPendingAction(task, { runtime, run } = {}) {
         runId: run.id,
         stage: "action",
         message: task.pendingAction.formFilled
-          ? `已在目标页填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`
-          : "建议待确认；目标页未填写表单，尚未提交",
-        data: { pendingActionId: task.pendingAction.id, filled: task.pendingAction.formFilled, submitted: false },
+          ? `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`
+          : `${pendingTargetLabel(task.pendingAction)}建议待确认；目标页未填写表单，尚未提交`,
+        data: { pendingActionId: task.pendingAction.id, targetSymbol: task.pendingAction.targetSymbol, targetSymbolName: task.pendingAction.targetSymbolName, targetInstrumentId: task.pendingAction.targetInstrumentId, filled: task.pendingAction.formFilled, submitted: false },
       });
     }
   } catch (error) {
@@ -171,12 +182,12 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
       const waitSec = task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
       task.pendingAction.countdownSec = waitSec;
       task.pendingAction.deadlineAt = new Date(Date.now() + waitSec * 1000).toISOString();
-      task.pendingAction.message = pendingWaitMessage(task, { auto: true, countdownSec: waitSec });
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: true, countdownSec: waitSec })}`;
       schedulePendingActionTimeout(task);
     } else {
       task.pendingAction.countdownSec = 0;
       task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = isLiveTask(task) ? "实盘必须弹窗确认后才会下单" : "自动决策已关闭，等待弹窗确认或人工接管";
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${isLiveTask(task) ? "实盘必须弹窗确认后才会下单" : "自动决策已关闭，等待弹窗确认或人工接管"}`;
       clearPendingActionTimer(task.id);
     }
   }
@@ -214,9 +225,9 @@ export function setTaskMode(taskId, mode) {
   if (task.pendingAction?.status === "WAITING") {
     task.pendingAction.countdownSec = 0;
     task.pendingAction.deadlineAt = null;
-    task.pendingAction.message = next === "LIVE"
+    task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${next === "LIVE"
       ? "实盘必须弹窗确认后才会下单"
-      : "观察模式确认后也不会提交实盘";
+      : "观察模式确认后也不会提交实盘"}`;
     clearPendingActionTimer(task.id);
   }
   task.updatedAt = new Date().toISOString();
@@ -234,7 +245,9 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
     id: `order_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     idempotencyKey: `pending:${pending.id}`,
     taskId: task.id,
-    symbol: String(task.market?.symbol || task.symbol || ""),
+    symbol: String(pending.targetSymbol || pending.targetSymbolName || pending.targetInstrumentId || task.market?.symbol || task.symbol || ""),
+    symbolName: String(pending.targetSymbolName || ""),
+    instrumentId: String(pending.targetInstrumentId || ""),
     action: pending.action,
     mode: task.mode,
     status,
@@ -268,7 +281,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       task.pendingAction = {
         ...task.pendingAction,
         status: "SUBMITTING",
-        message: `正在提交${actionLabel}订单…`,
+        message: `正在向${pendingTargetLabel(task.pendingAction)}提交${actionLabel}订单…`,
       };
       persistTask(task);
       const sessionId = task.target?.browserSessionId || `task:${task.id}`;
@@ -277,6 +290,9 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         action: task.pendingAction.action,
         price: task.pendingAction.suggestedPrice,
         quantity: task.pendingAction.suggestedQty,
+        symbol: task.pendingAction.targetSymbol,
+        symbolName: task.pendingAction.targetSymbolName,
+        instrumentId: task.pendingAction.targetInstrumentId,
       });
       if (submitted?.submitted === true && submitted.ok !== true) {
         const order = recordConfirmedOrder(task, task.pendingAction, {
@@ -802,6 +818,8 @@ function toTaskMarket(market) {
     account: market.account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
     books: Array.isArray(market.books) ? market.books : [],
     bookCount: Number(market.bookCount || market.books?.length || 0),
+    expectedBookCount: Number(market.expectedBookCount || market.boardCoverage?.expected || market.books?.length || 0),
+    boardCoverage: market.boardCoverage || null,
   };
 }
 
@@ -816,6 +834,58 @@ function marketQualityIssues(market) {
   if (market?.dataQuality === "LIMITED") issues.push("DATA_QUALITY_LIMITED");
   if (Number(market?.freshnessSec) > 5) issues.push("STALE_MARKET_DATA");
   return [...new Set(issues)];
+}
+
+function monitoredBooks(market) {
+  const books = Array.isArray(market?.books) ? market.books.filter(Boolean) : [];
+  return books.length ? books : market ? [market] : [];
+}
+
+function normalizedInstrumentValues(value) {
+  return [value?.symbol, value?.symbolName, value?.instrumentId]
+    .map((item) => String(item || "").trim().toLocaleLowerCase())
+    .filter(Boolean);
+}
+
+export function decisionTargetBook(decision, market) {
+  const targetValues = normalizedInstrumentValues({
+    symbol: decision?.targetSymbol,
+    symbolName: decision?.targetSymbolName,
+    instrumentId: decision?.targetInstrumentId,
+  });
+  if (!targetValues.length) return null;
+  const targetSet = new Set(targetValues);
+  return monitoredBooks(market).find((book) => normalizedInstrumentValues(book).some((value) => targetSet.has(value))) || null;
+}
+
+export function bindDecisionToMarket(decision, market) {
+  if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision;
+  const books = monitoredBooks(market);
+  const requestedTarget = normalizedInstrumentValues({
+    symbol: decision.targetSymbol,
+    symbolName: decision.targetSymbolName,
+    instrumentId: decision.targetInstrumentId,
+  });
+  const target = decisionTargetBook(decision, market) || (!requestedTarget.length && books.length === 1 ? books[0] : null);
+  if (!target) {
+    return {
+      ...decision,
+      action: "HOLD",
+      targetSymbol: "",
+      targetSymbolName: "",
+      targetInstrumentId: "",
+      targetPositionPct: 0,
+      maxOrderValuePct: 0,
+      invalidation: requestedTarget.length ? "模型指定的盘口不在本轮监控列表中" : "多个盘口下的买卖建议必须明确指定目标盘口",
+      riskFlags: [...new Set([...(decision.riskFlags || []), requestedTarget.length ? "TARGET_BOARD_NOT_MONITORED" : "TARGET_BOARD_REQUIRED"])],
+    };
+  }
+  return {
+    ...decision,
+    targetSymbol: String(target.symbol || ""),
+    targetSymbolName: String(target.symbolName || ""),
+    targetInstrumentId: String(target.instrumentId || ""),
+  };
 }
 
 function failedAutomaticRules(task) {
@@ -879,6 +949,8 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       observedAt: market.observedAt,
       books: layered.books || [],
       bookCount: Number(layered.bookCount || layered.books?.length || 0),
+      expectedBookCount: Number(layered.expectedBookCount || layered.boardCoverage?.expected || layered.books?.length || 0),
+      boardCoverage: layered.boardCoverage || null,
       page: layered.page ?? task.market.page,
       pageView: layered.pageView ?? task.market.pageView ?? task.market.page?.view ?? null,
       raw: layered.raw,
@@ -1082,13 +1154,16 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.lastPolledAt = new Date().toISOString();
     task.lastObservedFingerprint = String(market.fingerprint || "");
     task.monitorFailureCount = 0;
-    completeWorkflow(task, "collect", `${task.market.historyCount} 根 K 线 · ${market.source}`);
+    const monitoredBoardLabels = (market.books || []).map((book) => book.symbolName || book.symbol || book.instrumentId).filter(Boolean);
+    const monitoredCount = Number(market.bookCount || market.books?.length || 1);
+    const expectedCount = Number(market.expectedBookCount || market.boardCoverage?.expected || monitoredCount);
+    completeWorkflow(task, "collect", `${monitoredCount}/${expectedCount} 个盘 · ${task.market.historyCount} 根主盘 K 线 · ${market.source}`);
     appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "collect",
-      message: `已采集 ${market.bookCount || 1} 个盘 · ${task.symbol} 最新价 ${task.market.latest.price}，趋势 ${market.trend}，来源 ${market.source}`,
-      data: { source: market.source, freshnessSec: market.freshnessSec, historyCount: task.market.historyCount, bookCount: market.bookCount || 1, books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, historyCount: book.historyCount })), missingFields: market.missingFields || [] },
+      message: `已采集 ${monitoredCount}/${expectedCount} 个盘${monitoredBoardLabels.length ? `（${monitoredBoardLabels.join("、")}）` : ""} · 当前盘 ${market.symbolName || market.symbol || task.symbol} 最新价 ${task.market.latest.price}，趋势 ${market.trend}，来源 ${market.source}`,
+      data: { source: market.source, freshnessSec: market.freshnessSec, historyCount: task.market.historyCount, bookCount: monitoredCount, expectedBookCount: expectedCount, boardCoverage: market.boardCoverage || null, books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, historyCount: book.historyCount })), missingFields: market.missingFields || [] },
     });
     const marketUnchanged = Boolean(skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task));
     if (marketUnchanged) {
@@ -1110,7 +1185,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "上一轮建议已过期，重新请求模型确认" });
     }
     applyFreshnessRules(task, market);
-    const qualityIssues = marketQualityIssues(market);
+    let qualityIssues = marketQualityIssues(market);
     const automaticRuleFailures = failedAutomaticRules(task);
 
     logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
@@ -1223,7 +1298,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     assertCurrent();
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
-    decision = enforceDecisionLimits(decision);
+    decision = bindDecisionToMarket(enforceDecisionLimits(decision), market);
+    const targetBook = decisionTargetBook(decision, market);
+    if (targetBook) qualityIssues = marketQualityIssues(targetBook);
+    if (market.boardCoverage?.complete === false) qualityIssues = [...new Set([...qualityIssues, "BOARD_COVERAGE_INCOMPLETE"])];
     const evidenceIds = new Set(evidence.map((item) => item.evidenceId));
     const invalidEvidenceReference = (decision.evidenceIds || []).some((evidenceId) => !evidenceIds.has(evidenceId));
     decision.evidenceIds = (decision.evidenceIds || []).filter((evidenceId) => evidenceIds.has(evidenceId));
@@ -1235,14 +1313,15 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
     task.decision = { ...decision, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
-    completeWorkflow(task, "analyze", `${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%`);
+    const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
+    completeWorkflow(task, "analyze", `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%`);
     appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
       kind: "decision",
-      message: `模型输出 ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%`,
-      data: { action: decision.action, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags },
+      message: `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%`,
+      data: { action: decision.action, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [] },
     });
 
     logStage(task, run, "rules", "执行确定性规则与红线检查");
@@ -1272,16 +1351,17 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
                   : providerUnavailable ? "HOLD_PROVIDER"
                     : "HOLD";
       const actionLabel = task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望";
+      const targetedActionLabel = decisionBoardLabel ? `${decisionBoardLabel} ${actionLabel}` : actionLabel;
       const ruleMessage = blocked
-        ? `${actionLabel}建议已保留，但红线触发，自动动作暂停`
+        ? `${targetedActionLabel}建议已保留，但红线触发，自动动作暂停`
         : reviewRequired
-          ? `${actionLabel}建议已保留，等待人工复核`
+          ? `${targetedActionLabel}建议已保留，等待人工复核`
           : automaticRuleFailures.length
-            ? `${actionLabel}建议已保留，自动规则未通过`
+            ? `${targetedActionLabel}建议已保留，自动规则未通过`
             : task.decision.action === "HOLD"
               ? "模型建议观望，当前轮次无需动作"
               : riskLimitExceeded
-                ? `${actionLabel}建议已保留，但仓位超过服务端上限`
+                ? `${targetedActionLabel}建议已保留，但仓位超过服务端上限`
                 : "当前数据或模型结果不足，保持观望";
       completeWorkflow(task, "rules", ruleMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: ruleMessage });
@@ -1303,8 +1383,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const pending = task.pendingAction?.status === "WAITING";
-      completeWorkflow(task, "action", pending ? `${task.decision.action} 建议待弹窗确认` : `${task.decision.action} 建议已生成`);
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${task.decision.action === "BUY" ? "买入" : "卖出"}建议待确认；${isLiveTask(task) ? "确认后才会下单" : "观察模式不会下单"}` : `${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望"}建议已生成`, data: { action: task.decision.action, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
+      completeWorkflow(task, "action", pending ? `${decisionBoardLabel} ${task.decision.action} 建议待弹窗确认` : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${task.decision.action} 建议已生成`);
+      appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${decisionBoardLabel} ${task.decision.action === "BUY" ? "买入" : "卖出"}建议待确认；${isLiveTask(task) ? "确认后才会下单" : "观察模式不会下单"}` : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望"}建议已生成`, data: { action: task.decision.action, targetSymbol: task.decision.targetSymbol, targetSymbolName: task.decision.targetSymbolName, targetInstrumentId: task.decision.targetInstrumentId, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
     } else if (!execution.ok) {
       task.status = "PAUSED";
       route = execution.route || "BLOCKED";

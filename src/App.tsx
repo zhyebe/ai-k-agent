@@ -86,7 +86,7 @@ import {
   userLogout,
   userSession,
 } from "./lib/api";
-import type { AgentOutputLine, AgentRun, DesktopUpdateState, MarketCandle, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "console", label: "任务控制台", icon: LayoutDashboard },
@@ -153,6 +153,9 @@ const riskLabels: Record<string, string> = {
   TRADING_DISABLED: "交易动作已锁定",
   RED_LINE_TRIGGERED: "触发红线",
   HUMAN_REVIEW_REQUIRED: "需要人工复核",
+  TARGET_BOARD_REQUIRED: "买卖建议未指定具体盘",
+  TARGET_BOARD_NOT_MONITORED: "建议盘不在当前监控范围",
+  BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
 };
 const reasonLabels: Record<string, string> = {
   EMA_SLOPE_POSITIVE: "EMA20 斜率为正",
@@ -188,6 +191,7 @@ const displayLabel = (value: string | null | undefined, labels: Record<string, s
 };
 const displayAction = (value: string | null | undefined) => actionLabels[value as keyof typeof actionLabels] || "待确认";
 const displaySuggestion = (value: string | null | undefined) => actionSuggestionLabels[value as keyof typeof actionSuggestionLabels] || "待确认";
+const decisionTargetLabel = (value: Pick<Decision, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | Pick<PendingAction, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | null | undefined) => value?.targetSymbolName || value?.targetSymbol || value?.targetInstrumentId || "";
 const formatTime = (value: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "刚刚";
@@ -705,9 +709,12 @@ function App() {
       if (result.run) setAgentRuns((current) => [result.run!, ...current.filter((item) => item.id !== result.run!.id)]);
       const flags = result.task.decision.riskFlags || [];
       if (result.skipped) notify("上一轮分析仍在进行，已跳过本次触发");
-      else if (result.route === "SUGGESTION_PENDING") notify(result.task.mode === "LIVE" ? "分析完成：请在弹窗中确认后才会下单" : "分析完成：已给出建议，观察模式不会下单");
+      else if (result.route === "SUGGESTION_PENDING") {
+        const target = decisionTargetLabel(result.task.decision);
+        notify(result.task.mode === "LIVE" ? `分析完成：${target ? `${target} ` : ""}建议待弹窗确认后下单` : `分析完成：${target ? `${target} ` : ""}已给出建议，观察模式不会下单`);
+      }
       else if (result.task.status === "PAUSED" || result.task.status === "BLOCKED") notify(`分析暂停：${displayLabel(flags[0] || result.route || result.task.status, { ...riskLabels, ...routeLabels, ...statusMetaLabels }, "需要处理")}`);
-      else notify(`分析完成：${displaySuggestion(result.task.decision.action)}`);
+      else notify(`分析完成：${decisionTargetLabel(result.task.decision) ? `${decisionTargetLabel(result.task.decision)} · ` : ""}${displaySuggestion(result.task.decision.action)}`);
     } catch (error) {
       notify(`分析失败：${error instanceof Error ? error.message : "请检查目标连接与模型配置"}`);
     } finally { setBusyAction(null); }
@@ -1034,7 +1041,7 @@ function MarketPanel({ task }: { task: Task }) {
   const indicatorNumber = (key: string) => typeof indicators?.[key as keyof typeof indicators] === "number" ? indicators[key as keyof typeof indicators] as number : null;
   const quality = selected?.dataQuality || selectedBook?.dataQuality || market?.dataQuality || "未知";
   const title = selectedBook?.symbolName || selectedBook?.symbol || task.symbol;
-  return <section className="panel market-panel"><div className="panel-header"><div><div className="panel-kicker"><BarChart3 size={14} />市场状态</div><h2>{title}</h2></div><div className="market-header-actions"><span className={`market-quality ${quality === "VERIFIED" ? "quality-ok" : "quality-limited"}`}>{quality === "VERIFIED" ? "数据完整" : "数据受限"}</span><span className="market-meta">{selectedBook?.source || market?.source || "未采集"}</span></div></div><div className="market-quote"><div><strong className="quote-price tabular">{marketNumber(price, 4)}</strong>{change !== null && change !== undefined ? <span className={`quote-change ${change >= 0 ? "positive" : "negative"}`}>{change >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />} {change >= 0 ? "+" : ""}{change.toFixed(2)}%</span> : null}</div><span className="quote-time">{market ? `${market.source} · ${books.length} 个盘 · ${formatTime(market.observedAt)}` : "等待首次只读采集"}</span></div>{books.length > 1 ? <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">{books.map((book) => <button type="button" role="tab" aria-selected={selectedBook?.symbol === book.symbol} className={selectedBook?.symbol === book.symbol ? "active" : ""} key={book.symbol || book.symbolName} onClick={() => { setSelectedSymbol(book.symbol); setSelectedTimeframe(book.timeframe || task.timeframe); }}>{book.symbolName || book.symbol}</button>)}</div> : null}<div className="market-timeframe-tabs" role="tablist" aria-label="分析周期">{timeframeKeys.map((key) => <button type="button" role="tab" aria-selected={selectedTimeframe === key} className={selectedTimeframe === key ? "active" : ""} key={key} onClick={() => setSelectedTimeframe(key)}>{timeframes[key]?.label || timeframeLabels[key] || key}</button>)}</div><CandleChart candles={candles} /><div className="chart-summary"><span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span><span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span><span>分时 {selectedBook?.ticks?.length || market?.ticks.length || 0} 条</span><span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span></div><div className="indicator-row"><Indicator label="EMA 20" value={marketNumber(indicatorNumber("ema20"))} tone="blue" /><Indicator label="RSI 14" value={marketNumber(indicatorNumber("rsi14"), 1)} tone="amber" /><Indicator label="ATR" value={marketNumber(indicatorNumber("atr14"))} tone="muted" /><Indicator label="量能比" value={indicatorNumber("volumeRatio") === null ? "--" : `${marketNumber(indicatorNumber("volumeRatio"), 2)}x`} tone="green" /></div></section>;
+  return <section className="panel market-panel"><div className="panel-header"><div><div className="panel-kicker"><BarChart3 size={14} />市场状态</div><h2>{title}</h2></div><div className="market-header-actions"><span className={`market-quality ${quality === "VERIFIED" && market?.boardCoverage?.complete !== false ? "quality-ok" : "quality-limited"}`}>{market?.boardCoverage?.complete === false ? "盘口覆盖不完整" : quality === "VERIFIED" ? "数据完整" : "数据受限"}</span><span className="market-meta">{selectedBook?.source || market?.source || "未采集"}</span></div></div><div className="market-quote"><div><strong className="quote-price tabular">{marketNumber(price, 4)}</strong>{change !== null && change !== undefined ? <span className={`quote-change ${change >= 0 ? "positive" : "negative"}`}>{change >= 0 ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />} {change >= 0 ? "+" : ""}{change.toFixed(2)}%</span> : null}</div><span className="quote-time">{market ? `${market.source} · ${books.length}/${market.expectedBookCount || books.length} 个盘 · ${formatTime(market.observedAt)}` : "等待首次只读采集"}</span></div>{books.length > 1 ? <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">{books.map((book) => <button type="button" role="tab" aria-selected={selectedBook?.symbol === book.symbol} className={selectedBook?.symbol === book.symbol ? "active" : ""} key={book.symbol || book.symbolName} onClick={() => { setSelectedSymbol(book.symbol); setSelectedTimeframe(book.timeframe || task.timeframe); }}>{book.symbolName || book.symbol}</button>)}</div> : null}<div className="market-timeframe-tabs" role="tablist" aria-label="分析周期">{timeframeKeys.map((key) => <button type="button" role="tab" aria-selected={selectedTimeframe === key} className={selectedTimeframe === key ? "active" : ""} key={key} onClick={() => setSelectedTimeframe(key)}>{timeframes[key]?.label || timeframeLabels[key] || key}</button>)}</div><CandleChart candles={candles} /><div className="chart-summary"><span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span><span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span><span>分时 {selectedBook?.ticks?.length || market?.ticks.length || 0} 条</span><span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span></div><div className="indicator-row"><Indicator label="EMA 20" value={marketNumber(indicatorNumber("ema20"))} tone="blue" /><Indicator label="RSI 14" value={marketNumber(indicatorNumber("rsi14"), 1)} tone="amber" /><Indicator label="ATR" value={marketNumber(indicatorNumber("atr14"))} tone="muted" /><Indicator label="量能比" value={indicatorNumber("volumeRatio") === null ? "--" : `${marketNumber(indicatorNumber("volumeRatio"), 2)}x`} tone="green" /></div></section>;
 }
 
 function Indicator({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className="indicator"><span><i className={`indicator-dot ${tone}`} />{label}</span><b className="tabular">{value}</b></div>; }
@@ -1055,14 +1062,16 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
   }, [pending.id, pending.status, pending.deadlineAt]);
   const waiting = pending.status === "WAITING";
   const actionText = pending.action === "BUY" ? "买入" : "卖出";
+  const target = decisionTargetLabel(pending);
   return (
     <div className={`pending-action-card ${waiting ? "waiting" : ""}`}>
       <div className="pending-action-head">
-        <strong>{waiting ? `${actionText}建议待确认` : pending.message}</strong>
+        <strong>{waiting ? `${target ? `${target} · ` : ""}${actionText}建议待确认` : pending.message}</strong>
         {waiting && pending.deadlineAt ? <span className="countdown-display tabular">{remain}s</span> : null}
       </div>
       <p>{pending.message}</p>
       <div className="pending-action-meta">
+        <span>目标盘 {target || "--"}</span>
         <span>建议价 {pending.suggestedPrice ?? "--"}</span>
         <span>建议量 {pending.suggestedQty ?? "--"}</span>
         <span>{pending.formFilled ? "表单已填写" : "表单未填写"}</span>
@@ -1076,6 +1085,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const actionText = analyzed ? displaySuggestion(decision.action) : "尚未分析";
+  const target = decisionTargetLabel(decision);
   const pending = task.pendingAction;
   return (
     <section className="panel decision-panel">
@@ -1085,11 +1095,12 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{actionText}</strong><span>{analyzed ? `结构化意图 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
       <div className="confidence-bar"><div style={{ width: `${decision.confidence * 100}%` }} /><span>置信度 <b>{Math.round(decision.confidence * 100)}%</b></span></div>
       <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
+      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {Math.round(item.confidence * 100)}%</span></div>)}</div> : null}
       <div className="reason-block">
         <span className="block-label">机器可验证依据</span>
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
@@ -1345,6 +1356,7 @@ function ProviderModal({ provider, onClose, onSave }: { provider: Provider | nul
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {
   const live = task.mode === "LIVE";
   const actionText = pending.action === "BUY" ? "买入" : "卖出";
+  const target = decisionTargetLabel(pending);
   const submitting = pending.status === "SUBMITTING" || busyAction === "confirm";
   return (
     <div className="modal-backdrop trade-confirm-backdrop" role="presentation">
@@ -1356,7 +1368,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
           </div>
         </div>
         <div className="trade-confirm-facts">
-          <div><span>品种</span><b>{task.market?.symbol || task.symbol}</b></div>
+          <div><span>目标盘</span><b>{target || task.market?.symbol || task.symbol}</b></div>
           <div><span>方向</span><b>{actionText}</b></div>
           <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
           <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>

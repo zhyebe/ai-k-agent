@@ -667,6 +667,18 @@ export function pickPrimaryBoard(books = [], { configuredSymbol = "", pageSymbol
   return books.find((book) => prefer.includes(normalize(book.symbol)) || prefer.includes(normalize(book.symbolName))) || books[0];
 }
 
+export function boardCoverageForTargets(targets = [], books = []) {
+  const expected = uniquePageInstruments(targets);
+  const collected = Array.isArray(books) ? books.filter(Boolean) : [];
+  const missing = expected.filter((target) => !collected.some((book) => samePageInstrument(target, book) || samePageInstrument(target, book?.instrument)));
+  return {
+    expected: expected.length,
+    collected: collected.length,
+    complete: expected.length ? missing.length === 0 : collected.length > 0,
+    missing: missing.map((item) => ({ symbol: item.symbol || "", symbolName: item.symbolName || "", instrumentId: item.instrumentId || "" })),
+  };
+}
+
 function mergeBookHistories(pageBook, apiBook) {
   const pageHistory = Array.isArray(pageBook?.history) ? pageBook.history : [];
   const apiHistory = Array.isArray(apiBook?.history) ? apiBook.history : [];
@@ -1251,6 +1263,12 @@ export async function observeMarket(task, connector) {
     books: mergedBooks,
     raw: { ...(primary.raw || {}), page, bookCount: mergedBooks.length, boards: apiBoard.targets },
   });
+  enriched.boardCoverage = boardCoverageForTargets(cycleTargets, mergedBooks);
+  enriched.expectedBookCount = enriched.boardCoverage.expected || mergedBooks.length;
+  if (!enriched.boardCoverage.complete) {
+    enriched.missingFields = [...new Set([...(enriched.missingFields || []), "BOARD_COVERAGE_INCOMPLETE"])];
+    enriched.dataQuality = "LIMITED";
+  }
   if (symbolMismatch) {
     enriched.missingFields = [...new Set([...(enriched.missingFields || []), "SYMBOL_PAGE_MISMATCH"])];
     enriched.dataQuality = "LIMITED";

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  boardCoverageForTargets,
   enrichReadOnlyMarket,
   fetchHaohanMarket,
   fetchHaohanKlineHistory,
@@ -325,6 +326,19 @@ test("页面下拉的多个盘口会匹配只读合约并全部纳入监测", ()
   assert.equal(boards[0].instrumentId, "536");
   assert.equal(boards[1].symbol, "DGKZ");
   assert.equal(pickPrimaryBoard(boards.map((board) => ({ symbol: board.symbol, symbolName: board.symbolName })), { pageSymbol: "DGKZ" }).symbol, "DGKZ");
+});
+
+test("盘口覆盖检查会明确报告未采集的盘口", () => {
+  const targets = [
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537" },
+  ];
+  const incomplete = boardCoverageForTargets(targets, [targets[0]]);
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.expected, 2);
+  assert.equal(incomplete.collected, 1);
+  assert.equal(incomplete.missing[0].symbol, "DGKZ");
+  assert.equal(boardCoverageForTargets(targets, targets).complete, true);
 });
 
 test("只读采集会并行拉取全部盘口历史 K 线", async () => {

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
-import { getBrowserPage, openBrowserPage, readVisiblePage } from "./browser.mjs";
+import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 
 function valuesFromEnv(name, fallback) {
@@ -310,12 +310,17 @@ export function suggestionFormLabels(action) {
     : { price: "买价", quantity: "买量" };
 }
 
-export async function fillSuggestionForm({ sessionId = "default", action, price, quantity } = {}) {
+export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "" } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
   }
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false, fields: [] };
+  const targetInstrument = { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") };
+  if (targetInstrument.symbol || targetInstrument.symbolName || targetInstrument.instrumentId) {
+    const selected = await selectPageBoardInstrument(sessionId, targetInstrument);
+    if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false, fields: [] };
+  }
   const labels = suggestionFormLabels(action);
   try {
     const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
@@ -360,14 +365,14 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
   }
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "" } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   }
   if (price == null || quantity == null || !Number(quantity)) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
-  const filled = await fillSuggestionForm({ sessionId, action, price, quantity });
+  const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId });
   if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };

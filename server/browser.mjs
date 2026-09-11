@@ -450,7 +450,12 @@ export async function selectPageBoardInstrument(sessionId, instrument) {
     await session.page.waitForFunction((value) => (document.body?.innerText || "").includes(value), expected, { timeout: 4000 }).catch(() => {});
   }
   await session.page.waitForTimeout(280);
-  return true;
+  const selectedText = await session.page.evaluate(() => document.body?.innerText || "").catch(() => "");
+  const selectedInstrument = extractHaohanPageInstrument({
+    visibleText: selectedText,
+    title: await session.page.title().catch(() => ""),
+  });
+  return samePageInstrument(selectedInstrument, instrument);
 }
 
 export async function collectAllPageBoards(sessionId, instruments = []) {

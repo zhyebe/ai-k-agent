@@ -85,6 +85,9 @@ export interface Rule {
 export interface PendingAction {
   id: string;
   action: "BUY" | "SELL";
+  targetSymbol?: string;
+  targetSymbolName?: string;
+  targetInstrumentId?: string;
   status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
@@ -100,6 +103,9 @@ export interface PendingAction {
 
 export interface Decision {
   action: "BUY" | "SELL" | "HOLD";
+  targetSymbol?: string;
+  targetSymbolName?: string;
+  targetInstrumentId?: string;
   confidence: number;
   targetPositionPct: number;
   maxOrderValuePct: number;
@@ -113,6 +119,14 @@ export interface Decision {
   timeframeConsistency?: string;
   keyLevels?: unknown[];
   watchConditions?: unknown[];
+  boardAssessments?: Array<{
+    symbol: string;
+    symbolName?: string;
+    instrumentId?: string;
+    action: "BUY" | "SELL" | "HOLD";
+    confidence: number;
+    summary?: string;
+  }>;
 }
 
 export interface MarketCandle {
@@ -210,6 +224,13 @@ export interface MarketSnapshot {
   pageView?: Record<string, unknown> | null;
   books?: MarketSnapshot[];
   bookCount?: number;
+  expectedBookCount?: number;
+  boardCoverage?: {
+    expected: number;
+    collected: number;
+    complete: boolean;
+    missing: Array<{ symbol?: string; symbolName?: string; instrumentId?: string }>;
+  } | null;
 }
 
 export interface Task {

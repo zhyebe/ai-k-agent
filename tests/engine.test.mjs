@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDecisionContext, enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { bindDecisionToMarket, buildDecisionContext, enforceDecisionLimits, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -59,6 +59,27 @@ test("最终决策上下文包含当前页面、账户、时间戳和全部盘�
   assert.equal(context.market.observedAt, market.observedAt);
   assert.equal(context.account.availableFunds, 8888);
   assert.equal(context.account.equity, 9999);
+});
+
+test("多盘口方向性决策必须绑定一个受监控盘口", () => {
+  const market = {
+    books: [
+      { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", latest: { price: 1800 } },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", latest: { price: 1168 } },
+    ],
+  };
+  const targeted = bindDecisionToMarket({ action: "BUY", targetSymbol: "DGKZ", riskFlags: [] }, market);
+  assert.equal(targeted.action, "BUY");
+  assert.equal(targeted.targetSymbolName, "丹桂康砖（二期）");
+  assert.equal(targeted.targetInstrumentId, "537");
+
+  const ambiguous = bindDecisionToMarket({ action: "SELL", riskFlags: [] }, market);
+  assert.equal(ambiguous.action, "HOLD");
+  assert.ok(ambiguous.riskFlags.includes("TARGET_BOARD_REQUIRED"));
+
+  const unknown = bindDecisionToMarket({ action: "BUY", targetSymbol: "UNKNOWN", riskFlags: [] }, market);
+  assert.equal(unknown.action, "HOLD");
+  assert.ok(unknown.riskFlags.includes("TARGET_BOARD_NOT_MONITORED"));
 });
 
 function insertNorthstarTask(id) {

@@ -117,6 +117,40 @@ test("live confirm submits only after the user confirms", async () => {
   assert.equal(orders[0].action, "BUY");
 });
 
+test("multi-board pending action uses and submits the selected board price and identity", async () => {
+  const task = insertTask(`task_target_board_${Date.now()}`, {
+    mode: "LIVE",
+    decision: { action: "BUY", targetSymbol: "DGKZ", targetSymbolName: "丹桂康砖（二期）", targetInstrumentId: "537", confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    market: {
+      symbol: "DGJJ",
+      latest: { price: 1800 },
+      account: { availableFunds: 18000 },
+      books: [
+        { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", latest: { price: 1800 } },
+        { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", latest: { price: 1200 } },
+      ],
+    },
+  });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  assert.equal(task.pendingAction.targetSymbol, "DGKZ");
+  assert.equal(task.pendingAction.suggestedPrice, 1200);
+  let submittedInput;
+  await confirmPendingAction(task.id, {
+    source: "manual_confirm",
+    runtime: {
+      submitSuggestionForm: async (input) => {
+        submittedInput = input;
+        return { ok: true, submitted: true, code: "TRADE_SUBMITTED", message: "已提交交易请求" };
+      },
+    },
+  });
+  assert.equal(submittedInput.symbol, "DGKZ");
+  assert.equal(submittedInput.symbolName, "丹桂康砖（二期）");
+  const order = state.orders.find((item) => item.taskId === task.id);
+  assert.equal(order.symbol, "DGKZ");
+  assert.equal(order.instrumentId, "537");
+});
+
 test("live auto timeout cannot skip the confirm dialog", async () => {
   const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);
