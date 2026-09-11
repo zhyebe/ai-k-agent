@@ -1041,7 +1041,7 @@ function MarketPanel({ task }: { task: Task }) {
   const change = selectedBook?.changePct ?? market?.changePct;
   const indicators = selected?.indicators || selectedBook?.indicators || market?.indicators;
   const indicatorNumber = (key: string) => typeof indicators?.[key as keyof typeof indicators] === "number" ? indicators[key as keyof typeof indicators] as number : null;
-  const quality = selected?.dataQuality || selectedBook?.dataQuality || market?.dataQuality || "未知";
+  const quality = selectedBook?.dataQuality || market?.dataQuality || "未知";
   const title = selectedBook?.symbolName || selectedBook?.symbol || task.symbol;
   return (
     <section className="panel market-panel">

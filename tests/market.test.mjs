@@ -16,7 +16,7 @@ import {
   resolveBoardInstruments,
   resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
-import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, uniquePageInstruments } from "../server/haohan.mjs";
+import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, uniqueBoardAssessments, uniquePageInstruments } from "../server/haohan.mjs";
 
 test("浩瀚 K 线按真实列位解析 OHLC、成交量和库存", () => {
   const candle = normalizeHaohanKlineRow([1700000000000, 100, 101, 105, 99, 103, 200, 20600, 50]);
@@ -384,6 +384,50 @@ test("盘口覆盖检查会明确报告未采集的盘口", () => {
   assert.equal(incomplete.collected, 1);
   assert.equal(incomplete.missing[0].symbol, "DGKZ");
   assert.equal(boardCoverageForTargets(targets, targets).complete, true);
+});
+
+test("分层空周期和未采集逐笔不会把主图判为受限", () => {
+  const minuteHistory = Array.from({ length: 40 }, (_, index) => {
+    const close = 1800 + index;
+    return { timestamp: Date.parse("2026-09-11T04:00:00Z") + index * 60000, open: close - 1, high: close + 1, low: close - 2, close, volume: 10 };
+  });
+  const market = enrichReadOnlyMarket({
+    symbol: "DGJJ",
+    symbolName: "丹桂金尖（二期）",
+    timeframe: "1m",
+    history: minuteHistory,
+    ticks: [],
+    quote: { price: 1839, open: 1800, high: 1840, low: 1798 },
+    observedAt: new Date().toISOString(),
+    dataAt: new Date(minuteHistory[0].timestamp).toISOString(),
+    source: "haohan-readonly-kline",
+    timeframes: {
+      "1m": { history: minuteHistory },
+      "1h": { history: minuteHistory.slice(-10).map((candle, index) => ({ ...candle, timestamp: candle.timestamp + index })) },
+      "1d": { history: minuteHistory.slice(-15) },
+      "1mo": { history: [] },
+    },
+  });
+  assert.equal(market.dataQuality, "VERIFIED");
+  assert.ok(market.missingFields.includes("LIVE_TICKS_MISSING"));
+  assert.ok(market.missingFields.some((field) => field.startsWith("TIMEFRAME_1MO_")));
+  assert.ok(market.freshnessSec !== null && market.freshnessSec < 5);
+});
+
+test("重复的各盘判断会合并到真实盘口", () => {
+  const books = [
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537" },
+  ];
+  const assessments = uniqueBoardAssessments([
+    { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", action: "HOLD", confidence: 0.45, summary: "金尖观望" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", confidence: 0.4, summary: "康砖第一次" },
+    { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", confidence: 0.4, summary: "康砖第二次" },
+  ], books);
+  assert.equal(assessments.length, 2);
+  assert.equal(assessments[0].symbol, "DGJJ");
+  assert.equal(assessments[1].symbol, "DGKZ");
+  assert.equal(assessments[1].summary, "康砖第一次");
 });
 
 test("只读采集会并行拉取全部盘口历史 K 线", async () => {

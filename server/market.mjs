@@ -471,6 +471,19 @@ function normalizeHistory(history) {
   return uniqueCandles((Array.isArray(history) ? history : []).filter((candle) => candle && candle.timestamp && candle.close > 0));
 }
 
+const INFORMATIONAL_MISSING_FIELDS = new Set(["LIVE_TICKS_MISSING", "MARKET_CLOSED", "STALE_MARKET_DATA", "DATA_QUALITY_LIMITED", "HISTORY_PARTIAL_OHLC"]);
+
+export function isBlockingMissingField(field) {
+  const value = String(field || "");
+  if (!value) return false;
+  if (value.startsWith("TIMEFRAME_")) return false;
+  return !INFORMATIONAL_MISSING_FIELDS.has(value);
+}
+
+export function blockingMissingFields(fields = []) {
+  return [...new Set((Array.isArray(fields) ? fields : []).map(String).filter(isBlockingMissingField))];
+}
+
 function timeframeMissingFields(history, indicators) {
   const missing = [];
   if (!history.length) missing.push("HISTORY_EMPTY");
@@ -640,17 +653,15 @@ export function resolveBoardInstruments({ pageInstruments = [], marketDetails = 
       detail: fromDetail || null,
     };
   };
-  const uniqueBoards = (items) => {
-    const result = [];
-    const seen = new Set();
-    for (const item of items) {
-      const key = [item.symbol, item.symbolName, item.instrumentId].map((part) => normalize(part)).filter(Boolean).join("|");
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      result.push(item);
-    }
-    return result.filter((item) => item.symbol || item.symbolName || item.instrumentId);
-  };
+  const uniqueBoards = (items) => uniquePageInstruments(items).map((instrument) => {
+    const source = items.find((item) => samePageInstrument(item, instrument));
+    return {
+      symbol: instrument.symbol,
+      symbolName: instrument.symbolName,
+      instrumentId: instrument.instrumentId,
+      detail: source?.detail || null,
+    };
+  });
   if (pageList.length >= 2) return uniqueBoards(pageList.map(attachDetail));
   if (details.length) return uniqueBoards(details.map((item) => {
     const fromDetail = instrumentFromDetail(item);
@@ -877,7 +888,7 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
   );
   const resolvedDataAt = dataAt || (latestDataTimestamp ? new Date(latestDataTimestamp).toISOString() : observedAt || new Date().toISOString());
   const resolvedObservedAt = observedAt || new Date().toISOString();
-  const freshnessTimestamp = new Date(resolvedDataAt).getTime();
+  const freshnessTimestamp = new Date(resolvedObservedAt).getTime();
   const freshnessSec = Number.isFinite(freshnessTimestamp)
     ? Math.max(0, Number(((Date.now() - freshnessTimestamp) / 1000).toFixed(2)))
     : null;
@@ -919,7 +930,7 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
     trend: primary.trend,
     anomaly: primary.anomaly,
     freshnessSec,
-    dataQuality: missingFields.length ? "LIMITED" : "VERIFIED",
+    dataQuality: blockingMissingFields(missingFields).length ? "LIMITED" : "VERIFIED",
     missingFields: [...new Set(missingFields)],
     marketClosed: Boolean(marketClosed),
     account: account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },

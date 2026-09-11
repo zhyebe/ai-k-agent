@@ -203,6 +203,50 @@ export function samePageInstrument(left, right) {
   return keys(b).some((key) => seen.has(key));
 }
 
+export function uniqueBoardAssessments(values = [], books = []) {
+  const result = [];
+  for (const item of Array.isArray(values) ? values : []) {
+    const instrument = normalizePageInstrument(item);
+    if (!instrument) continue;
+    const action = ["BUY", "SELL", "HOLD"].includes(item.action) ? item.action : "HOLD";
+    const confidence = Math.min(1, Math.max(0, Number(item.confidence) || 0));
+    const summary = String(item.summary || "").slice(0, 600);
+    const existing = result.find((candidate) => samePageInstrument(candidate, instrument));
+    if (existing) {
+      existing.symbol ||= instrument.symbol;
+      existing.symbolName ||= instrument.symbolName;
+      existing.instrumentId ||= instrument.instrumentId;
+      const take = confidence > existing.confidence || (existing.action === "HOLD" && action !== "HOLD");
+      if (take) {
+        existing.action = action;
+        existing.confidence = Math.max(existing.confidence, confidence);
+        if (summary) existing.summary = summary;
+      } else if (summary && !existing.summary) existing.summary = summary;
+      continue;
+    }
+    result.push({
+      symbol: instrument.symbol,
+      symbolName: instrument.symbolName,
+      instrumentId: instrument.instrumentId,
+      action,
+      confidence,
+      summary,
+    });
+  }
+  const monitored = uniquePageInstruments(books);
+  if (!monitored.length) return result;
+  return monitored.map((book) => {
+    const found = result.find((item) => samePageInstrument(item, book));
+    if (!found) return null;
+    return {
+      ...found,
+      symbol: book.symbol || found.symbol,
+      symbolName: book.symbolName || found.symbolName,
+      instrumentId: book.instrumentId || found.instrumentId,
+    };
+  }).filter(Boolean);
+}
+
 function parseCandleText(value, fallbackTimestamp) {
   const text = String(value?.text || value || "").replace(/\s+/g, " ").trim();
   if (!text) return null;

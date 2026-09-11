@@ -2,11 +2,11 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { searchKnowledge } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
-import { observeMarket, openMarketBrowser } from "./market.mjs";
+import { blockingMissingFields, observeMarket, openMarketBrowser } from "./market.mjs";
 import { browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm } from "./tools.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
-import { accountMetricsFromMarket, HAO_HAN_TARGET_URL } from "./haohan.mjs";
+import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -828,10 +828,8 @@ function syncTaskMetricsFromMarket(task, market) {
 }
 
 function marketQualityIssues(market) {
-  const issues = Array.isArray(market?.missingFields) ? market.missingFields.map(String) : [];
+  const issues = blockingMissingFields(market?.missingFields);
   if (Number(market?.historyCount || market?.history?.length || 0) < 20) issues.push("HISTORY_INSUFFICIENT");
-  if (market?.marketClosed) issues.push("MARKET_CLOSED");
-  if (market?.dataQuality === "LIMITED") issues.push("DATA_QUALITY_LIMITED");
   if (Number(market?.freshnessSec) > 5) issues.push("STALE_MARKET_DATA");
   return [...new Set(issues)];
 }
@@ -859,8 +857,11 @@ export function decisionTargetBook(decision, market) {
 }
 
 export function bindDecisionToMarket(decision, market) {
-  if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision;
   const books = monitoredBooks(market);
+  const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
+  if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) {
+    return decision ? { ...decision, boardAssessments } : decision;
+  }
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
     symbolName: decision.targetSymbolName,
@@ -878,6 +879,7 @@ export function bindDecisionToMarket(decision, market) {
       maxOrderValuePct: 0,
       invalidation: requestedTarget.length ? "模型指定的盘口不在本轮监控列表中" : "多个盘口下的买卖建议必须明确指定目标盘口",
       riskFlags: [...new Set([...(decision.riskFlags || []), requestedTarget.length ? "TARGET_BOARD_NOT_MONITORED" : "TARGET_BOARD_REQUIRED"])],
+      boardAssessments,
     };
   }
   return {
@@ -885,6 +887,7 @@ export function bindDecisionToMarket(decision, market) {
     targetSymbol: String(target.symbol || ""),
     targetSymbolName: String(target.symbolName || ""),
     targetInstrumentId: String(target.instrumentId || ""),
+    boardAssessments,
   };
 }
 

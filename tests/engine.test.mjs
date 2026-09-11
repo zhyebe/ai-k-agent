@@ -80,6 +80,17 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   const unknown = bindDecisionToMarket({ action: "BUY", targetSymbol: "UNKNOWN", riskFlags: [] }, market);
   assert.equal(unknown.action, "HOLD");
   assert.ok(unknown.riskFlags.includes("TARGET_BOARD_NOT_MONITORED"));
+
+  const merged = bindDecisionToMarket({
+    action: "HOLD",
+    boardAssessments: [
+      { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", action: "HOLD", confidence: 0.4, summary: "金尖" },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", confidence: 0.4, summary: "康砖一" },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", confidence: 0.5, summary: "康砖二" },
+    ],
+  }, market);
+  assert.equal(merged.boardAssessments.length, 2);
+  assert.equal(merged.boardAssessments[1].summary, "康砖二");
 });
 
 function insertNorthstarTask(id) {
