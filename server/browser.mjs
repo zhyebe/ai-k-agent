@@ -270,6 +270,27 @@ function extractInstrumentOption(text, fromMenu = false) {
 async function readVisibleInstrumentOptions(page) {
   const raw = await page.evaluate(() => {
     const texts = [];
+    const instruments = [];
+    const seenInstances = new Set();
+    for (const node of document.querySelectorAll("*")) {
+      let instance = node.__vue__;
+      for (let depth = 0; instance && depth < 4; depth += 1, instance = instance.$parent) {
+        if (seenInstances.has(instance)) continue;
+        seenInstances.add(instance);
+        let options = [];
+        try { options = Array.isArray(instance.commodityOptions) ? instance.commodityOptions : []; } catch {}
+        for (const option of options) {
+          if (!option || typeof option !== "object") continue;
+          const rawSymbol = String(option.symbol || "").trim();
+          const symbol = /^[A-Z][A-Z0-9_-]{1,15}$/.test(rawSymbol)
+            ? rawSymbol
+            : [option.commodityCode, option.symbolCode, option.code].map((value) => String(value || "").trim()).find((value) => /^[A-Z][A-Z0-9_-]{1,15}$/.test(value)) || "";
+          const symbolName = String(option.commodityName || option.name || option.unit || option.symbolName || option.label || (!symbol ? rawSymbol : "")).replace(/\s+/g, " ").trim();
+          const instrumentId = String(option.symbolId ?? option.contractId ?? "").trim();
+          if (symbol || symbolName || instrumentId) instruments.push({ symbol, symbolName, instrumentId });
+        }
+      }
+    }
     const selectors = [
       "[role='option']",
       ".el-select-dropdown__item",
@@ -296,15 +317,23 @@ async function readVisibleInstrumentOptions(page) {
       if (selector === "body *" && (!isExplicitProduct || text.length > 80 || (node.children?.length || 0) > 3)) continue;
       if (text) texts.push(text);
     }
-    return texts;
-  }).catch(() => []);
-  return uniquePageInstruments(raw.map((text) => extractInstrumentOption(text, true)).filter(Boolean));
+    return { texts, instruments };
+  }).catch(() => ({ texts: [], instruments: [] }));
+  return uniquePageInstruments([
+    ...(Array.isArray(raw.instruments) ? raw.instruments : []),
+    ...(Array.isArray(raw.texts) ? raw.texts.map((text) => extractInstrumentOption(text, true)).filter(Boolean) : []),
+  ]);
 }
 
 async function openProductMenu(page) {
   const clicked = await page.evaluate(() => {
     const nodes = [...document.querySelectorAll("span, div, p, button, a, h1, h2, h3")];
-    const f10 = nodes.find((el) => String(el.textContent || "").trim() === "F10" && el.children.length === 0);
+    const visible = (el) => {
+      const style = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    };
+    const f10 = nodes.find((el) => String(el.textContent || "").trim() === "F10" && el.children.length === 0 && visible(el));
     const f10Column = f10?.closest(".el-col") || f10?.parentElement;
     const adjacentSelect = f10Column?.previousElementSibling?.querySelector(".el-select, [role='combobox'], .el-input")
       || f10Column?.parentElement?.querySelector(".el-select, [role='combobox']");
