@@ -15,11 +15,13 @@ test("stores and resolves credentials without exposing plaintext", async () => {
     username: "tester@example.com",
     password: "vault-only-password",
     label: "test",
+    ownerUserId: "user_vault_test",
     target: { type: "website", url: "https://demo.exchange.local", adapterId: "northstar-web" },
   });
   assert.equal(stored.accountLabel, "tes***com");
   assert.equal("password" in stored, false);
-  const resolved = vault.getCredential(stored.credentialRef);
+  assert.equal(vault.getCredential(stored.credentialRef), null);
+  const resolved = vault.getCredential(stored.credentialRef, { ownerUserId: "user_vault_test" });
   assert.equal(resolved.username, "tester@example.com");
   assert.equal(resolved.password, "vault-only-password");
   const source = await fs.readFile(path.join(directory, "credentials.vault.json"), "utf8");

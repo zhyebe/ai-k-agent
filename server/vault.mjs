@@ -18,7 +18,7 @@ function ownerAllowed(record, options = {}) {
   const normalized = typeof options === "string" ? { ownerUserId: options } : options || {};
   const ownerUserId = String(normalized.ownerUserId || "");
   const ownerUserIds = Array.isArray(normalized.ownerUserIds) ? normalized.ownerUserIds.map((value) => String(value)) : [];
-  if (!ownerUserId && !ownerUserIds.length) return true;
+  if (!ownerUserId && !ownerUserIds.length) return false;
   const allowed = new Set([ownerUserId, ...ownerUserIds].filter(Boolean));
   const recordOwner = ownerIdOf(record);
   return Boolean(recordOwner && allowed.has(recordOwner));

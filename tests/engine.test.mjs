@@ -373,8 +373,10 @@ test("停止后立即重启时，旧异步轮次不会写回新生命周期", as
 test("大行情快照先完成全量片段 AI 复核，再生成最终方向建议", async () => {
   const taskId = `task_hierarchical_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
+  task.ownerUserId = "user_hierarchical";
   const providerId = `provider_hierarchical_${Date.now()}`;
   const provider = createProvider({ id: providerId, name: "Hierarchical Local", model: "demo", baseUrl: "http://127.0.0.1:1/v1", apiKey: "provider-secret" });
+  provider.ownerUserId = task.ownerUserId;
   state.providers.push(provider);
   const previousThreshold = process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES;
   process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES = "20000";

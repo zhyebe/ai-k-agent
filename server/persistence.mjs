@@ -72,6 +72,7 @@ function createMemoryAdapter() {
     async deleteUserData() {},
     async saveUserSession() {},
     async deleteUserSession() {},
+    async clearTaskAssignments() {},
     async saveAssignment() {},
     async deleteAssignment() {},
     async deleteProvider() {},
@@ -83,7 +84,7 @@ function createMemoryAdapter() {
     async loadAssignments() { return []; },
     async close() {},
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMySqlAdapter() {
@@ -209,6 +210,52 @@ async function createMySqlAdapter() {
     INDEX idx_agent_output_run_seq (run_id, sequence_no),
     INDEX idx_agent_output_task_time (task_id, created_at)
   )`);
+  await pool.query(`
+    UPDATE tasks t
+    JOIN (SELECT MIN(id) AS user_id FROM users HAVING COUNT(*) = 1) only_user
+    SET t.owner_user_id = only_user.user_id
+    WHERE t.owner_user_id = ''
+  `).catch(() => {});
+  await pool.query(`
+    UPDATE connectors c
+    JOIN tasks t ON JSON_UNQUOTE(JSON_EXTRACT(t.target_json, '$.connectorId')) = c.connector_id
+    SET c.owner_user_id = t.owner_user_id
+    WHERE c.owner_user_id = '' AND t.owner_user_id <> ''
+  `).catch(() => {});
+  for (const table of ["providers", "skills", "credentials", "connectors"]) {
+    await pool.query(`
+      UPDATE ${table} item
+      JOIN (SELECT MIN(id) AS user_id FROM users HAVING COUNT(*) = 1) only_user
+      SET item.owner_user_id = only_user.user_id
+      WHERE item.owner_user_id = ''
+    `).catch(() => {});
+  }
+  await pool.query("DELETE item FROM tasks item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
+  await pool.query("DELETE item FROM providers item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
+  await pool.query("DELETE chunk FROM skill_chunks chunk LEFT JOIN skills skill ON skill.id = chunk.skill_id LEFT JOIN users owner_row ON owner_row.id = skill.owner_user_id WHERE skill.id IS NULL OR owner_row.id IS NULL").catch(() => {});
+  await pool.query("DELETE item FROM skills item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
+  await pool.query("DELETE item FROM credentials item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
+  await pool.query("DELETE item FROM connectors item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
+  for (const table of ["analysis_runs", "agent_runs", "agent_output", "orders", "rules", "agent_decisions"]) {
+    await pool.query(`DELETE child FROM ${table} child LEFT JOIN tasks t ON t.id = child.task_id WHERE t.id IS NULL`).catch(() => {});
+  }
+  await pool.query("DELETE risk FROM risk_checks risk LEFT JOIN agent_decisions decision_row ON decision_row.id = risk.decision_id WHERE decision_row.id IS NULL").catch(() => {});
+  const foreignKeys = [
+    "ALTER TABLE tasks ADD CONSTRAINT fk_tasks_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE providers ADD CONSTRAINT fk_providers_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE skills ADD CONSTRAINT fk_skills_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE credentials ADD CONSTRAINT fk_credentials_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE connectors ADD CONSTRAINT fk_connectors_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
+    "ALTER TABLE skill_chunks ADD CONSTRAINT fk_skill_chunks_skill FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE",
+    "ALTER TABLE analysis_runs ADD CONSTRAINT fk_analysis_runs_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE agent_runs ADD CONSTRAINT fk_agent_runs_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE agent_output ADD CONSTRAINT fk_agent_output_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE orders ADD CONSTRAINT fk_orders_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE rules ADD CONSTRAINT fk_rules_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE agent_decisions ADD CONSTRAINT fk_agent_decisions_task FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE",
+    "ALTER TABLE risk_checks ADD CONSTRAINT fk_risk_checks_decision FOREIGN KEY (decision_id) REFERENCES agent_decisions(id) ON DELETE CASCADE",
+  ];
+  for (const statement of foreignKeys) await pool.query(statement).catch(() => {});
   const adapter = {
     mode: "mysql",
     available: true,
@@ -437,6 +484,9 @@ async function createMySqlAdapter() {
     async deleteUserSession(tokenHash) {
       await pool.execute("DELETE FROM user_sessions WHERE token_hash = ?", [tokenHash]);
     },
+    async clearTaskAssignments() {
+      await pool.execute("DELETE FROM task_assignments");
+    },
     async saveAssignment(assignment) {
       await pool.execute("INSERT IGNORE INTO task_assignments (user_id, task_id) VALUES (?, ?)", [assignment.userId, assignment.taskId]);
     },
@@ -538,7 +588,7 @@ async function createMySqlAdapter() {
     },
     close: () => pool.end(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
 }
 
 async function createMongoAdapter() {
@@ -616,6 +666,7 @@ async function createMongoAdapter() {
     },
     saveUserSession: (session) => collections.sessions.replaceOne({ _id: session.tokenHash }, { ...session, _id: session.tokenHash }, { upsert: true }),
     deleteUserSession: (tokenHash) => collections.sessions.deleteOne({ _id: tokenHash }),
+    clearTaskAssignments: () => collections.assignments.deleteMany({}),
     saveAssignment: (assignment) => collections.assignments.replaceOne({ _id: `${assignment.userId}:${assignment.taskId}` }, { ...assignment, _id: `${assignment.userId}:${assignment.taskId}` }, { upsert: true }),
     deleteAssignment: (assignment) => collections.assignments.deleteOne({ _id: `${assignment.userId}:${assignment.taskId}` }),
     async loadState() {
@@ -649,7 +700,7 @@ async function createMongoAdapter() {
     },
     close: () => client.close(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
 }
 
 export async function createPersistence() {

@@ -83,6 +83,7 @@ export function publicProviderList(userId = "") {
 export function findProviderForUser(providerId = "", userId = "") {
   const requestedId = String(providerId || "");
   const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return null;
   if (!requestedId) {
     return state.providers.find((provider) =>
       String(provider.ownerUserId || "") === normalizedUserId && providerIsReady(provider),
@@ -93,8 +94,7 @@ export function findProviderForUser(providerId = "", userId = "") {
     && (String(provider.id) === requestedId || String(provider.providerKey || "") === requestedId),
   );
   if (owned) return owned;
-  if (normalizedUserId) return null;
-  return state.providers.find((provider) => !provider.ownerUserId && String(provider.id) === requestedId) || null;
+  return null;
 }
 
 function providerIsReady(provider) {

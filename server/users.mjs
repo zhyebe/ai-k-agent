@@ -215,6 +215,10 @@ export function removeTaskAssignmentState(taskId) {
   for (const taskIds of assignments.values()) taskIds.delete(key);
 }
 
+export function clearTaskAssignmentState() {
+  assignments.clear();
+}
+
 export function userTokenFromRequest(request) {
   const value = request.headers?.["x-user-token"];
   return Array.isArray(value) ? value[0] : value;

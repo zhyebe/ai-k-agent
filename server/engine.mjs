@@ -191,7 +191,9 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
 export function setTaskProvider(taskId, providerId, userId = "") {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
-  const provider = findProviderForUser(String(providerId || ""), userId);
+  const ownerUserId = String(task.ownerUserId || userId || "");
+  if (!ownerUserId || (userId && String(userId) !== ownerUserId)) throw new Error("TASK_ACCESS_DENIED");
+  const provider = findProviderForUser(String(providerId || ""), ownerUserId);
   if (!provider?.encryptedKey || !provider.baseUrl) throw new Error("PROVIDER_NOT_READY");
   task.providerId = provider.id;
   task.updatedAt = new Date().toISOString();
@@ -1121,7 +1123,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
       data: analysisMarket.analysisLayers,
     });
-    const knowledge = searchKnowledge(`${[market.symbol || task.symbol, ...(market.books || []).map((book) => book.symbol || book.symbolName)].filter(Boolean).join(" ")} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: userId }, 4);
+    const knowledge = searchKnowledge(`${[market.symbol || task.symbol, ...(market.books || []).map((book) => book.symbol || book.symbolName)].filter(Boolean).join(" ")} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: resolvedUserId }, 4);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
@@ -1134,8 +1136,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         ? `使用当前账号已审核的 ${knowledge.length} 条经验切片作为辅助证据`
         : "当前账号没有已发布经验，本轮仅基于实时实盘数据分析",
     });
-    const resolvedProviderId = resolveDefaultProviderId(userId, providerId || task.providerId);
-    const provider = findProviderForUser(resolvedProviderId, userId);
+    const resolvedProviderId = resolveDefaultProviderId(resolvedUserId, providerId || task.providerId);
+    const provider = findProviderForUser(resolvedProviderId, resolvedUserId);
     if (provider?.id) task.providerId = provider.id;
     appendAgentOutput({
       taskId,

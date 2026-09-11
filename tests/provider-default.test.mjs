@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTaskProvider } from "../server/engine.mjs";
-import { publicProviderList, publicState, resolveDefaultProviderId, state } from "../server/store.mjs";
+import { findProviderForUser, publicProviderList, publicState, resolveDefaultProviderId, state } from "../server/store.mjs";
 
 test("analysis uses only the signed-in user's configured providers", () => {
   const original = state.providers;
@@ -16,6 +16,7 @@ test("analysis uses only the signed-in user's configured providers", () => {
     assert.deepEqual(publicProviderList("user_1").map((item) => item.id), ["provider_owned"]);
     assert.deepEqual(publicProviderList("user_2"), []);
     assert.deepEqual(publicProviderList(""), []);
+    assert.equal(findProviderForUser("provider_shared", ""), null);
   } finally {
     state.providers = original;
   }

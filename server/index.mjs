@@ -14,7 +14,7 @@ import { browserLogin, browserLoginStatus } from "./tools.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
-import { assignTask, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, removeTaskAssignmentState, removeUserState, requireUser, revokeUserSession, setUserPersistence, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
+import { clearTaskAssignmentState, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, removeTaskAssignmentState, removeUserState, requireUser, revokeUserSession, setUserPersistence, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 import { attachDesktopAiSocket, callProviderMethod, disconnectDesktopAiUser } from "./desktop-ai.mjs";
 import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
@@ -380,7 +380,6 @@ async function bootstrapDesktopUser() {
   for (const task of state.tasks) {
     task.ownerUserId = user.id;
     await persistTask(task);
-    await assignTask(user.id, task.id);
   }
   addEvent("user_bootstrapped", `已创建桌面用户 ${user.username}`, { userId: user.id });
 }
@@ -395,7 +394,6 @@ async function migrateTenantOwnership() {
       task.ownerUserId = owner;
       await persistTask(task);
     }
-    if (!userIdsForTask(task.id).includes(task.ownerUserId)) await assignTask(task.ownerUserId, task.id);
     const connector = state.connectors.find((item) => item.connectorId === task.target?.connectorId);
     if (connector && !connector.ownerUserId) {
       connector.ownerUserId = task.ownerUserId;
@@ -419,6 +417,8 @@ async function migrateTenantOwnership() {
     const removed = new Set(unownedConnectorIds);
     state.connectors = state.connectors.filter((connector) => !removed.has(connector.connectorId));
   }
+  await persistence.clearTaskAssignments();
+  clearTaskAssignmentState();
 }
 
 if (stateLoadFailed) {
