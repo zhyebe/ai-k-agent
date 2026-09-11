@@ -275,7 +275,18 @@ async function readVisibleInstrumentOptions(page) {
     const pushDetails = (details) => {
       if (!Array.isArray(details)) return;
       for (const option of details) {
-        if (option && typeof option === "object") instruments.push(option);
+        if (!option || typeof option !== "object") continue;
+        instruments.push({
+          symbol: String(option.symbol || ""),
+          commodityCode: String(option.commodityCode || ""),
+          commodityName: String(option.commodityName || ""),
+          symbolId: String(option.symbolId || ""),
+          symbolCode: String(option.symbolCode || ""),
+          code: String(option.code || ""),
+          name: String(option.name || ""),
+          unit: String(option.unit || ""),
+          label: String(option.label || ""),
+        });
       }
     };
     const vueRoot = () => {
