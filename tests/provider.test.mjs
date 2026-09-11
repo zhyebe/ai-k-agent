@@ -103,7 +103,7 @@ test("verification rejects a missing configured model even if model listing work
 });
 
 test("protocol adapters and full URL mode preserve arbitrary endpoints", () => {
-  assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "m", apiFormat: "chat" }), "https://api.example.com/v1/chat/completions");
+  assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "m", apiFormat: "chat" }), "https://api.example.com/chat/completions");
   assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com/v1", model: "m", apiFormat: "anthropic" }), "https://api.example.com/v1/messages");
   assert.equal(providerRequestUrl({ baseUrl: "https://api.example.com", model: "gemini/custom", apiFormat: "gemini" }), "https://api.example.com/v1beta/models/gemini%2Fcustom:generateContent");
   assert.equal(providerRequestUrl({ baseUrl: "https://custom.example.test/infer?mode=fast", model: "m", apiFormat: "chat", fullUrlMode: true }), "https://custom.example.test/infer?mode=fast");
@@ -263,9 +263,10 @@ test("provider reviews a complete market segment and binds the returned review t
   }
 });
 
-test("root gateway URLs use Responses API; /v1 uses Chat Completions", async () => {
-  assert.equal(resolveProviderWireApi({ baseUrl: "https://gateway.example.test" }), "responses");
+test("root gateway URLs use Chat Completions by default; Responses stays explicit", async () => {
+  assert.equal(resolveProviderWireApi({ baseUrl: "https://gateway.example.test" }), "chat");
   assert.equal(resolveProviderWireApi({ baseUrl: "https://api.example.com/v1" }), "chat");
+  assert.equal(resolveProviderWireApi({ baseUrl: "https://gateway.example.test", apiFormat: "responses" }), "responses");
   let requestUrl = "";
   let received;
   const server = http.createServer(async (request, response) => {

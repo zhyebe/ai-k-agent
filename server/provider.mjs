@@ -100,7 +100,10 @@ export function resolveProviderWireApi(provider = {}) {
     if (/:generateContent$/i.test(path)) return "gemini";
     if (/\/chat\/completions$/i.test(path)) return "chat";
     if (/\/responses$/i.test(path)) return "responses";
-    if (path === "/") return "responses";
+    // CC Switch and most OpenAI-compatible presets use an origin-only base URL
+    // for Chat Completions. Responses is opt-in through apiFormat (or an
+    // explicit /responses path) because the root URL is otherwise ambiguous.
+    if (path === "/") return "chat";
     if (path === "/v1" || path.endsWith("/v1")) return "chat";
   } catch {}
   return "chat";
@@ -137,7 +140,7 @@ export function providerRequestUrl(provider) {
     const encodedModel = encodeURIComponent(String(provider.model || "").trim());
     return appendApiPath(base, `/models/${encodedModel}:generateContent`, `/v1beta/models/${encodedModel}:generateContent`);
   }
-  return appendApiPath(base, "/chat/completions", "/v1/chat/completions");
+  return appendApiPath(base, "/chat/completions", "/chat/completions");
 }
 
 function chatCompletionsBody(provider, messages) {
