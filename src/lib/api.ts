@@ -64,6 +64,20 @@ function authHeaders(): Record<string, string> {
 }
 
 const mutatingInFlight = new Map<string, Promise<unknown>>();
+export type RequestOptions = RequestInit & { background?: boolean };
+let pendingRequests = 0;
+const requestListeners = new Set<() => void>();
+
+export const getPendingRequests = () => pendingRequests;
+export function subscribeRequests(listener: () => void) {
+  requestListeners.add(listener);
+  return () => { requestListeners.delete(listener); };
+}
+
+function updatePendingRequests(change: number) {
+  pendingRequests += change;
+  requestListeners.forEach((listener) => listener());
+}
 
 function mutationKey(path: string, options?: RequestInit) {
   const method = String(options?.method || "GET").toUpperCase();
@@ -71,23 +85,30 @@ function mutationKey(path: string, options?: RequestInit) {
   return `${method} ${path} ${typeof options?.body === "string" ? options.body : ""}`;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const key = mutationKey(path, options);
   const existing = key ? mutatingInFlight.get(key) : undefined;
   if (existing) return existing as Promise<T>;
   const headers = new Headers({ ...authHeaders(), ...(options?.headers || {}) });
   if (options?.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json");
+  const { background = false, ...fetchOptions } = options || {};
+  if (!background) updatePendingRequests(1);
   const pending = (async () => {
-    const response = await fetch(`${apiBaseUrl}${path}`, {
-      ...options,
-      headers,
-    });
-    if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
-    return response.json() as Promise<T>;
+    try {
+      const response = await fetch(`${apiBaseUrl}${path}`, {
+        ...fetchOptions,
+        headers,
+      });
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
+      return await response.json() as T;
+    } finally {
+      if (!background) updatePendingRequests(-1);
+    }
   })();
   if (key) {
     mutatingInFlight.set(key, pending);
-    pending.finally(() => { if (mutatingInFlight.get(key) === pending) mutatingInFlight.delete(key); });
+    const cleanup = () => { if (mutatingInFlight.get(key) === pending) mutatingInFlight.delete(key); };
+    void pending.then(cleanup, cleanup);
   }
   return pending;
 }
@@ -136,8 +157,8 @@ export type AdminSummary = {
   persistence: { mode: string; available: boolean; detail?: string };
 };
 
-export async function fetchAdminSummary(): Promise<AdminSummary> {
-  return request<AdminSummary>("/api/admin/summary");
+export async function fetchAdminSummary(options?: RequestOptions): Promise<AdminSummary> {
+  return request<AdminSummary>("/api/admin/summary", options);
 }
 
 export async function createAdminUser(payload: Record<string, unknown>) {
@@ -152,8 +173,8 @@ export async function deleteAdminUser(userId: string, username: string) {
   return request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE", body: JSON.stringify({ username }) });
 }
 
-export async function fetchWorkspace(): Promise<Workspace> {
-  return request<Workspace>("/api/workspace");
+export async function fetchWorkspace(options?: RequestOptions): Promise<Workspace> {
+  return request<Workspace>("/api/workspace", options);
 }
 
 export async function loadWorkspace(): Promise<Workspace> {
@@ -216,9 +237,9 @@ export async function analyzeTask(taskId: string, providerId?: string) {
   return request<{ task: Task; run?: AgentRun; route?: string; output?: AgentOutputLine[]; skipped?: boolean }>(`/api/tasks/${taskId}/analyze`, { method: "POST", body: JSON.stringify(providerId ? { providerId } : {}) });
 }
 
-export async function fetchAgentOutput(taskId: string, runId = "") {
+export async function fetchAgentOutput(taskId: string, runId = "", options?: RequestOptions) {
   const query = runId ? `?runId=${encodeURIComponent(runId)}` : "";
-  return request<{ runs: AgentRun[]; output: AgentOutputLine[] }>(`/api/tasks/${taskId}/agent-output${query}`);
+  return request<{ runs: AgentRun[]; output: AgentOutputLine[] }>(`/api/tasks/${taskId}/agent-output${query}`, options);
 }
 
 export function agentStreamUrl(taskId: string, runId = "") {

@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.3.14",
+  "version": "0.3.15",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
@@ -23,6 +23,7 @@
     "check": "npm run typecheck && npm run build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test",
+    "test:ui": "node --test scripts/loading-ui.mjs",
     "deploy": "bash scripts/deploy.sh",
     "deploy:bootstrap": "bash scripts/bootstrap-server.sh",
     "deploy:docker": "bash scripts/deploy-docker.sh",

@@ -87,6 +87,7 @@ import {
   userSession,
 } from "./lib/api";
 import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import { BusyIcon, DataSkeleton, LoadError, LoadingStatus } from "./components/Loading";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
   { key: "console", label: "任务控制台", icon: LayoutDashboard },
@@ -404,14 +405,14 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
           </div>
           {window.axiomDesktop && <div className="auth-service-settings">
             <div className="auth-service-summary"><span><ServerCog size={14} />服务地址</span><code>{serviceUrl}</code><button type="button" className="text-button" onClick={() => setServiceSettingsOpen((current) => !current)}>{serviceSettingsOpen ? "收起" : "设置"}</button></div>
-            {serviceSettingsOpen && <div className="auth-service-editor"><input value={serviceUrl} onChange={(event) => setServiceUrl(event.target.value)} inputMode="url" aria-label="服务地址" placeholder={DEFAULT_CLOUD_API_URL} /><button type="button" className="button button-small button-secondary" onClick={saveServiceUrl} disabled={serviceBusy}><RefreshCw size={13} />{serviceBusy ? "检查中" : "连接测试"}</button>{serviceMessage && <span className={serviceMessage === "服务已连接" ? "service-ok" : "service-error"}>{serviceMessage}</span>}</div>}
+            {serviceSettingsOpen && <div className="auth-service-editor"><input value={serviceUrl} onChange={(event) => setServiceUrl(event.target.value)} inputMode="url" aria-label="服务地址" placeholder={DEFAULT_CLOUD_API_URL} /><button type="button" className="button button-small button-secondary" onClick={saveServiceUrl} disabled={serviceBusy}><BusyIcon busy={serviceBusy}><RefreshCw size={13} /></BusyIcon>{serviceBusy ? "检查中" : "连接测试"}</button>{serviceMessage && <span className={serviceMessage === "服务已连接" ? "service-ok" : "service-error"}>{serviceMessage}</span>}</div>}
             {isLoopbackApiUrl(serviceUrl) && <div className="login-error auth-error"><AlertTriangle size={14} />当前是本机地址。云端 MySQL 里的 AI Provider 不会出现，请改成生产服务地址后再登录。</div>}
           </div>}
           <form onSubmit={submit} className="auth-form">
             <label className="auth-field"><span>账号</span><span className="auth-input-shell"><UserRound size={16} /><input value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="username" autoFocus placeholder="输入桌面账号" /></span></label>
             <label className="auth-field"><span>密码</span><span className="auth-input-shell"><KeyRound size={16} /><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="输入登录密码" /></span></label>
             {error && <div className="login-error auth-error"><AlertTriangle size={14} />{error}</div>}
-            <button className="button button-primary auth-submit" type="submit" disabled={busy}><LogIn size={15} />{busy ? "验证中" : "登录任务工作台"}</button>
+            <button className="button button-primary auth-submit" type="submit" disabled={busy}><BusyIcon busy={busy}><LogIn size={15} /></BusyIcon>{busy ? "验证中" : "登录任务工作台"}</button>
           </form>
           <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台开通。Provider 密钥加密后写入当前账号的数据空间。</span></div>
         </section>
@@ -436,6 +437,13 @@ function App() {
   const [agentLines, setAgentLines] = useState<AgentOutputLine[]>([]);
   const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [workspaceReady, setWorkspaceReady] = useState(false);
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [agentLoading, setAgentLoading] = useState(true);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentTaskId, setAgentTaskId] = useState("");
+  const [agentRefreshVersion, setAgentRefreshVersion] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState("");
 
   const task = workspace.tasks.find((item) => item.id === selectedTaskId) || workspace.tasks[0] || null;
@@ -475,26 +483,30 @@ function App() {
   useEffect(() => {
     if (!user) return;
     let active = true;
-    fetchWorkspace()
-      .then((next) => {
+    let timer: number;
+    const controller = new AbortController();
+    const refresh = async (background = false) => {
+      setWorkspaceLoading(true);
+      try {
+        const next = await fetchWorkspace({ background, signal: controller.signal });
         if (!active) return;
         setWorkspace(next);
         const nextUser = next.auth?.user;
         if (nextUser) setUser((current) => (sameWorkspaceUser(current, nextUser) ? current : nextUser));
+        setWorkspaceReady(true);
         setLoadError(null);
-      })
-      .catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区加载失败"); });
-    const timer = window.setInterval(() => {
-      fetchWorkspace().then((next) => {
-        if (!active) return;
-        setWorkspace(next);
-        const nextUser = next.auth?.user;
-        if (nextUser) setUser((current) => (sameWorkspaceUser(current, nextUser) ? current : nextUser));
-        setLoadError(null);
-      }).catch((error) => { if (active) setLoadError(error instanceof Error ? error.message : "工作区同步失败"); });
-    }, 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [user?.id]);
+      } catch (error) {
+        if (active) setLoadError(error instanceof Error ? error.message : "工作区加载失败");
+      } finally {
+        if (active) {
+          setWorkspaceLoading(false);
+          timer = window.setTimeout(() => void refresh(true), 5000);
+        }
+      }
+    };
+    void refresh();
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [user?.id, refreshVersion]);
 
   useEffect(() => {
     if (!toast) return;
@@ -514,30 +526,56 @@ function App() {
   useEffect(() => {
     if (!streamOpen || !task) return;
     let closed = false;
-    fetchAgentOutput(task.id).then((result) => {
-      if (closed) return;
+    let receivedStreamData = false;
+    const controller = new AbortController();
+    setAgentTaskId(task.id);
+    setAgentLoading(true);
+    setAgentError(null);
+    setAgentRuns([]);
+    setAgentLines([]);
+    fetchAgentOutput(task.id, "", { signal: controller.signal }).then((result) => {
+      if (closed || receivedStreamData) return;
       setAgentRuns(result.runs);
       setAgentLines(result.output);
-    }).catch((error) => { if (!closed) setLoadError(error instanceof Error ? error.message : "Agent 输出加载失败"); });
+    }).catch((error) => {
+      if (!closed && !receivedStreamData) setAgentError(error instanceof Error ? error.message : "Agent 输出加载失败");
+    }).finally(() => { if (!closed) setAgentLoading(false); });
     const source = new EventSource(agentStreamUrl(task.id));
     source.addEventListener("snapshot", (event) => {
+      if (closed) return;
       const payload = JSON.parse((event as MessageEvent).data) as { runs?: AgentRun[]; output?: AgentOutputLine[] };
+      receivedStreamData = true;
+      setAgentLoading(false);
+      setAgentError(null);
       setAgentRuns(payload.runs || []);
       setAgentLines(payload.output || []);
     });
     source.addEventListener("agent.output", (event) => {
+      if (closed) return;
       const line = JSON.parse((event as MessageEvent).data) as AgentOutputLine;
+      receivedStreamData = true;
+      setAgentLoading(false);
+      setAgentError(null);
       setAgentLines((current) => current.some((item) => item.id === line.id) ? current : [...current, line]);
     });
     source.addEventListener("agent.run.completed", (event) => {
+      if (closed) return;
       const run = JSON.parse((event as MessageEvent).data) as AgentRun;
       setAgentRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
     });
-    return () => { closed = true; source.close(); };
-  }, [streamOpen, task?.id]);
+    return () => { closed = true; controller.abort(); source.close(); };
+  }, [streamOpen, task?.id, agentRefreshVersion]);
 
   const notify = (message: string) => setToast(message);
   const replaceTask = (nextTask: Task) => setWorkspace((current) => ({ ...current, tasks: current.tasks.some((item) => item.id === nextTask.id) ? current.tasks.map((item) => item.id === nextTask.id ? nextTask : item) : [nextTask, ...current.tasks] }));
+
+  function openAgentOutput() {
+    if (!streamOpen) {
+      setAgentLoading(true);
+      setAgentError(null);
+    }
+    setStreamOpen(true);
+  }
 
   async function withBusy(name: string, work: () => Promise<void>) {
     if (busyLock.current) return;
@@ -556,6 +594,11 @@ function App() {
     clearUserToken();
     setUser(null);
     setWorkspace(emptyWorkspace);
+    setWorkspaceReady(false);
+    setWorkspaceLoading(true);
+    setLoadError(null);
+    setStreamOpen(false);
+    setModal(null);
   }
 
   async function handleUpdateAction() {
@@ -702,7 +745,7 @@ function App() {
   async function handleAnalyze() {
     if (!task) return;
     setBusyAction("analyze");
-    setStreamOpen(true);
+    openAgentOutput();
     try {
       const result = await analyzeTask(task.id, selectedProviderId(task, workspace.providers));
       replaceTask(result.task);
@@ -915,7 +958,7 @@ function App() {
     });
   }
 
-  if (!authChecked) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><RefreshCw size={18} /><span>正在验证桌面会话</span></div></div></>;
+  if (!authChecked) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在验证桌面会话" /></div></div></>;
   if (!user) return <UserLogin onSignedIn={setUser} />;
 
   return (
@@ -926,7 +969,7 @@ function App() {
           <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
           <div><strong>axiom</strong><small>agent workspace</small></div>
         </div>
-        <div className="workspace-switcher"><div className="avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><b>{user.displayName || user.username}</b><span>{workspace.tasks.length} 个自建任务</span></div></div>
+        <div className="workspace-switcher"><div className="avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><b>{user.displayName || user.username}</b><span>{workspaceReady ? `${workspace.tasks.length} 个自建任务` : loadError ? "加载失败" : "正在加载任务"}</span></div></div>
         <div className="nav-label">工作区</div>
         <nav className="primary-nav" aria-label="主导航">
           {navItems.map(({ key, label, icon: Icon }) => <button key={key} className={view === key ? "nav-item active" : "nav-item"} onClick={() => { setView(key); setSidebarOpen(false); }}><Icon size={17} /><span>{label}</span>{key === "skills" && workspace.skills.some((skill) => skill.status === "REVIEW") && <em>{workspace.skills.filter((skill) => skill.status === "REVIEW").length}</em>}</button>)}
@@ -950,23 +993,26 @@ function App() {
           <div className="breadcrumbs"><span>Axiom</span><span>/</span><b>{view === "console" ? "任务控制台" : navItems.find((item) => item.key === view)?.label}</b></div>
           <div className="topbar-drag-region" aria-hidden="true" />
           <div className="topbar-actions">
-            <button type="button" className="command-button" onClick={() => task && setStreamOpen(true)} disabled={!task}><Terminal size={15} /><span>查看 Agent 输出流</span></button>
+            <button type="button" className="command-button" onClick={() => task && openAgentOutput()} disabled={!task}><Terminal size={15} /><span>查看 Agent 输出流</span></button>
             <DesktopUpdateControl state={updateState} busy={updateBusy} onAction={handleUpdateAction} />
             <WindowControls />
           </div>
         </header>
 
         <div className="content-scroll">
-          {loadError && <div className="login-error page-error"><AlertTriangle size={14} />{loadError}</div>}
-          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={() => setStreamOpen(true)} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {loadError && <LoadError title={workspaceReady ? "同步失败，当前显示上次数据" : "工作区加载失败"} message={loadError} busy={workspaceLoading} onRetry={() => setRefreshVersion((value) => value + 1)} />}
+          {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
+          {workspaceReady && <>
+          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
           {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
+          </>}
         </div>
       </main>
 
-      {streamOpen && task && <AgentOutputDrawer task={task} lines={agentLines} runs={agentRuns} onClose={() => setStreamOpen(false)} />}
+      {streamOpen && task && <AgentOutputDrawer task={task} lines={agentLines} runs={agentRuns} loading={agentLoading || agentTaskId !== task.id} error={agentError} onRetry={() => setAgentRefreshVersion((value) => value + 1)} onClose={() => setStreamOpen(false)} />}
       {task?.pendingAction && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
         <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
       )}
@@ -984,7 +1030,7 @@ function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, 
   const providers = configuredProviders(workspace.providers);
   const currentProviderId = selectedProviderId(task, workspace.providers);
   return <>
-    <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BarChart3 size={15} />{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><Play size={15} />{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
+    <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BusyIcon busy={busyAction === "analyze"}><BarChart3 size={15} /></BusyIcon>{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
     <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{task.monitoringEnabled && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{task.monitoringEnabled ? (task.status === "MONITORING" ? "Agent 正在持续读取行情，数据变化后启动新一轮分析" : "本轮出现问题，Agent 将继续重试，不会因单轮失败结束") : task.status === "MANUAL_CONTROL" ? "Agent 已释放控制权，账户由人工操作" : (task.decision.riskFlags || []).includes("REAUTH_REQUIRED") ? "登录态失效，需要重新登录" : "当前任务需要你的注意"}</span></div><div className="status-meta"><label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（确认后下单）</option></select></label><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label>{task.mode !== "LIVE" && <label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>自动决策 {task.autoDecisionEnabled ? "开" : "关"}</span></label>}<span><LockKeyhole size={13} />{task.mode === "LIVE" ? "下单 确认后" : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.indexedChunks || 0} 个索引切片</span></div></section>
     <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail="只读" change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change="观察" tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
     <div className="console-grid"><MarketPanel task={task} /><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} onManual={onManual} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} busyAction={busyAction} /></div>
@@ -1152,7 +1198,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
       </div>
       <div className="invalidation"><AlertTriangle size={14} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
-      {pending ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><Check size={15} />{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.mode === "LIVE" ? "出现买卖建议时会弹窗确认，确认后才会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
+      {pending ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.mode === "LIVE" ? "出现买卖建议时会弹窗确认，确认后才会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
     </section>
   );
 }
@@ -1171,7 +1217,7 @@ function EmptyTaskState({ onCreate }: { onCreate: () => void }) {
   return <section className="panel empty-task"><div className="panel-kicker"><Workflow size={14} />还没有任务</div><h2>创建你的第一个任务</h2><p>任务仅属于当前账号。创建后可连接目标网站、托管凭据，并基于实时数据进行分析。</p><button type="button" className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>;
 }
 
-function AgentOutputDrawer({ task, lines, runs, onClose }: { task: Task; lines: AgentOutputLine[]; runs: AgentRun[]; onClose: () => void }) {
+function AgentOutputDrawer({ task, lines, runs, loading, error, onRetry, onClose }: { task: Task; lines: AgentOutputLine[]; runs: AgentRun[]; loading: boolean; error: string | null; onRetry: () => void; onClose: () => void }) {
   const listRef = useRef<HTMLDivElement>(null);
   const current = runs[0];
   useEffect(() => {
@@ -1188,13 +1234,13 @@ function AgentOutputDrawer({ task, lines, runs, onClose }: { task: Task; lines: 
           </div>
           <IconButton label="关闭输出流" onClick={onClose}><X size={17} /></IconButton>
         </div>
-        <div className="agent-run-meta">
+        {!loading && !error && <div className="agent-run-meta">
           <span>{current ? `${displayLabel(current.status, runStatusLabels, "待确认")} · ${displayLabel(current.currentStage, stageLabels, "其他阶段")}` : "等待开始"}</span>
           <span>{current?.finalAction ? displaySuggestion(current.finalAction) : displayAction(task.decision.action)}</span>
           <span>{displayLabel(current?.route, routeLabels, "仅输出建议")}</span>
-        </div>
+        </div>}
         <div className="agent-output-list" ref={listRef}>
-          {lines.length ? lines.map((line) => (
+          {loading ? <DataSkeleton label="正在加载 Agent 输出" layout="output" /> : error ? <LoadError title="Agent 输出加载失败" message={error} onRetry={onRetry} /> : lines.length ? lines.map((line) => (
             <div className={`agent-line level-${line.level}`} key={line.id}>
               <span className="agent-time tabular">{formatTime(line.createdAt)}</span>
               <span className="agent-stage">{displayLabel(line.stage, stageLabels, "其他阶段")}</span>
@@ -1222,7 +1268,7 @@ function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRu
         <div className="overview-title-row"><h2>{task.name}</h2><StatusBadge status={task.status} />{taskIsMonitoring(task) && <span className="monitoring-intent"><Activity size={13} />后台持续监测</span>}</div>
         <p className="overview-description">{task.target.type === "website" ? "网站连接" : "桌面 App 连接"} · {task.target.name} · {task.symbol} · {task.timeframe} · {displayLabel(task.mode, modeLabels, "观察模式")}</p>
         <div className="large-flow">{task.workflow.map((step, index) => <div className={`large-step ${step.status}`} key={step.key}><div className="large-step-number">{step.status === "complete" ? <Check size={15} /> : index + 1}</div><div><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className="large-step-line" />}</div>)}</div>
-        <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><Square size={15} />{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><Play size={15} />{busyAction === "start" ? "检查中" : "运行任务"}</>}</button><button type="button" className="button button-secondary" onClick={onEdit} disabled={busyAction !== null}><Pencil size={14} />编辑</button><button type="button" className="button button-danger" onClick={() => onDelete(task)} disabled={busyAction !== null}><Trash2 size={14} />删除</button></div>
+        <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "运行任务"}</>}</button><button type="button" className="button button-secondary" onClick={onEdit} disabled={busyAction !== null}><Pencil size={14} />编辑</button><button type="button" className="button button-danger" onClick={() => onDelete(task)} disabled={busyAction !== null}><Trash2 size={14} />删除</button></div>
       </div>
       <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>{task.mode === "LIVE" ? "确认后下单" : "观察模式不下单"}</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>{task.mode === "LIVE" ? "分析不会自动下单，必须弹窗确认" : "只给出买卖建议，不提交实盘"}</span></div></div></aside>
       </section>
@@ -1270,10 +1316,10 @@ function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task;
   }
   const connectionReady = ["connected", "readonly_ready", "browser_ready"].includes(task.target.connectionStatus);
   const connectionLabel = displayLabel(task.target.connectionStatus, connectionLabels, "待确认");
-  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "当前账号的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用当前账号凭据" : "写入当前账号的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>凭据绑定当前登录用户。同一网站下次创建任务或重新登录会自动复用，其他账号看不到。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><RefreshCw size={15} />{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
+  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "当前账号的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用当前账号凭据" : "写入当前账号的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>凭据绑定当前登录用户。同一网站下次创建任务或重新登录会自动复用，其他账号看不到。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><BusyIcon busy={busyAction === "connector"}><RefreshCw size={15} /></BusyIcon>{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
 }
 
-function ProviderRow({ provider, selected, onEdit, onTest, onModels, onDelete, onSelect, canSelect, busy, testing, syncing }: { provider: Provider; selected: boolean; onEdit: (provider: Provider) => void; onTest: (provider: Provider) => void; onModels: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; canSelect: boolean; busy: boolean; testing: boolean; syncing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.status === "模型可用" ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured || !canSelect} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onEdit(provider)}><Pencil size={13} />编辑</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onModels(provider)}><Download size={13} />{syncing ? "同步中" : "模型"}</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onTest(provider)}><RefreshCw size={13} />{testing ? "推理中" : "验证"}</button>{provider.owned ? <button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button> : null}</div></div>; }
+function ProviderRow({ provider, selected, onEdit, onTest, onModels, onDelete, onSelect, canSelect, busy, testing, syncing }: { provider: Provider; selected: boolean; onEdit: (provider: Provider) => void; onTest: (provider: Provider) => void; onModels: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; canSelect: boolean; busy: boolean; testing: boolean; syncing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.status === "模型可用" ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured || !canSelect} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onEdit(provider)}><Pencil size={13} />编辑</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onModels(provider)}><BusyIcon busy={syncing}><Download size={13} /></BusyIcon>{syncing ? "同步中" : "模型"}</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onTest(provider)}><BusyIcon busy={testing}><RefreshCw size={13} /></BusyIcon>{testing ? "推理中" : "验证"}</button>{provider.owned ? <button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button> : null}</div></div>; }
 function PermissionItem({ icon, label, status, tone }: { icon: React.ReactNode; label: string; status: string; tone: string }) { return <div className="permission-item"><span className={`permission-icon ${tone}`}>{icon}</span><span>{label}</span><b className={`text-${tone}`}>{status}</b></div>; }
 function EyeIcon() { return <Eye size={16} />; }
 
@@ -1300,7 +1346,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
       setBusy(false);
     }
   }
-  return <ModalShell title="编辑任务" subtitle="修改任务名称和分析参数。运行中的任务请先停止后再编辑。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label><div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><Pencil size={14} />{busy ? "保存中" : "保存修改"}</button></div></form></ModalShell>;
+  return <ModalShell title="编辑任务" subtitle="修改任务名称和分析参数。运行中的任务请先停止后再编辑。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label><div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（弹窗确认后下单）</option></select></label><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div></form></ModalShell>;
 }
 
 function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void>; savedCredentials?: SavedCredential[] }) {
@@ -1352,14 +1398,14 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
         <div className="modal-footnote"><LockKeyhole size={14} />{saved ? "当前账号已有该网站凭据，密码留空会自动复用。Provider 也会按当前用户带出。" : "账号密码绑定当前登录用户，写入服务端加密托管。下次登录同一账号不用再填。"}</div>
         <div className="modal-actions">
           <button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button>
-          <button type="submit" className="button button-primary" disabled={busy}><Plus size={15} />{busy ? "创建中" : "创建任务"}</button>
+          <button type="submit" className="button button-primary" disabled={busy}><BusyIcon busy={busy}><Plus size={15} /></BusyIcon>{busy ? "创建中" : "创建任务"}</button>
         </div>
       </form>
     </ModalShell>
   );
 }
 
-function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><FileText size={15} />{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
+function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><BusyIcon busy={busy}><FileText size={15} /></BusyIcon>{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
 
 function ProviderModal({ provider, onClose, onSave }: { provider: Provider | null; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
   const [name, setName] = useState(provider?.name || "");
@@ -1396,7 +1442,7 @@ function ProviderModal({ provider, onClose, onSave }: { provider: Provider | nul
     }
   }
   const knownModels = [...new Set([model, ...(provider?.models || []), ...models.split(/[\n,]/)].map((item) => item.trim()).filter(Boolean))];
-  return <ModalShell title={provider ? "编辑 AI Provider" : "添加 AI Provider"} subtitle="配置与模型列表绑定当前桌面账号，加密保存在服务端 MySQL；不写入本地配置。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>{fullUrlMode ? "完整模型请求 URL" : "接口根地址"}<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={fullUrlMode ? "https://api.example.com/v1/chat/completions" : "https://api.example.com/v1"} type="url" required disabled={busy} /></label><label className="checkbox-label"><input type="checkbox" checked={fullUrlMode} onChange={(event) => setFullUrlMode(event.target.checked)} disabled={busy} /><span>完整 URL 模式（不自动拼接请求路径）</span></label><div className="form-row"><label>默认模型<input value={model} onChange={(event) => setModel(event.target.value)} list={`provider-models-${provider?.id || "new"}`} placeholder="任意模型 ID" required disabled={busy} /><datalist id={`provider-models-${provider?.id || "new"}`}>{knownModels.map((item) => <option value={item} key={item} />)}</datalist></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select></label></div><label>其他可用模型（可选，每行一个）<textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-chat&#10;deepseek-reasoner" rows={3} disabled={busy} /></label><label>模型列表 URL（可选）<input value={modelsUrl} onChange={(event) => setModelsUrl(event.target.value)} placeholder="留空时根据协议自动推导 /models" type="url" disabled={busy} /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider ? "留空保持原密钥不变" : "加密保存到当前账号"} type="password" autoComplete="new-password" required={!provider} disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />模型 ID 不设白名单。保存后可点「模型」从 Provider 同步列表，点「验证」会调用当前模型完成一次真实推理，不再只检查 /models。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><KeyRound size={15} />{busy ? "保存中" : provider ? "保存修改" : "保存到我的账号"}</button></div></form></ModalShell>;
+  return <ModalShell title={provider ? "编辑 AI Provider" : "添加 AI Provider"} subtitle="配置与模型列表绑定当前桌面账号，加密保存在服务端 MySQL；不写入本地配置。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>{fullUrlMode ? "完整模型请求 URL" : "接口根地址"}<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={fullUrlMode ? "https://api.example.com/v1/chat/completions" : "https://api.example.com/v1"} type="url" required disabled={busy} /></label><label className="checkbox-label"><input type="checkbox" checked={fullUrlMode} onChange={(event) => setFullUrlMode(event.target.checked)} disabled={busy} /><span>完整 URL 模式（不自动拼接请求路径）</span></label><div className="form-row"><label>默认模型<input value={model} onChange={(event) => setModel(event.target.value)} list={`provider-models-${provider?.id || "new"}`} placeholder="任意模型 ID" required disabled={busy} /><datalist id={`provider-models-${provider?.id || "new"}`}>{knownModels.map((item) => <option value={item} key={item} />)}</datalist></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select></label></div><label>其他可用模型（可选，每行一个）<textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-chat&#10;deepseek-reasoner" rows={3} disabled={busy} /></label><label>模型列表 URL（可选）<input value={modelsUrl} onChange={(event) => setModelsUrl(event.target.value)} placeholder="留空时根据协议自动推导 /models" type="url" disabled={busy} /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider ? "留空保持原密钥不变" : "加密保存到当前账号"} type="password" autoComplete="new-password" required={!provider} disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />模型 ID 不设白名单。保存后可点「模型」从 Provider 同步列表，点「验证」会调用当前模型完成一次真实推理，不再只检查 /models。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><BusyIcon busy={busy}><KeyRound size={15} /></BusyIcon>{busy ? "保存中" : provider ? "保存修改" : "保存到我的账号"}</button></div></form></ModalShell>;
 }
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {
@@ -1426,7 +1472,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
         <div className="modal-actions trade-confirm-actions">
           <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction !== null}>暂不下单</button>
           <button type="button" className="button button-primary" onClick={onConfirm} disabled={busyAction !== null}>
-            <Check size={15} />{submitting ? "提交中" : live ? "确认并下单" : `确认${actionText}建议`}
+            <BusyIcon busy={submitting}><Check size={15} /></BusyIcon>{submitting ? "提交中" : live ? "确认并下单" : `确认${actionText}建议`}
           </button>
         </div>
       </section>

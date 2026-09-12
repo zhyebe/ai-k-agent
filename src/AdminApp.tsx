@@ -22,6 +22,7 @@ import {
 import { adminLogin, adminLogout, adminSession, createAdminUser, deleteAdminUser, fetchAdminSummary, getApiBaseUrl, listAdminUsers, updateAdminUser } from "./lib/api";
 import type { AdminAccount, AdminSummary } from "./lib/api";
 import type { EventItem } from "./types";
+import { BusyIcon, DataSkeleton, LoadError, LoadingStatus } from "./components/Loading";
 
 type AdminTab = "overview" | "accounts" | "audit";
 type AdminUser = AdminAccount;
@@ -52,21 +53,37 @@ export default function AdminApp() {
   const [signedIn, setSignedIn] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [summaryReady, setSummaryReady] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
   useEffect(() => {
     if (!signedIn) return;
     let active = true;
-    const refresh = () => {
-      fetchAdminSummary().then((next) => {
+    let timer: number;
+    const controller = new AbortController();
+    const refresh = async (background = false) => {
+      setSummaryLoading(true);
+      try {
+        const next = await fetchAdminSummary({ background, signal: controller.signal });
         if (!active) return;
         setSummary(next);
         setUsers(next.accounts);
-      }).catch(() => {});
+        setSummaryReady(true);
+        setLoadError(null);
+      } catch (error) {
+        if (active) setLoadError(errorMessage(error));
+      } finally {
+        if (active) {
+          setSummaryLoading(false);
+          timer = window.setTimeout(() => void refresh(true), 10000);
+        }
+      }
     };
-    refresh();
-    const timer = window.setInterval(refresh, 10000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [signedIn]);
+    void refresh();
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [signedIn, refreshVersion]);
 
   useEffect(() => {
     let active = true;
@@ -83,26 +100,25 @@ export default function AdminApp() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  if (!authChecked) return <div className="admin-login"><div className="admin-login-panel login-loading"><RefreshCw size={18} /><span>正在验证管理会话</span></div></div>;
+  if (!authChecked) return <div className="admin-login"><div className="admin-login-panel login-loading"><LoadingStatus label="正在验证管理会话" /></div></div>;
   if (!signedIn) return <AdminLogin onSignedIn={() => setSignedIn(true)} />;
 
   const apiAddress = getApiBaseUrl().replace(/^https?:\/\//, "") || `${window.location.hostname}:${window.location.port || "80"}`;
 
-  async function handleRefresh() {
-    try {
-      const next = await fetchAdminSummary();
-      setSummary(next);
-      setUsers(next.accounts);
-      setToast("状态已刷新");
-    } catch (error) {
-      setToast(`刷新失败：${errorMessage(error)}`);
-    }
+  function handleRefresh() {
+    setSummaryLoading(true);
+    setRefreshVersion((value) => value + 1);
   }
 
   async function handleLogout() {
     await adminLogout().catch(() => {});
     window.sessionStorage.removeItem("axiom.admin.token");
     setSignedIn(false);
+    setSummary(emptySummary);
+    setUsers([]);
+    setSummaryReady(false);
+    setSummaryLoading(true);
+    setLoadError(null);
   }
 
   const tabs: Array<{ key: AdminTab; label: string; icon: typeof LayoutDashboard }> = [
@@ -130,9 +146,13 @@ export default function AdminApp() {
         <div className="admin-top-actions"><button type="button" className="admin-icon" onClick={handleLogout} aria-label="退出管理后台" title="退出管理后台"><LogOut size={17} /></button><div className="top-avatar">A</div></div>
       </header>
       <div className="admin-content">
-        {tab === "overview" && <AdminOverview summary={summary} users={users} apiAddress={apiAddress} onAccounts={() => setTab("accounts")} onRefresh={handleRefresh} onAudit={() => setTab("audit")} />}
+        {loadError && <LoadError title={summaryReady ? "同步失败，当前显示上次数据" : "管理数据加载失败"} message={loadError} busy={summaryLoading} onRetry={handleRefresh} />}
+        {!summaryReady && !loadError && <DataSkeleton label="正在加载管理数据" layout={tab === "overview" ? "dashboard" : "list"} />}
+        {summaryReady && <>
+        {tab === "overview" && <AdminOverview summary={summary} users={users} apiAddress={apiAddress} refreshing={summaryLoading} onAccounts={() => setTab("accounts")} onRefresh={handleRefresh} onAudit={() => setTab("audit")} />}
         {tab === "accounts" && <AdminUsers users={users} onChanged={setUsers} onToast={setToast} />}
         {tab === "audit" && <AdminAudit events={summary.events} />}
+        </>}
       </div>
     </main>
     {toast && <div className="toast" role="status"><CheckCircle2 size={16} /><span>{toast}</span><button type="button" aria-label="关闭提示" onClick={() => setToast(null)}><X size={14} /></button></div>}
@@ -155,6 +175,8 @@ function AdminUsers({ users, onChanged, onToast }: { users: AdminUser[]; onChang
   }
 
   async function create() {
+    if (busyAction) return;
+    setBusyAction("create");
     try {
       await createAdminUser({ username, displayName, password });
       setPassword("");
@@ -162,6 +184,8 @@ function AdminUsers({ users, onChanged, onToast }: { users: AdminUser[]; onChang
       onToast(`已创建用户 ${username}`);
     } catch (error) {
       onToast(`创建失败：${errorMessage(error)}`);
+    } finally {
+      setBusyAction(null);
     }
   }
 
@@ -228,7 +252,7 @@ function AdminUsers({ users, onChanged, onToast }: { users: AdminUser[]; onChang
           <label>显示名<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
         </div>
         <label>初始密码<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="至少 8 位" autoComplete="new-password" /></label>
-        <button type="button" className="button button-primary" onClick={create} disabled={password.length < 8}><Plus size={15} />创建用户</button>
+        <button type="button" className="button button-primary" onClick={create} disabled={busyAction !== null || password.length < 8} aria-busy={busyAction === "create"}><BusyIcon busy={busyAction === "create"}><Plus size={15} /></BusyIcon>{busyAction === "create" ? "创建中" : "创建用户"}</button>
       </div>
     </section>
     <section className="admin-panel">
@@ -240,7 +264,7 @@ function AdminUsers({ users, onChanged, onToast }: { users: AdminUser[]; onChang
             <strong>{user.displayName} · {user.username}</strong>
             <span>{accountStatusLabel(user.status)} · {user.status === "ACTIVE" ? "可登录桌面端" : "已锁定，无法登录"}</span>
             {resetUserId === user.id && <div className="admin-password-reset"><input type="password" value={passwordDrafts[user.id] || ""} onChange={(event) => setPasswordDrafts((current) => ({ ...current, [user.id]: event.target.value }))} placeholder="新密码，至少 8 位" aria-label={`为 ${user.username} 设置新密码`} autoComplete="new-password" /><button type="button" className="button button-small button-secondary" onClick={() => resetPassword(user.id)} disabled={busyAction === `password:${user.id}`}><CheckCircle2 size={13} />保存密码</button><button type="button" className="admin-icon" onClick={() => { setResetUserId(null); setPasswordDrafts((current) => ({ ...current, [user.id]: "" })); }} aria-label="取消重置密码" title="取消重置密码"><X size={14} /></button></div>}
-            {deleteUserId === user.id && <div className="admin-delete-confirm"><div><AlertTriangle size={15} /><span>将永久清空该账号的任务、运行记录、Provider、Skill、连接器、凭据和会话，无法恢复。</span></div><label>输入用户名 <b>{user.username}</b> 二次确认<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} autoFocus aria-label={`输入 ${user.username} 确认删除`} /></label><div><button type="button" className="button button-small button-quiet" onClick={() => { setDeleteUserId(null); setDeleteConfirmation(""); }} disabled={busyAction !== null}>取消</button><button type="button" className="button button-small button-danger" onClick={() => remove(user)} disabled={busyAction !== null || deleteConfirmation !== user.username}><Trash2 size={13} />{busyAction === `delete:${user.id}` ? "删除中" : "永久删除"}</button></div></div>}
+            {deleteUserId === user.id && <div className="admin-delete-confirm"><div><AlertTriangle size={15} /><span>将永久清空该账号的任务、运行记录、Provider、Skill、连接器、凭据和会话，无法恢复。</span></div><label>输入用户名 <b>{user.username}</b> 二次确认<input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} autoFocus aria-label={`输入 ${user.username} 确认删除`} /></label><div><button type="button" className="button button-small button-quiet" onClick={() => { setDeleteUserId(null); setDeleteConfirmation(""); }} disabled={busyAction !== null}>取消</button><button type="button" className="button button-small button-danger" onClick={() => remove(user)} disabled={busyAction !== null || deleteConfirmation !== user.username}><BusyIcon busy={busyAction === `delete:${user.id}`}><Trash2 size={13} /></BusyIcon>{busyAction === `delete:${user.id}` ? "删除中" : "永久删除"}</button></div></div>}
           </div>
           <div className="admin-user-actions">
             <button type="button" className="button button-small button-quiet" onClick={() => toggle(user)} disabled={busyAction !== null}>{user.status === "ACTIVE" ? "停用" : "启用"}</button>
@@ -281,18 +305,18 @@ function AdminLogin({ onSignedIn }: { onSignedIn: () => void }) {
   return <div className="admin-login"><div className="admin-login-panel">
     <div className="brand-lockup"><div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div><div><strong>axiom</strong><small>admin console</small></div></div>
     <div className="login-heading"><span className="eyebrow"><span className="eyebrow-line" />后台管理</span><h1>进入账号管理</h1><p>管理桌面端账号授权和账号审计日志。</p></div>
-    <form onSubmit={submit} className="admin-login-form"><label>管理账号<input value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="username" autoFocus /></label><label>密码<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" /></label>{error && <div className="login-error"><AlertTriangle size={14} />{error}</div>}<button className="button button-primary button-full" type="submit" disabled={busy}><LogIn size={15} />{busy ? "验证中" : "登录管理后台"}</button></form>
+    <form onSubmit={submit} className="admin-login-form"><label>管理账号<input value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="username" autoFocus /></label><label>密码<input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" /></label>{error && <div className="login-error"><AlertTriangle size={14} />{error}</div>}<button className="button button-primary button-full" type="submit" disabled={busy}><BusyIcon busy={busy}><LogIn size={15} /></BusyIcon>{busy ? "验证中" : "登录管理后台"}</button></form>
     <div className="login-security"><LockKeyhole size={14} /><span>后台不配置用户端连接器、模型或 Skills；生产环境请替换管理凭据。</span></div>
   </div></div>;
 }
 
-function AdminOverview({ summary, users, apiAddress, onAccounts, onRefresh, onAudit }: { summary: AdminSummary; users: AdminUser[]; apiAddress: string; onAccounts: () => void; onRefresh: () => void | Promise<void>; onAudit: () => void }) {
+function AdminOverview({ summary, users, apiAddress, refreshing, onAccounts, onRefresh, onAudit }: { summary: AdminSummary; users: AdminUser[]; apiAddress: string; refreshing: boolean; onAccounts: () => void; onRefresh: () => void | Promise<void>; onAudit: () => void }) {
   const activeUsers = users.filter((user) => user.status === "ACTIVE").length;
   const disabledUsers = users.filter((user) => user.status === "DISABLED").length;
   const recentUsers = users.slice(0, 6);
   const recentEvents = summary.events.slice(0, 5);
   return <>
-    <section className="admin-page-heading"><div><span className="eyebrow"><span className="eyebrow-line" />平台运维</span><h2>账号授权概览</h2><p>统一管理桌面端账号的使用授权和账号操作记录。</p></div><button type="button" className="button button-secondary" onClick={onRefresh}><RefreshCw size={15} />刷新状态</button></section>
+    <section className="admin-page-heading"><div><span className="eyebrow"><span className="eyebrow-line" />平台运维</span><h2>账号授权概览</h2><p>统一管理桌面端账号的使用授权和账号操作记录。</p></div><button type="button" className="button button-secondary" onClick={onRefresh} disabled={refreshing} aria-busy={refreshing}><BusyIcon busy={refreshing}><RefreshCw size={15} /></BusyIcon>{refreshing ? "刷新中" : "刷新状态"}</button></section>
     <div className="admin-metrics">
       <AdminMetric icon={<UserRound size={17} />} label="桌面账号" value={String(users.length)} tone="green" detail={`${activeUsers} 个启用 · ${disabledUsers} 个停用`} />
       <AdminMetric icon={<Activity size={17} />} label="已启用" value={String(activeUsers)} tone="blue" detail="可登录桌面端使用" />

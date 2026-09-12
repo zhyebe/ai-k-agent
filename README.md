@@ -127,3 +127,12 @@ npm run typecheck
 npm test
 npm run build
 ```
+
+加载状态浏览器回归（慢请求、失败重试、后台刷新和并发请求）：
+
+```bash
+npx playwright install chromium
+npm run test:ui
+```
+
+已有 Chrome 时可直接运行 `PLAYWRIGHT_CHANNEL=chrome npm run test:ui`。
