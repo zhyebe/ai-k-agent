@@ -115,6 +115,33 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   assert.equal(merged.boardAssessments[1].summary, "康砖二");
 });
 
+test("盘口获利概率超过 50% 即生成方向性待确认建议", () => {
+  const market = {
+    symbol: "DGKZ",
+    symbolName: "丹桂康砖（二期）",
+    instrumentId: "537",
+    books: [{ symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", latest: { price: 1200 } }],
+  };
+  const inferred = bindDecisionToMarket({
+    action: "HOLD",
+    profitProbability: 0.55,
+    confidence: 0.55,
+    boardAssessments: [{ symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "BUY", profitProbability: 0.55, confidence: 0.55 }],
+  }, market);
+  assert.equal(inferred.action, "BUY");
+  assert.equal(inferred.profitProbability, 0.55);
+  assert.equal(inferred.targetInstrumentId, "537");
+  assert.equal(inferred.reasonCodes.includes("BOARD_PROFIT_PROBABILITY_THRESHOLD"), true);
+});
+
+test("只有获利概率没有方向时继续保持观望", () => {
+  const decision = bindDecisionToMarket({ action: "HOLD", profitProbability: 0.55, confidence: 0.55 }, {
+    symbol: "DGKZ",
+    books: [{ symbol: "DGKZ", instrumentId: "537" }],
+  });
+  assert.equal(decision.action, "HOLD");
+});
+
 function insertNorthstarTask(id) {
   const task = {
     id,

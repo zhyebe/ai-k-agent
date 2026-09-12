@@ -149,6 +149,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.equal(seen[0].headers["anthropic-version"], "2023-06-01");
     assert.equal(seen[0].body.model, "claude-custom");
     assert.ok(seen[0].body.system);
+    assert.match(seen[0].body.system, /above 0\.50/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
     assert.ok(seen[1].body.systemInstruction);
