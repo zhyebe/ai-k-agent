@@ -117,6 +117,32 @@ test("live confirm submits only after the user confirms", async () => {
   assert.equal(orders[0].action, "BUY");
 });
 
+test("live sell suggestion submits SELL action only after confirmation", async () => {
+  const task = insertTask(`task_live_sell_${Date.now()}`, {
+    mode: "LIVE",
+    decision: { action: "SELL", targetSymbol: "DGJJ", confidence: 0.7, profitProbability: 0.55, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+  });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  assert.equal(task.pendingAction.action, "SELL");
+  assert.equal(task.pendingAction.signalTier, "EXPLORATORY");
+  let submittedInput;
+  const confirmed = await confirmPendingAction(task.id, {
+    source: "manual_confirm",
+    runtime: {
+      submitSuggestionForm: async (input) => {
+        submittedInput = input;
+        return { ok: true, submitted: true, code: "TRADE_SUBMITTED", message: "已提交卖出请求" };
+      },
+    },
+  });
+  assert.equal(submittedInput.action, "SELL");
+  assert.equal(confirmed.pendingAction.status, "CONFIRMED");
+  assert.match(confirmed.pendingAction.message, /提交卖出订单/);
+  const order = state.orders.find((item) => item.taskId === task.id);
+  assert.equal(order.action, "SELL");
+  assert.equal(order.status, "submitted");
+});
+
 test("multi-board pending action uses and submits the selected board price and identity", async () => {
   const task = insertTask(`task_target_board_${Date.now()}`, {
     mode: "LIVE",
