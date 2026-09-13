@@ -163,10 +163,16 @@ export async function browserExtract({ sessionId = "default", selector = "body" 
 export async function browserLogin({ sessionId = "default", credentialRef, adapterId, targetUrl = "", ownerUserId = "", ownerUserIds = [], automationAuthorized = true, submit = true }) {
   if (!credentialRef) return { ok: false, code: "CREDENTIAL_REF_REQUIRED", message: "登录必须引用托管凭据，不能传入明文密码" };
   await initVault();
-  const page = await getBrowserPage(sessionId);
-  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
   const credential = getCredential(credentialRef, { ownerUserId, ownerUserIds });
   if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND", message: "托管凭据不存在或无法解密" };
+  return browserLoginWithCredential({ sessionId, credentialRef, adapterId, targetUrl, submit }, credential);
+}
+
+// Desktop receives an owner-checked credential for this call only; never persist it locally.
+export async function browserLoginWithCredential({ sessionId = "default", credentialRef, adapterId, targetUrl = "", submit = true }, credential) {
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
+  if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND" };
   const resolvedAdapterId = adapterId || credential?.target?.adapterId;
   const adapter = getConnectorAdapter(resolvedAdapterId);
   if (!adapterCanLogin(resolvedAdapterId) || adapter.reviewStatus !== "APPROVED") return { ok: false, code: "LOGIN_FLOW_REQUIRES_TARGET_ADAPTER", message: "目标站点登录字段需要已审核的连接器适配器", adapterId: resolvedAdapterId || "" };

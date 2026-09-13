@@ -395,3 +395,18 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 @media (max-width: 1240px) {
   .task-management-grid { grid-template-columns: 1fr; }
 }
+/* Order-book depth stays aligned when a side has missing levels. */
+.order-book-panel { margin: 0 18px 16px; padding-top: 14px; border-top: 1px solid var(--border-soft); }
+.order-book-heading, .order-book-totals { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.order-book-heading { margin-bottom: 10px; font-size: 12px; }
+.order-book-heading span, .order-book-totals, .order-book-empty { color: var(--muted); font-size: 11px; }
+.order-book-empty { padding: 16px 0; }
+.order-book-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.order-book-table th, .order-book-table td { height: 26px; padding: 3px 2px; text-align: right; overflow-wrap: anywhere; }
+.order-book-table th { color: var(--muted); font-weight: 400; }
+.order-book-table th:nth-child(3), .order-book-table td:nth-child(3) { width: 12%; text-align: center; color: var(--muted); }
+.order-book-table .bid-price { color: var(--green); }
+.order-book-table .ask-price, .order-book-warning, .browser-error { color: var(--red); }
+.order-book-totals { margin-top: 10px; line-height: 1.6; }
+.order-book-totals b { color: var(--text); font-weight: 500; }
+.browser-error { padding: 0 18px; font-size: 12px; overflow-wrap: anywhere; }

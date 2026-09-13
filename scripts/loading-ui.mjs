@@ -63,6 +63,29 @@ async function capture(page, name) {
 }
 
 for (const width of [1440, 390]) {
+  test(`order book shows actual depth and opens the client browser at ${width}px`, async (t) => {
+    const { page, navigate } = await openPage(t, { width });
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    const book = { bids: [{ level: 1, price: 1101.5, volume: 3000 }], asks: [{ level: 1, price: 1102.5, volume: 12500 }], spread: 1, imbalance: -0.6129, bidVolume: 3000, askVolume: 12500, status: "AVAILABLE", observedAt: "2026-09-13T07:00:00.000Z" };
+    const market = { symbol: task.symbol, timeframe: task.timeframe, source: "browser", observedAt: book.observedAt, latest: { price: 1102 }, history: [], ticks: [], timeframes: {}, indicators: {}, dataQuality: "VERIFIED", orderBook: book };
+    task.market = { ...market, books: [{ ...market, books: [] }] };
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    let opened = false;
+    await page.route("**/browser/open", (route) => { opened = true; return route.fulfill({ json: { ok: true } }); });
+    await navigate();
+    await page.getByText("买卖盘口", { exact: true }).waitFor();
+    assert.equal(await page.locator(".order-book-table tbody tr").count(), 5);
+    assert.match(await page.locator(".order-book-table").innerText(), /1,?101\.50/);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.getByRole("button", { name: "打开客户端交易浏览器" }).click();
+    await page.getByRole("button", { name: "打开客户端交易浏览器" }).waitFor();
+    assert.equal(opened, true);
+    await capture(page, `order-book-${width}`);
+  });
+}
+
+for (const width of [1440, 390]) {
   test(`workspace skeleton replaces empty states at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width });
     const gate = deferred();

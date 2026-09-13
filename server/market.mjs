@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import NodeWebSocket from "ws";
+import { orderBookFingerprint, summarizeOrderBook } from "./order-book.mjs";
 import { collectAllPageBoards, listPageBoardInstruments, openBrowserPage, readVisiblePage } from "./browser.mjs";
 import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, normalizePageInstrument, parseHaohanPageSnapshot, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
@@ -283,7 +285,8 @@ function send(socket, payload) {
 function openSocket(url, timeoutMs) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const socket = new WebSocket(url);
+    const Socket = globalThis.WebSocket || NodeWebSocket;
+    const socket = new Socket(url);
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -524,6 +527,7 @@ function bookFingerprint(book) {
     symbolName: book?.symbolName,
     instrumentId: book?.instrumentId,
     quote: book?.quote || book?.latest,
+    orderBook: orderBookFingerprint(book?.orderBook || book?.pageView?.orderBook),
     changePct: book?.changePct,
     trend: book?.trend,
     dataQuality: book?.dataQuality || "",
@@ -559,6 +563,7 @@ function serializeBoardBook(market) {
     observedAt: market.observedAt || null,
     dataAt: market.dataAt || null,
     pageView: market.pageView || null,
+    orderBook: market.orderBook || summarizeOrderBook(market.pageView?.orderBook),
   };
 }
 
@@ -725,7 +730,7 @@ function mergeBoardBook({ instrument, apiBook, pageBook, account, pageView, page
       timeframes,
       quote: mergedQuote,
       account,
-      pageView: pageBook?.pageView || pageView,
+      pageView: pageBook?.pageView || { account, orderBook: null },
       page,
       source: apiBook.source || "haohan-readonly-api",
       books: [],
@@ -800,6 +805,7 @@ export function marketDataFingerprint(market = {}) {
     history: market.history || [],
     timeframes,
     account: market.account || null,
+    orderBook: orderBookFingerprint(market.orderBook || market.pageView?.orderBook),
     changePct: market.changePct,
     dataQuality: market.dataQuality || "",
     missingFields: market.missingFields || [],
@@ -935,6 +941,7 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
     marketClosed: Boolean(marketClosed),
     account: account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
     pageView: pageView || page?.view || null,
+    orderBook: summarizeOrderBook(pageView?.orderBook),
     historyCount: primary.historyCount,
     completeHistoryCount: primary.completeHistoryCount,
     books: [],
@@ -1271,7 +1278,7 @@ export async function observeMarket(task, connector) {
   const enriched = enrichReadOnlyMarket({
     ...primary,
     page,
-    pageView: parsed.pageView || null,
+    pageView: primary.pageView || null,
     account: parsed.account,
     books: mergedBooks,
     raw: { ...(primary.raw || {}), page, bookCount: mergedBooks.length, boards: apiBoard.targets },

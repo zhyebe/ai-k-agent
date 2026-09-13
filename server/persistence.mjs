@@ -506,7 +506,7 @@ async function createMySqlAdapter() {
       const [eventRows] = await pool.query(recentRowsSql("audit_logs", "event_id", "created_at", 80, "t.payload_json")).catch(() => [[]]);
       const [userRows] = await pool.query("SELECT * FROM users");
       const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments");
-      const [analysisRows] = await pool.query(recentRowsSql("analysis_runs", "id", "created_at", 200)).catch(() => [[]]);
+      const [analysisRows] = await pool.query(recentRowsSql("analysis_runs", "id", "created_at", 20)).catch(() => [[]]);
       const [agentRunRows] = await pool.query(recentRowsSql("agent_runs", "id", "started_at", 100)).catch(() => [[]]);
       const [agentOutputRows] = await pool.query(recentRowsSql("agent_output", "id", "created_at", 1200)).catch(() => [[]]);
       taskRows.sort(byDesc("updated_at"));

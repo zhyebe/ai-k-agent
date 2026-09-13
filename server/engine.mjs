@@ -1,9 +1,9 @@
 import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-ai.mjs";
-import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
-import { searchKnowledge } from "./rag.mjs";
+import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
+import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
+import { approvedKnowledgeForAnalysis } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
-import { blockingMissingFields, observeMarket, openMarketBrowser } from "./market.mjs";
-import { browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm } from "./tools.mjs";
+import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
@@ -43,15 +43,16 @@ function assertCycleCurrent(task, generation) {
 function resolveRuntime(overrides = {}, { userId = "" } = {}) {
   const use = (name, fallback) => typeof overrides?.[name] === "function" ? overrides[name] : fallback;
   return {
-    openMarketBrowser: use("openMarketBrowser", openMarketBrowser),
-    browserLoginStatus: use("browserLoginStatus", browserLoginStatus),
-    browserLogin: use("browserLogin", browserLogin),
-    observeMarket: use("observeMarket", observeMarket),
+    openMarketBrowser: use("openMarketBrowser", (task, connector) => callBrowserMethod("openMarketBrowser", userId, { task, connector })),
+    browserLoginStatus: use("browserLoginStatus", (input) => callBrowserMethod("browserLoginStatus", userId, input)),
+    browserLogin: use("browserLogin", (input) => callBrowserMethod("browserLogin", userId, input)),
+    observeMarket: use("observeMarket", (task, connector) => callBrowserMethod("observeMarket", userId, { task, connector })),
     requestDecision: use("requestDecision", (provider, context, options) => callProviderMethod("requestDecision", userId, { provider, context, options })),
+    requestMarketAnalysis: use("requestMarketAnalysis", (provider, context, options) => callProviderMethod("requestMarketAnalysis", userId, { provider, context, options, channel: "browser" })),
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
-    fillSuggestionForm: use("fillSuggestionForm", fillSuggestionForm),
-    submitSuggestionForm: use("submitSuggestionForm", submitSuggestionForm),
+    fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
+    submitSuggestionForm: use("submitSuggestionForm", (input) => callBrowserMethod("submitSuggestionForm", userId, input)),
   };
 }
 
@@ -315,7 +316,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   try {
     clearPendingActionTimer(task.id);
     const actionLabel = task.pendingAction.action === "BUY" ? "买入" : "卖出";
-    const tools = resolveRuntime(runtime);
+    const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "" });
     if (shouldSubmitLiveOrder(task, source)) {
       task.pendingAction = {
         ...task.pendingAction,
@@ -326,6 +327,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       const sessionId = task.target?.browserSessionId || `task:${task.id}`;
       const submitted = await tools.submitSuggestionForm({
         sessionId,
+        confirmationId: task.pendingAction.id,
         action: task.pendingAction.action,
         price: task.pendingAction.suggestedPrice,
         quantity: task.pendingAction.suggestedQty,
@@ -854,6 +856,7 @@ function toTaskMarket(market) {
     timeline: market.timeline || { kind: "timeline", ticks: Array.isArray(market.ticks) ? market.ticks : [], tickCount: Array.isArray(market.ticks) ? market.ticks.length : 0 },
     page: market.page || null,
     pageView: market.pageView || market.page?.view || null,
+    orderBook: market.orderBook || null,
     raw: market.raw || null,
     account: market.account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
     books: Array.isArray(market.books) ? market.books : [],
@@ -1009,6 +1012,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       boardCoverage: layered.boardCoverage || null,
       page: layered.page ?? task.market.page,
       pageView: layered.pageView ?? task.market.pageView ?? task.market.page?.view ?? null,
+      orderBook: layered.orderBook || null,
       raw: layered.raw,
     },
     account: {
@@ -1245,8 +1249,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const automaticRuleFailures = failedAutomaticRules(task);
 
     logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
-    const analysisMarket = buildLayeredAnalysisMarket(task.market);
-    appendAgentOutput({
+    const clientAnalysis = desktopBrowserRequired();
+    let analysisMarket = clientAnalysis ? null : buildLayeredAnalysisMarket(compactCollectedMarket(task.market));
+    if (analysisMarket) appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
@@ -1254,7 +1259,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
       data: analysisMarket.analysisLayers,
     });
-    const knowledge = searchKnowledge(`${[market.symbol || task.symbol, ...(market.books || []).map((book) => book.symbol || book.symbolName)].filter(Boolean).join(" ")} ${task.timeframe} ${market.trend} 趋势 突破 回撤 红线`, { ownerUserId: resolvedUserId }, 4);
+    const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
@@ -1264,7 +1269,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       runId: run.id,
       stage: "analyze",
       message: knowledge.length
-        ? `使用当前账号已审核的 ${knowledge.length} 条经验切片作为辅助证据`
+        ? `直接发送当前账号已审核的 ${knowledge.length} 条完整经验，与 K 线、各盘买卖档位一起分析`
         : "当前账号没有已发布经验，本轮仅基于实时实盘数据分析",
     });
     const resolvedProviderId = resolveDefaultProviderId(resolvedUserId, providerId || task.providerId);
@@ -1280,11 +1285,28 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     });
     let decision;
     let providerSucceeded = true;
-    let analysisCoverage = directAnalysisCoverage(analysisMarket);
+    let analysisCoverage = clientAnalysis ? { mode: "direct_client", complete: false, totalSegments: 1, reviewedSegments: 0, failedSegments: [] } : directAnalysisCoverage(analysisMarket);
     let segmentReviews = [];
     try {
       assertCurrent();
-      if (provider?.encryptedKey && shouldUseSegmentedAnalysis(analysisMarket)) {
+      if (clientAnalysis) {
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位和完整经验交给 AI 分析" });
+        const result = await runtime.requestMarketAnalysis(provider, {
+          marketRef: { sessionId: task.target.browserSessionId || `task:${task.id}`, fingerprint: task.market.fingerprint },
+          account: { ...task.metrics, ...(market.account || {}) },
+          rules: task.rules,
+          evidence,
+          evidenceIds: evidence.map((item) => item.evidenceId),
+          previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
+          conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },
+        }, { timeoutMs: 120000 });
+        assertCurrent();
+        decision = result.decision;
+        analysisMarket = result.market;
+        analysisCoverage = result.coverage;
+        task.analysisCoverage = analysisCoverage;
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: `客户端分析完成：${analysisCoverage.bookCount} 个盘、${analysisCoverage.totalKlineRows} 根 K 线、${knowledge.length} 条经验`, data: analysisCoverage });
+      } else if (provider?.encryptedKey && shouldUseSegmentedAnalysis(analysisMarket)) {
         const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: analysisMarket, evidence, assertCurrent });
         assertCurrent();
         analysisCoverage = segmented.coverage;
@@ -1331,7 +1353,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         }
       } else {
         task.analysisCoverage = analysisCoverage;
-        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger, analysisMarket), { timeoutMs: 45000 });
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: `直接分析 ${analysisMarket.books?.length || 1} 个盘的 K 线、盘口和已审核经验`, data: { contextBytes: estimateMarketContextBytes(analysisMarket), knowledgeCount: knowledge.length } });
+        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger, analysisMarket), { timeoutMs: 120000 });
         assertCurrent();
       }
       providerSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].some((code) => (decision.riskFlags || []).includes(code));
@@ -1457,7 +1480,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       taskId,
       round: task.monitoringRound,
       trigger,
-      market: task.market,
+      market: analysisMarket || compactCollectedMarket(task.market),
       evidence,
       decision: task.decision,
       coverage: analysisCoverage,
@@ -1466,7 +1489,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       createdAt: new Date().toISOString(),
     };
     state.analyses.unshift(analysis);
-    if (state.analyses.length > 200) state.analyses.length = 200;
+    if (state.analyses.length > 20) state.analyses.length = 20;
     persistAnalysis(analysis);
     finishAgentRun(run.id, { status: "completed", action: task.decision.action, route, code: execution.code || route });
     if (monitoringIntent(task)) setNextPoll(task);

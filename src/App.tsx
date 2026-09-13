@@ -68,6 +68,7 @@ import {
   fetchWorkspace,
   getApiBaseUrl,
   getUserToken,
+  openTaskBrowser,
   clearUserToken,
   saveProvider,
   saveSkill,
@@ -1071,6 +1072,19 @@ function CandleChart({ candles }: { candles: MarketCandle[] }) {
 }
 
 function MarketPanel({ task }: { task: Task }) {
+  const [browserOpening, setBrowserOpening] = useState(false);
+  const [browserError, setBrowserError] = useState("");
+  const showBrowser = async () => {
+    setBrowserOpening(true);
+    setBrowserError("");
+    try {
+      const result = await openTaskBrowser(task.id);
+      if (!result.ok) throw new Error(result.message || result.code || "浏览器未就绪");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setBrowserError(message === "DESKTOP_BROWSER_UPDATE_REQUIRED" ? "请更新桌面端后打开交易浏览器" : message === "DESKTOP_BROWSER_OFFLINE" ? "请先连接桌面端" : message);
+    } finally { setBrowserOpening(false); }
+  };
   const market = task.market;
   const books = market?.books?.length ? market.books : market ? [market] : [];
   const missingBoards = market?.boardCoverage?.missing || [];
@@ -1095,6 +1109,7 @@ function MarketPanel({ task }: { task: Task }) {
       <div className="panel-header">
         <div><div className="panel-kicker"><BarChart3 size={14} />市场状态</div><h2>{title}</h2></div>
         <div className="market-header-actions">
+          <button type="button" className="icon-button" title="打开客户端交易浏览器" aria-label="打开客户端交易浏览器" disabled={browserOpening} onClick={showBrowser}><BusyIcon busy={browserOpening}><Globe2 size={16} /></BusyIcon></button>
           <span className={`market-quality ${quality === "VERIFIED" && market?.boardCoverage?.complete !== false ? "quality-ok" : "quality-limited"}`}>{market?.boardCoverage?.complete === false ? "盘口覆盖不完整" : quality === "VERIFIED" ? "数据完整" : "数据受限"}</span>
           <span className="market-meta">{selectedBook?.source || market?.source || "未采集"}</span>
         </div>
@@ -1116,6 +1131,7 @@ function MarketPanel({ task }: { task: Task }) {
         {timeframeKeys.map((key) => <button type="button" role="tab" aria-selected={selectedTimeframe === key} className={selectedTimeframe === key ? "active" : ""} key={key} onClick={() => setSelectedTimeframe(key)}>{timeframes[key]?.label || timeframeLabels[key] || key}</button>)}
       </div>
       <CandleChart candles={candles} />
+      {browserError && <p role="alert" className="browser-error">{browserError}</p>}
       <div className="chart-summary">
         <span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span>
         <span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span>
@@ -1128,8 +1144,22 @@ function MarketPanel({ task }: { task: Task }) {
         <Indicator label="ATR" value={marketNumber(indicatorNumber("atr14"))} tone="muted" />
         <Indicator label="量能比" value={indicatorNumber("volumeRatio") === null ? "--" : `${marketNumber(indicatorNumber("volumeRatio"), 2)}x`} tone="green" />
       </div>
+      <OrderBookPanel market={selectedBook} />
     </section>
   );
+}
+
+function OrderBookPanel({ market }: { market: MarketSnapshot | null | undefined }) {
+  const book = market?.orderBook;
+  const rows = Array.from({ length: Math.max(5, book?.asks.length || 0, book?.bids.length || 0) }, (_, index) => ({ bid: book?.bids[index], ask: book?.asks[index] }));
+  return <div className="order-book-panel">
+    <div className="order-book-heading"><strong>买卖盘口</strong><span>{book?.observedAt ? formatTime(book.observedAt) : "尚未采集"}</span></div>
+    {!book || book.status === "MISSING" ? <div className="order-book-empty">暂无可用买卖档位</div> : <>
+      {book.status !== "AVAILABLE" && <p className="order-book-warning">{book.status === "PARTIAL" ? "盘口数据不完整" : "买卖报价交叉"}</p>}
+      <table className="order-book-table"><thead><tr><th>买量</th><th>买价</th><th>档位</th><th>卖价</th><th>卖量</th></tr></thead><tbody>{rows.map(({ bid, ask }, index) => <tr key={index}><td>{marketNumber(bid?.volume, 0)}</td><td className="bid-price">{marketNumber(bid?.price, 2)}</td><td>{index + 1}</td><td className="ask-price">{marketNumber(ask?.price, 2)}</td><td>{marketNumber(ask?.volume, 0)}</td></tr>)}</tbody></table>
+      <div className="order-book-totals"><span>价差 <b>{marketNumber(book.spread, 2)}</b></span><span>挂单失衡 <b>{book.imbalance === null ? "--" : `${(book.imbalance * 100).toFixed(1)}%`}</b></span><span>买 / 卖量 <b>{marketNumber(book.bidVolume, 0)} / {marketNumber(book.askVolume, 0)}</b></span></div>
+    </>}
+  </div>;
 }
 
 function Indicator({ label, value, tone }: { label: string; value: string; tone: string }) { return <div className="indicator"><span><i className={`indicator-dot ${tone}`} />{label}</span><b className="tabular">{value}</b></div>; }

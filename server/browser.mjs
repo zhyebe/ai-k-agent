@@ -9,6 +9,12 @@ const sessions = new Map();
 const sessionLaunches = new Map();
 const PROFILE_LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
 let browserClosing = false;
+let sessionFactory = null;
+
+export function setBrowserSessionFactory(factory) {
+  sessionFactory = factory;
+  browserClosing = false;
+}
 
 function configuredValues(name, fallback) {
   const value = process.env[name];
@@ -111,7 +117,9 @@ export function cleanupStaleChromiumProfileLocks(
 }
 
 async function createSession(sessionId) {
+  if (process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1") throw new Error("SERVER_BROWSER_DISABLED");
   if (browserClosing) throw new Error("浏览器服务正在关闭");
+  if (sessionFactory) return sessionFactory(sessionId);
   const { chromium } = await import("playwright");
   const cdpUrl = String(process.env.BROWSER_CDP_URL || "").trim();
   if (cdpUrl) {
@@ -587,6 +595,10 @@ export async function closeBrowserSession(sessionId = "default") {
   const session = sessions.get(key);
   if (!session) return false;
   sessions.delete(key);
+  if (session.close) {
+    await session.close();
+    return true;
+  }
   try { await session.context.close(); } catch {}
   if (session.ownsBrowser && session.browser) {
     try { await session.browser.close(); } catch {}

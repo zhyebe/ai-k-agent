@@ -472,15 +472,16 @@ function parseHaohanPageQuote(visibleText) {
   };
 }
 
-const ORDER_BOOK_LEVELS = Object.freeze({ "①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6 });
+const ORDER_BOOK_LEVELS = Object.freeze({ "①": 1, "②": 2, "③": 3, "④": 4, "⑤": 5, "⑥": 6, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6 });
 
 export function parseHaohanOrderBook(visibleText) {
   const asks = [];
   const bids = [];
-  const pattern = /(销售|采购)([①②③④⑤⑥1-6])\s+(\d+(?:\.\d+)?)\s+(\d+)/g;
+  const pattern = /(销售|采购|卖|买)\s*([①②③④⑤⑥一二三四五六1-6])\s*[:：]?\s+([\d,]+(?:\.\d+)?)\s+([\d,]+(?:\.\d+)?)\s*(万|亿)?/g;
   for (const match of String(visibleText || "").matchAll(pattern)) {
-    const level = { level: ORDER_BOOK_LEVELS[match[2]] || Number(match[2]), price: Number(match[3]), volume: Number(match[4]) };
-    if (match[1] === "销售") asks.push(level);
+    const level = { level: ORDER_BOOK_LEVELS[match[2]] || Number(match[2]), price: Number(match[3].replaceAll(",", "")), volume: Number(match[4].replaceAll(",", "")) * (match[5] === "万" ? 10000 : match[5] === "亿" ? 100000000 : 1) };
+    if (!(level.price > 0) || !Number.isFinite(level.volume) || level.volume < 0) continue;
+    if (match[1] === "销售" || match[1] === "卖") asks.push(level);
     else bids.push(level);
   }
   asks.sort((left, right) => left.level - right.level);
@@ -514,7 +515,7 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   }
   const account = parseHaohanAccount(visibleText);
   const pageQuote = parseHaohanPageQuote(visibleText);
-  const orderBook = parseHaohanOrderBook(visibleText);
+  const orderBook = { ...parseHaohanOrderBook(visibleText), observedAt: new Date(capturedAt).toISOString(), source: "browser-dom" };
   const pageView = { quote: pageQuote, orderBook, account };
   if (instrument.symbol && symbol && normalize(instrument.symbol) !== normalize(symbol)) {
     return {

@@ -14,8 +14,8 @@ flowchart LR
   desktop["Axiom Agent 桌面端"] --> nginx
   nginx --> api["Node API :8787"]
   api --> db["MySQL 或 MongoDB"]
-  api --> chrome["本机 Chrome / Playwright"]
-  api --> llm["AI Provider"]
+  desktop --> chrome["客户端内嵌 Electron 浏览器"]
+  desktop --> llm["AI Provider"]
   chrome --> haohan["浩瀚数贸只读页"]
 ```
 
@@ -23,7 +23,9 @@ flowchart LR
 
 - **一个 API 实例 + 一个数据库**。不要让后台和桌面各自起内存服务。
 - 打包桌面端**默认不内嵌 API**。登录页填写生产 API 地址。
-- 行情采集、登录填充、Playwright 都跑在 **API 进程所在机器**，不跑在操作员本机浏览器里。
+- 浏览器、登录、盘口及 K 线采集、指标计算、行情分层和 AI 请求全部运行在客户端。服务端只管理账号、数据、调度与确认状态。
+- 生产强制 `AXIOM_REQUIRE_DESKTOP_BROWSER=1` 和 `AXIOM_REQUIRE_DESKTOP_AI=1`；桌面离线或版本过旧会明确报错，不会回退到服务端浏览器。
+- 已审核经验全文直接发送给 AI，生产不建 RAG 切片索引。客户端每轮只请求一次模型，超过上下文上限明确报错。
 - `AXIOM_EMBEDDED_API=1` 只允许一次性本机演示，不能用于多人生产。
 
 | 角色 | 入口 | 说明 |
@@ -46,7 +48,7 @@ scripts/deploy-docker.sh --host <公网IP> --internal-host <内网IP> --password
 scripts/setup-git-deploy.sh
 ```
 
-之后发 GitHub Release，或在 Actions 里手动跑 **Deploy API**，服务器会 `git fetch` 指定 ref 再 `docker compose up --build`。数据库卷和 `.env` 不会被覆盖。本地也可 `scripts/update-server.sh main`。
+日常发布走 GitHub Release，或在 Actions 手动跑 **Deploy API**。Actions 构建镜像并传到服务器；服务器先停止旧 API 释放浏览器进程，再加载镜像并以 `--no-build --no-deps` 更新 API 和后台。数据库容器、卷及 `.env` 不变。不要在生产执行旧版 bootstrap / 本地数据导入脚本。
 
 ## 2. 机器要求
 
@@ -55,9 +57,9 @@ scripts/setup-git-deploy.sh
 | 运行时 | Node.js 20+ |
 | 数据库 | MySQL 8（推荐）或 MongoDB 6+ |
 | 反向代理 | Nginx 或等价，终止 TLS |
-| 浏览器 | API 主机安装 Google Chrome，或 `npx playwright install chromium` |
-| 出网 | `smyw.haohandahan.cn`、`smyt.haohandahan.cn`、已配置的 Provider 地址 |
-| 磁盘 | `AXIOM_DATA_DIR` 可写（浏览器配置、Vault、本地密钥文件） |
+| 浏览器 | 客户端内置 Electron Chromium；API 镜像不安装 Chromium |
+| 出网 | 客户端访问目标交易站和 Provider；服务端访问数据库与更新源 |
+| 磁盘 | 服务端 `AXIOM_DATA_DIR` 保存 Vault、密钥；浏览器配置只在客户端 |
 
 生产不要用 `DB_MODE=memory`，不要设 `ALLOW_MEMORY_FALLBACK=1`。
 
@@ -84,7 +86,9 @@ cp .env.example .env
 | `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` / `DESKTOP_DISPLAY_NAME` | 可选 | 首次启动创建桌面用户并分配已有任务 |
 | `CORS_ALLOWED_ORIGINS` | **后台页面源** | 逗号分隔，例如 `https://ops.example.com`。Electron 的 `null` 已内置 |
 | `BROWSER_ALLOWED_DOMAINS` | 含目标域名 | 默认需含 `smyw.haohandahan.cn` |
-| `AXIOM_DATA_DIR` | 固定数据盘路径 | Playwright 配置、Vault |
+| `AXIOM_DATA_DIR` | 固定数据盘路径 | 服务端 Vault 与密钥 |
+| `AXIOM_REQUIRE_DESKTOP_BROWSER` | `1` | 禁止服务端启动浏览器，采集与分析仅由桌面执行 |
+| `AXIOM_REQUIRE_DESKTOP_AI` | `1` | 模型 HTTP 请求仅由桌面发出 |
 | `AXIOM_SECRET_FILE` / `AXIOM_VAULT_FILE` | 建议放数据盘 | 本地密钥与凭据文件 |
 | `HAOHAN_ANALYSIS_TIMEFRAMES` | `1m,1h,1d,1mo` | 只读采集周期 |
 | `HAOHAN_KLINE_COUNT` | `2000` | 单周期请求上限 |
@@ -252,16 +256,17 @@ CORS_ALLOWED_ORIGINS=https://ops.example.com
 
 ## 8. 浏览器与目标站
 
-API 主机必须能打开浩瀚数贸：
+客户端必须能访问浩瀚数贸，内置适配器只允许已支持的目标域名：
 
 ```dotenv
 BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
 ```
 
-- 默认用持久化 Chrome / Playwright 配置，目录在 `AXIOM_DATA_DIR/browser-profiles`。
-- 重启 API 后登录态可能失效；分析若回到 `#/login` 会用托管凭据自动填登录，**不会提交买卖表单**。
-- 需要跟已打开的 Chrome 共用会话时，设 `BROWSER_CDP_URL`。
-- 无头环境建议安装系统 Chrome，并保证沙箱权限足够。
+- 浏览器配置保存在客户端 Electron `userData/browser-profiles`，按服务地址、账号和任务隔离。
+- 托管凭据经过服务端账号校验，只在本次桌面登录调用中使用，不写入客户端凭据库。
+- 客户端退出时关闭浏览器；断线时中止在途请求，WebSocket 心跳负责检测失效连接。
+- 用户点击市场栏浏览器图标可打开交易窗口。实盘买入和卖出仍必须确认后才提交。
+- 各盘买卖档位、价差、挂单量与失衡指标和 K 线一起分析；副盘盘口变化也会触发新一轮分析。
 
 公开 K 线接口只有交易所已返回的根数。页面上的分时图是**当天走势**，不是多年日线；没有的周期就如实缺失，不编历史。
 
@@ -321,7 +326,7 @@ npm run release:win
 | `MYSQL_CONNECTION_FAILED` | 检查 `MYSQL_URL`、库是否已建、`ALLOW_MEMORY_FALLBACK` 是否为 0 |
 | 后台能开、桌面连不上 | 服务地址填公网 `http://IP` 或 `http://IP:8787`，不要带 `/api`；安全组放行 80 和 8787；`CORS_ALLOWED_HOSTS` 含该 IP |
 | 健康检查 persistence 不可用 | 进程连的不是你以为的那套库，或权限不足 |
-| 分析提示重新登录 | 在桌面连接器确认凭据，或在 API 主机上重新打开目标页 |
+| 分析提示重新登录 | 在桌面连接器确认凭据，或打开客户端交易浏览器完成登录 |
 | 账户权益为 `--` / 0 | 页面可见「可用资金」才会同步；确认采集的是当前登录页 |
 | 分析的品种和屏幕不一致 | 把目标页切到要看的合约再分析；以页面品种为准 |
 | 模型 404 / HTML | 根地址走 Responses；带 `/v1` 的地址走 Chat Completions |

@@ -28,7 +28,7 @@ npm run dev:desktop
 
 当前版本实盘出现买卖建议时会弹窗，确认后才会在已登录页面下单。生产部署见 [docs/deploy.md](docs/deploy.md)，本地安装与试运行见 [docs/install.md](docs/install.md)。
 
-生产环境里，账号、任务、Provider 配置和密钥只存在服务端；桌面 Agent 与模型的 HTTP 请求从本机发出，不经过 API 服务器转发。桌面端必须保持登录在线，否则分析会返回 `DESKTOP_AI_OFFLINE`。本地 `npm run dev` 未设置 `AXIOM_REQUIRE_DESKTOP_AI=1` 时，API 与模型在同一台机器上，仍可直接请求。
+生产环境里，账号、任务、Provider 配置和密钥保存在服务端；内嵌浏览器、登录、行情及盘口采集、指标整理与模型请求全部运行在客户端。已审核经验全文随本轮行情直接交给 AI，后端不做分片分析或 RAG 索引。桌面必须保持登录在线，旧版本会提示升级，禁止回退到服务端浏览器。GitHub Actions 构建发布镜像，服务器只加载镜像并运行账号与数据服务。
 
 「开始观察」启动的是服务端持续控制循环：首轮立即执行，之后按周期读取网页和只读行情。每轮都保留配置周期的历史 K 线、逐笔、页面字段和账户只读字段；规范化行情未变化时跳过 AI，变化、首轮或上轮失败时开启新的分析轮次，并把最近轮次作为多轮上下文。交给模型的行情会按上海时区分层（近 1 小时分钟、至昨天凌晨小时、至上月日、更早月），不含秒级逐笔。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可覆盖轮询频率，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读采集范围。模型给出 `BUY` / `SELL` 后，实盘任务会弹窗；只有你确认，服务端才会在已登录页面提交订单。观察 / 影子模式不会实盘下单。`AXIOM_TRADING_ENABLED=0` 可整机关闭实盘提交。
 
@@ -59,11 +59,11 @@ MONGO_DB=axiom_agent
 
 ## AI Provider
 
-连接器页面支持任意 OpenAI Compatible Endpoint（例如自建服务、DeepSeek、OpenAI-compatible 网关）。API Key 只提交给本地 Node 服务，服务端使用 `APP_SECRET` 加密保存，前端只收到脱敏预览。Provider 的“验证”会在服务端请求 `<endpoint>/models`，只返回状态，不返回响应正文。没有 Key 时模型阶段会返回 HOLD，并带上 `PROVIDER_NOT_CONFIGURED`；真实分析需要配置 Provider 并由服务端发起。
+连接器页面支持 OpenAI Compatible、Responses、Anthropic 和 Gemini 协议。API Key 提交给生产 API，使用 `APP_SECRET` 加密保存，页面只收到脱敏预览。Provider 验证使用配置模型发起真实推理；验证、模型列表和分析请求均由客户端发出。地址按配置协议和响应选择匹配路由，不强制添加 `/v1`。未配置 Key 会明确返回 `PROVIDER_NOT_CONFIGURED`。
 
 ## RAG 与初始化 Skill
 
-用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿，审核发布后切片进入 RAG 索引。检索结果保留 Skill 版本、chunk ID 和 evidence ID；草稿不会进入自动决策上下文。
+用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿。生产环境中，审核后的经验全文携带版本和 evidence ID，与行情一起直接交给客户端 AI；不建立切片索引。草稿和其他账号的经验不会进入分析上下文。经验超出上下文上限时明确报错。
 
 项目内置 Skill：
 
@@ -98,7 +98,7 @@ npm run dist:mac
 npm run dist:win
 ```
 
-macOS 构建在 `release/` 生成 `dmg` / `zip`（本机已验证 arm64 目录包）。Windows NSIS / portable 构建建议在 Windows 主机或 CI 执行；当前环境不能替代 Windows 安装运行验证。用户端进入 Electron 包，后台管理端仍通过浏览器访问，不打进用户工作流页面。
+macOS 构建生成 `dmg` / `zip`；Windows x64 构建生成 NSIS 安装包和 portable。Release 流水线在各系统运行打包后浏览器验证，检查中文及空格用户目录、页面读取、盘口解析和会话关闭。运行 `npm run test:desktop-browser` 可验证开发版本；设置 `AXIOM_DESKTOP_EXECUTABLE` 可验证对应系统的打包程序。用户端进入 Electron 包，后台管理端仍通过浏览器访问。
 
 ## Release 与自动更新
 

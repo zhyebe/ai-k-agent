@@ -42,6 +42,7 @@ export function chunkDocument(content, size = 680) {
 
 export function indexSkill(skill) {
   removeSkill(skill.id);
+  if (skill.status !== "APPROVED" || process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1") return 0;
   const pieces = chunkDocument(skill.content);
   pieces.forEach((content, index) => {
     const id = `${skill.id}-chunk-${index + 1}`;
@@ -100,5 +101,20 @@ export function getRagStats(filters = {}) {
   const indexedChunks = ownerUserId
     ? [...chunks.values()].filter((chunk) => chunk.ownerUserId === ownerUserId).length
     : chunks.size;
-  return { indexedChunks, mode: "local-keyword", vectorProvider: "pluggable" };
+  return { indexedChunks, mode: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? "direct-ai" : "local-keyword", vectorProvider: "none" };
+}
+
+export function approvedKnowledgeForAnalysis(skills, ownerUserId, maxBytes = 128000) {
+  if (!ownerUserId) return [];
+  const approved = skills.filter((skill) => skill.status === "APPROVED" && String(skill.ownerUserId || "") === String(ownerUserId));
+  const evidence = approved.filter((skill) => String(skill.content || "").trim()).map((skill) => ({
+    evidenceId: `evidence:skill:${skill.id}:${skill.version}`,
+    skillId: skill.id,
+    title: skill.title,
+    version: skill.version,
+    type: "approved_experience",
+    excerpt: String(skill.content),
+  }));
+  if (Buffer.byteLength(JSON.stringify(evidence), "utf8") > maxBytes) throw new Error("EXPERIENCE_CONTEXT_TOO_LARGE");
+  return evidence;
 }

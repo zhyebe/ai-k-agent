@@ -16,9 +16,34 @@ concurrency:
 
 jobs:
   deploy:
-    name: Pull and rebuild on server
+    name: Build in Actions and deploy images
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout deployment ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.event.release.tag_name }}
+      - name: Resolve image version
+        id: version
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Build production images on runner
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.sha }}
+        run: |
+          docker build --build-arg NODE_IMAGE=node:20-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-api:$IMAGE_VERSION" .
+          docker build --target admin --build-arg NODE_IMAGE=node:20-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-nginx:$IMAGE_VERSION" .
+          docker save "axiom-agent-api:$IMAGE_VERSION" "axiom-agent-nginx:$IMAGE_VERSION" | gzip -1 > deployment-images.tar.gz
+      - name: Transfer built images
+        uses: appleboy/scp-action@v1.0.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          source: deployment-images.tar.gz
+          target: /opt/axiom-agent/.deploy/${{ github.run_id }}
+          timeout: 120s
+          command_timeout: 20m
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -30,5 +55,9 @@ jobs:
           command_timeout: 30m
           script: |
             set -euo pipefail
-            REF='${{ inputs.ref || github.event.release.tag_name }}'
-            /opt/axiom-agent/scripts/remote/update.sh "$REF"
+            REF='${{ steps.version.outputs.sha }}'
+            cd /opt/axiom-agent
+            export GIT_SSH_COMMAND='ssh -i /root/.ssh/axiom-github -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+            git fetch origin "$REF"
+            git checkout --detach "$REF"
+            bash scripts/remote/deploy-images.sh "/opt/axiom-agent/.deploy/${{ github.run_id }}/deployment-images.tar.gz"

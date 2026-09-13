@@ -307,6 +307,35 @@ function testMarketSnapshot(fingerprint, price) {
   };
 }
 
+test("生产后端只调度客户端分析，不分片、不向客户端重发完整行情", async () => {
+  const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+  process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+  const task = insertNorthstarTask(`client_analysis_${Date.now()}`);
+  const market = testMarketSnapshot("client-snapshot", 100);
+  let calls = 0;
+  try {
+    const result = await runAnalysis(task.id, "", { runtime: {
+      openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
+      browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => market,
+      requestDecision: async () => { throw new Error("SERVER_ANALYSIS_FORBIDDEN"); },
+      requestSegmentReview: async () => { throw new Error("SERVER_SEGMENT_FORBIDDEN"); },
+      requestMarketAnalysis: async (_provider, context) => {
+        calls++;
+        assert.equal(context.market, undefined);
+        assert.equal(context.marketRef.fingerprint, market.fingerprint);
+        return { market, decision: { action: "HOLD", confidence: 0.5, profitProbability: 0.5, riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } };
+      },
+    } });
+    assert.equal(calls, 1);
+    assert.equal(result.task.analysisCoverage.mode, "direct_client");
+    assert.equal(result.task.lastAnalysisSucceeded, true);
+  } finally {
+    if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+    else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous;
+  }
+});
+
 test("成功监控轮次持续运行，未变行情不请求模型，变化后开启下一轮并携带上下文", async () => {
   const taskId = `task_monitor_success_${Date.now()}`;
   const task = insertNorthstarTask(taskId);

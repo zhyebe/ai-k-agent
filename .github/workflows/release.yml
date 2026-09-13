@@ -10,9 +10,14 @@ on:
         description: Existing or new release tag to publish
         required: true
         default: v0.3.0
+      deploy_after_release:
+        description: Deploy the API after publishing the desktop release
+        type: boolean
+        default: true
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   macos:
@@ -42,6 +47,8 @@ jobs:
         run: |
           printf 'CSC_LINK=%s\n' "$CSC_LINK" >> "$GITHUB_ENV"
           printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
+      - name: Verify application
+        run: npm test && npm run typecheck
       - name: Configure macOS notarization
         if: ${{ env.RELEASE_APPLE_ID != '' && env.RELEASE_APPLE_PASSWORD != '' && env.RELEASE_APPLE_TEAM_ID != '' }}
         env:
@@ -54,6 +61,11 @@ jobs:
           printf 'APPLE_TEAM_ID=%s\n' "$APPLE_TEAM_ID" >> "$GITHUB_ENV"
       - name: Build macOS artifacts
         run: npm run build && npx electron-builder --mac --universal --publish never
+      - name: Verify packaged macOS browser
+        env:
+          AXIOM_DESKTOP_EXECUTABLE: release/mac-universal/Axiom Agent.app/Contents/MacOS/Axiom Agent
+          AXIOM_SMOKE_OUTPUT: release/smoke
+        run: npm run test:desktop-browser
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -91,7 +103,12 @@ jobs:
           printf 'CSC_LINK=%s\n' "$CSC_LINK" >> "$GITHUB_ENV"
           printf 'CSC_KEY_PASSWORD=%s\n' "$CSC_KEY_PASSWORD" >> "$GITHUB_ENV"
       - name: Build Windows artifacts
-        run: npm run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never
+        run: npm run check; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never
+      - name: Verify packaged Windows browser
+        env:
+          AXIOM_DESKTOP_EXECUTABLE: release/win-unpacked/Axiom Agent.exe
+          AXIOM_SMOKE_OUTPUT: release/smoke
+        run: npm run test:desktop-browser
       - name: Verify Windows artifacts
         shell: pwsh
         run: |
@@ -135,6 +152,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
         shell: bash
         run: |
           mapfile -t assets < <(find release -maxdepth 1 -type f -print | sort)
@@ -144,5 +162,12 @@ jobs:
             gh release create "$RELEASE_TAG" "${assets[@]}" \
               --title "Axiom Agent $RELEASE_TAG" \
               --generate-notes \
-              --verify-tag
+              --target "$RELEASE_SHA"
           fi
+      - name: Deploy published version
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.deploy_after_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: gh workflow run deploy.yml --ref main -f ref="$RELEASE_TAG"

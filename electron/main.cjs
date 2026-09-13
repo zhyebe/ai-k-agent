@@ -1,3 +1,6 @@
+if (process.env.AXIOM_BROWSER_HOST === "1") {
+  require("./browser-host.cjs");
+} else {
 const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const http = require("node:http");
@@ -147,13 +150,13 @@ ipcMain.handle("update:get-state", () => currentUpdateState());
 ipcMain.handle("update:check", () => checkForUpdates());
 ipcMain.handle("update:download", () => downloadUpdatePackage());
 
-function prepareAppForUpdateQuit() {
+async function prepareAppForUpdateQuit() {
   quittingForUpdate = true;
   if (updateCheckTimer) {
     clearInterval(updateCheckTimer);
     updateCheckTimer = undefined;
   }
-  disconnectAiRuntime();
+  await disconnectAiRuntime();
   if (apiProcess && !apiProcess.killed) apiProcess.kill();
 }
 
@@ -168,7 +171,7 @@ async function installDownloadedUpdate() {
     if (!downloadedInstallerPath || !fs.existsSync(downloadedInstallerPath)) {
       throw new Error("安装包不存在");
     }
-    prepareAppForUpdateQuit();
+    await prepareAppForUpdateQuit();
     await openInstaller(downloadedInstallerPath);
     if (installTimer) clearTimeout(installTimer);
     installTimer = setTimeout(() => {
@@ -422,9 +425,14 @@ app.on("window-all-closed", () => {
   if (quittingForUpdate || process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
+let browserCleanupDone = false;
+app.on("before-quit", (event) => {
   if (updateCheckTimer) clearInterval(updateCheckTimer);
   if (installTimer) clearTimeout(installTimer);
-  disconnectAiRuntime();
+  if (!browserCleanupDone) {
+    event.preventDefault();
+    disconnectAiRuntime().finally(() => { browserCleanupDone = true; app.quit(); });
+  }
   if (apiProcess && !apiProcess.killed) apiProcess.kill();
 });
+}

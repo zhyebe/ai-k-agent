@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
@@ -24,6 +24,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test",
     "test:ui": "node --test scripts/loading-ui.mjs",
+    "test:desktop-browser": "node scripts/desktop-browser-smoke.cjs",
     "deploy": "bash scripts/deploy.sh",
     "deploy:bootstrap": "bash scripts/bootstrap-server.sh",
     "deploy:docker": "bash scripts/deploy-docker.sh",
@@ -47,7 +48,8 @@
     "mysql2": "^3.11.5",
     "playwright": "^1.49.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
@@ -65,7 +67,10 @@
     "productName": "Axiom Agent",
     "asar": true,
     "asarUnpack": [
-      "server/**"
+      "server/**",
+      "electron/browser-host.cjs",
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**"
     ],
     "files": [
       "dist/index.html",

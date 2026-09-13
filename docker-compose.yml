@@ -28,6 +28,7 @@ services:
       - "${INTERNAL_HOST:-172.19.62.79}:27017:27017"
 
   api:
+    image: ${AXIOM_API_IMAGE:-axiom-agent-api:latest}
     build:
       context: .
       args:
@@ -44,7 +45,7 @@ services:
       AXIOM_DATA_DIR: /var/lib/axiom-agent
       AXIOM_SECRET_FILE: /var/lib/axiom-agent/.axiom-secret
       AXIOM_VAULT_FILE: /var/lib/axiom-agent/credentials.vault.json
-      AXIOM_BROWSER_NO_SANDBOX: "1"
+      AXIOM_REQUIRE_DESKTOP_BROWSER: "1"
       ALLOW_MEMORY_FALLBACK: "0"
       AXIOM_REQUIRE_DESKTOP_AI: "1"
       USER_SESSION_TTL_SEC: "2592000"
@@ -57,9 +58,13 @@ services:
         condition: service_started
     expose:
       - "8787"
-    shm_size: "1gb"
+    init: true
+    mem_limit: "1g"
+    cpus: "1.0"
+    pids_limit: 128
 
   nginx:
+    image: ${AXIOM_ADMIN_IMAGE:-axiom-agent-nginx:latest}
     build:
       context: .
       target: admin

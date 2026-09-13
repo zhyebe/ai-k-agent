@@ -183,6 +183,17 @@ export interface MarketTick {
   flag?: string;
 }
 
+export interface OrderBook {
+  bids: Array<{ level: number; price: number; volume: number }>;
+  asks: Array<{ level: number; price: number; volume: number }>;
+  spread: number | null;
+  imbalance: number | null;
+  bidVolume: number;
+  askVolume: number;
+  status: "AVAILABLE" | "PARTIAL" | "MISSING" | "CROSSED";
+  observedAt: string | null;
+}
+
 export interface MarketSnapshot {
   ok?: boolean;
   code?: string;
@@ -227,6 +238,7 @@ export interface MarketSnapshot {
     positionEmpty?: boolean;
   };
   pageView?: Record<string, unknown> | null;
+  orderBook?: OrderBook | null;
   books?: MarketSnapshot[];
   bookCount?: number;
   expectedBookCount?: number;

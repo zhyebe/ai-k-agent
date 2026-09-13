@@ -9,8 +9,7 @@ import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
 import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
 import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
-import { openMarketBrowser, observeMarket } from "./market.mjs";
-import { browserLogin, browserLoginStatus } from "./tools.mjs";
+import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
@@ -19,7 +18,7 @@ import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 import { attachDesktopAiSocket, callProviderMethod, disconnectDesktopAiUser } from "./desktop-ai.mjs";
 import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
 import { Readable } from "node:stream";
-import { closeAllBrowserSessions, closeBrowserSession } from "./browser.mjs";
+import { closeAllBrowserSessions } from "./browser.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
 await app.register(cors, {
@@ -512,7 +511,7 @@ app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (requ
   disconnectUserConnections(user.id, "USER_DELETED");
   for (const task of ownedTasks) {
     try { stopTask(task.id); } catch { stopController(task.id); }
-    await closeBrowserSession(task.target?.browserSessionId || `task:${task.id}`).catch(() => {});
+    await callBrowserMethod("closeBrowserSession", task.ownerUserId, { sessionId: task.target?.browserSessionId || `task:${task.id}` }).catch(() => {});
   }
   try {
     await persistence.deleteUserData({ userId: user.id, taskIds });
@@ -673,7 +672,7 @@ app.delete("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reque
   const task = getTask(request.params.taskId);
   if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
   try { stopTask(task.id); } catch { stopController(task.id); }
-  await closeBrowserSession(task.target?.browserSessionId || `task:${task.id}`).catch(() => {});
+  await callBrowserMethod("closeBrowserSession", task.ownerUserId, { sessionId: task.target?.browserSessionId || `task:${task.id}` }).catch(() => {});
   try {
     await persistDeletedTask({ taskId: task.id, ownerUserId: request.auth.user.id });
   } catch {
@@ -764,7 +763,7 @@ app.post("/api/tasks/:taskId/browser/open", { preHandler: requireTaskAccess }, a
   if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
   const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId && String(item.ownerUserId || "") === request.auth.user.id);
   if (task.target.connectorId && !connector) return reply.code(404).send({ error: "CONNECTOR_NOT_FOUND" });
-  const result = await openMarketBrowser(task, connector);
+  const result = await callBrowserMethod("openMarketBrowser", request.auth.user.id, { task, connector, show: true });
   if (result.ok) {
     task.target.browserSessionId = result.sessionId;
     task.target.connectionStatus = "browser_ready";
@@ -779,7 +778,7 @@ app.post("/api/tasks/:taskId/browser/observe", { preHandler: requireTaskAccess }
   if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
   const connector = state.connectors.find((item) => item.connectorId === task.target.connectorId && String(item.ownerUserId || "") === request.auth.user.id);
   if (task.target.connectorId && !connector) return reply.code(404).send({ error: "CONNECTOR_NOT_FOUND" });
-  return observeMarket(task, connector);
+  return callBrowserMethod("observeMarket", request.auth.user.id, { task, connector });
 });
 
 app.get("/api/connectors", { preHandler: requireWorkspaceAccess }, async (request) => ({ connectors: snapshot(request.auth).connectors }));
@@ -860,13 +859,13 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
           },
         }
         : { id: `connector_probe_${profile.connectorId}`, target: { url: profile.target, browserSessionId: `connector:${request.auth.type}:${profile.connectorId}` } };
-      const opened = await openMarketBrowser(probeTask, profile);
+      const opened = await callBrowserMethod("openMarketBrowser", request.auth.user.id, { task: probeTask, connector: profile });
       observedUrl = String(opened.url || "");
       browserMode = String(opened.mode || "");
       if (opened.ok) {
         const sessionId = opened.sessionId || probeTask.target.browserSessionId;
         browserSessionId = String(sessionId || "");
-        const current = await browserLoginStatus({ sessionId, adapterId: profile.adapterId });
+        const current = await callBrowserMethod("browserLoginStatus", request.auth.user.id, { sessionId, adapterId: profile.adapterId });
         if (current.authenticated) {
           ok = true;
           code = "LOGIN_CONFIRMED";
@@ -874,7 +873,7 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
           connectionStatus = "connected";
           loginStatus = "authenticated";
         } else if (hasCredential) {
-          const login = await browserLogin({
+          const login = await callBrowserMethod("browserLogin", request.auth.user.id, {
             sessionId,
             credentialRef,
             ownerUserId: credentialOptions.ownerUserId,
@@ -884,7 +883,7 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
             submit: true,
           });
           if (login.ok && login.authenticated) {
-            const verified = await browserLoginStatus({ sessionId, adapterId: profile.adapterId });
+            const verified = await callBrowserMethod("browserLoginStatus", request.auth.user.id, { sessionId, adapterId: profile.adapterId });
             ok = verified.authenticated;
             code = ok ? "LOGIN_CONFIRMED" : "LOGIN_NOT_CONFIRMED";
             message = ok ? "已确认目标页面登录态" : "登录提交后未确认目标页面";

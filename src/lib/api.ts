@@ -254,6 +254,10 @@ export async function testConnector(payload: Record<string, unknown>) {
   return request<{ ok: boolean; connectorId: string; type: "website" | "app"; name: string; target: string; adapterId: string; adapterVersion: string; connectionStatus: string; loginStatus: string; credentialStatus: string; credentialRef: string; accountLabel: string; observedUrl?: string; browserMode?: string; liveExecution: boolean; capabilities: string[]; executionModes: string[] }>("/api/connectors/test", { method: "POST", body: JSON.stringify(payload) });
 }
 
+export async function openTaskBrowser(taskId: string) {
+  return request<{ ok: boolean; code?: string; message?: string }>(`/api/tasks/${taskId}/browser/open`, { method: "POST" });
+}
+
 export async function discoverConnector(payload: Record<string, unknown>) {
   return request<{ connectorId: string; type: string; target: string; name: string; adapterId: string; adapterVersion: string; status: string; discoveryStatus: string; adapterStatus: string; reviewStatus: string; capabilities: string[]; actionMapping: string; executionModes: string[]; liveExecution: boolean }>("/api/connectors/discover", { method: "POST", body: JSON.stringify(payload) });
 }

@@ -370,6 +370,21 @@ function timeframeMetadata(timeframe, snapshot, history) {
   });
 }
 
+// Normalized OHLCV and page fields are canonical; raw API copies repeat the same rows.
+export function compactCollectedMarket(market = {}) {
+  const { raw, ...result } = market;
+  result.timeframes = Object.fromEntries(Object.entries(market.timeframes || {}).map(([key, snapshot]) => {
+    const { rawData, ...fields } = snapshot;
+    return [key, fields];
+  }));
+  if (market.page) {
+    const { klines, ...page } = market.page;
+    result.page = page;
+  }
+  result.books = (market.books || []).map(compactCollectedMarket);
+  return result;
+}
+
 export function estimateMarketContextBytes(market = {}) {
   return byteLength(sanitizeReadOnlyValue(market));
 }
@@ -510,6 +525,8 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     quote: market.quote || market.latest,
     account: market.account,
     pageView: market.pageView || market.page?.view || null,
+    orderBook: market.orderBook || null,
+    books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId, orderBook: book.orderBook || book.pageView?.orderBook || null })),
     changePct: market.changePct,
     marketClosed: market.marketClosed,
     source: market.source,
@@ -605,6 +622,8 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
       instrumentId: book.instrumentId,
       latest: book.latest || book.quote,
       quote: book.quote || book.latest,
+      orderBook: book.orderBook || book.pageView?.orderBook || null,
+      pageView: book.pageView || null,
       changePct: book.changePct,
       trend: book.trend,
       dataQuality: book.dataQuality,
@@ -632,6 +651,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     } : null,
     account: market.account || null,
     pageView: market.pageView || market.page?.view || null,
+    orderBook: market.orderBook || null,
     source: market.source,
     sourceKind: market.sourceKind,
     dataAt: market.dataAt,

@@ -25,10 +25,11 @@ ENV NODE_ENV=production \
     npm_config_registry=https://registry.npmmirror.com \
     HOST=0.0.0.0 \
     PORT=8787 \
-    AXIOM_BROWSER_NO_SANDBOX=1 \
+    AXIOM_REQUIRE_DESKTOP_BROWSER=1 \
+    AXIOM_REQUIRE_DESKTOP_AI=1 \
     AXIOM_DATA_DIR=/var/lib/axiom-agent
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends chromium fonts-noto-cjk ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
