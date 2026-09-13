@@ -99,9 +99,9 @@ function enforceProfitProbability(decision) {
 }
 
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
-  const preview = suggestOrderPreview(task, decision);
   const countdownSec = Math.max(5, Math.min(300, Number(task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC)));
   const auto = !isLiveTask(task) && task.autoDecisionEnabled === true;
+  const preview = suggestOrderPreview(task, decision, { enforceAutomationQuantity: auto });
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
   const decisionProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
@@ -120,13 +120,14 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     source: null,
     suggestedQty: preview.suggestedQty,
     suggestedPrice: preview.suggestedPrice,
+    automatedQuantityLimit: preview.quantityLimitApplied === true,
     formFilled: false,
     formSubmitBlocked: true,
     createdAt: new Date(now).toISOString(),
     deadlineAt: auto ? new Date(now + countdownSec * 1000).toISOString() : null,
     countdownSec: auto ? countdownSec : 0,
     resolvedAt: null,
-    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}`,
+    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}${preview.quantityLimitApplied ? " 自动流程数量上限为 20" : ""}`,
   };
 }
 

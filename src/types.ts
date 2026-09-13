@@ -93,6 +93,7 @@ export interface PendingAction {
   status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
+  automatedQuantityLimit?: boolean;
   suggestedPrice: number | null;
   formFilled: boolean;
   formSubmitBlocked: boolean;
@@ -132,6 +133,13 @@ export interface Decision {
     profitProbability?: number;
     summary?: string;
   }>;
+  operatorAssessment?: {
+    likelihood: "UNKNOWN" | "LOW" | "MEDIUM" | "HIGH";
+    confidence: number;
+    evidence: string[];
+    limitations: string[];
+    impact: "LOW" | "MEDIUM" | "HIGH";
+  };
 }
 
 export interface MarketCandle {

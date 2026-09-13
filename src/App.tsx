@@ -194,6 +194,8 @@ const displayLabel = (value: string | null | undefined, labels: Record<string, s
 };
 const displayAction = (value: string | null | undefined) => actionLabels[value as keyof typeof actionLabels] || "待确认";
 const displaySuggestion = (value: string | null | undefined) => actionSuggestionLabels[value as keyof typeof actionSuggestionLabels] || "待确认";
+const operatorLikelihoodLabels: Record<string, string> = { UNKNOWN: "无法判断", LOW: "疑似较低", MEDIUM: "疑似中等", HIGH: "疑似较高" };
+const operatorImpactLabels: Record<string, string> = { LOW: "影响较低", MEDIUM: "需关注", HIGH: "影响较高" };
 const decisionTargetLabel = (value: Pick<Decision, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | Pick<PendingAction, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | null | undefined) => value?.targetSymbolName || value?.targetSymbol || value?.targetInstrumentId || "";
 const formatTime = (value: string) => {
   const date = new Date(value);
@@ -1223,6 +1225,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{Math.round(profitProbability * 100)}%</b></span></div>
       <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
       {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {Math.round(Number(item.profitProbability ?? item.confidence ?? 0) * 100)}% 获利概率</span></div>)}</div> : null}
+      {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}
       <div className="reason-block">
         <span className="block-label">机器可验证依据</span>
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}

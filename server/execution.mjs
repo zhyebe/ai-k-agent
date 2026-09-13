@@ -3,6 +3,7 @@ import { addEvent } from "./store.mjs";
 export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValuePct: 8 });
 export const tradingExecutionPolicy = Object.freeze({ enabled: true, mode: "CONFIRM_THEN_SUBMIT" });
 export const DEFAULT_AUTO_DECISION_COUNTDOWN_SEC = 30;
+export const MAX_AUTOMATED_QUANTITY = 20;
 
 export function isTradingSwitchOn() {
   return process.env.AXIOM_TRADING_ENABLED !== "0";
@@ -39,7 +40,7 @@ export function previewMarketForDecision(task, decision) {
   return books.length === 1 ? books[0] : task?.market;
 }
 
-export function suggestOrderPreview(task, decision) {
+export function suggestOrderPreview(task, decision, { enforceAutomationQuantity = false } = {}) {
   const targetMarket = previewMarketForDecision(task, decision);
   const price = Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);
@@ -57,10 +58,13 @@ export function suggestOrderPreview(task, decision) {
   } else if (hasPrice) {
     suggestedQty = 1;
   }
+  const quantityLimitApplied = enforceAutomationQuantity && suggestedQty !== null && suggestedQty > MAX_AUTOMATED_QUANTITY;
+  if (quantityLimitApplied) suggestedQty = MAX_AUTOMATED_QUANTITY;
   return {
     action: decision?.action === "SELL" ? "SELL" : decision?.action === "BUY" ? "BUY" : "HOLD",
     suggestedPrice: hasPrice ? price : null,
     suggestedQty,
+    quantityLimitApplied,
     valuePct: pct,
     formSubmitBlocked: true,
     targetSymbol: String(decision?.targetSymbol || targetMarket?.symbol || ""),

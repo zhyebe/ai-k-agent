@@ -273,6 +273,7 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
     books: layeredBooks,
     bookCount: layeredBooks.length,
     raw,
+    operatorContext: operatorContext(market),
   };
 }
 
@@ -572,6 +573,27 @@ function recentRows(history, limit, mapper) {
   return values.map(mapper);
 }
 
+function operatorContext(market = {}) {
+  const books = Array.isArray(market.books) ? market.books : [];
+  const ticks = Array.isArray(market.ticks) ? market.ticks : [];
+  const orderBooks = [market, ...books].map((book) => book?.orderBook || book?.pageView?.orderBook).filter(Boolean);
+  const levels = orderBooks.reduce((count, book) => count + (book.bids?.length || 0) + (book.asks?.length || 0), 0);
+  const intervals = ticks.slice(1).map((tick, index) => Number(tick.timestamp) - Number(ticks[index].timestamp)).filter((value) => Number.isFinite(value) && value > 0);
+  const fixedInterval = intervals.length >= 4 && new Set(intervals.map((value) => Math.round(value / 1000))).size <= 2;
+  return {
+    observationCount: ticks.length,
+    orderBookSnapshotCount: orderBooks.length,
+    visibleOrderBookLevelCount: levels,
+    fixedIntervalTickPattern: intervals.length >= 4 ? fixedInterval : null,
+    tickIntervalSampleMs: intervals.slice(-12),
+    automationSignals: fixedInterval ? ["FIXED_INTERVAL_TICKS"] : [],
+    limitations: [
+      "仅凭公开盘口、K 线和逐笔数据不能确认操盘者身份",
+      "缺少撤单、改单、订单来源和跨账户关联数据",
+    ],
+  };
+}
+
 export function summarizeMarketForDecision(market = {}, coverage = null, { recentRowsPerTimeframe = 120 } = {}) {
   const timeframes = {};
   for (const [key, rawSnapshot] of timeframeEntries(market)) {
@@ -657,6 +679,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     dataAt: market.dataAt,
     observedAt: market.observedAt,
     coverage,
+    operatorContext: operatorContext(market),
   });
 }
 

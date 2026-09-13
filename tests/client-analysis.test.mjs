@@ -45,9 +45,10 @@ test("direct analysis sends full approved owner experience and both order books 
     const context = input.context || input;
     assert.equal(context.evidence[0].excerpt, content);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
+    assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);
     assert.equal(context.market.books[1].raw, undefined);
-    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", profit_probability: 0.55, confidence: 0.6, target_symbol: "B" }) } }] }), { headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", profit_probability: 0.55, confidence: 0.6, target_symbol: "B", operator_assessment: { likelihood: "MEDIUM", confidence: 0.7, evidence: ["固定间隔逐笔样本"], limitations: ["没有撤单数据"], impact: "MEDIUM" } }) } }] }), { headers: { "content-type": "application/json" } });
   });
   const result = await analyzeCollectedMarket({ apiKey: "test", apiFormat: "chat", baseUrl: "https://provider.example.test", model: "model" }, market, { evidence, evidenceIds: evidence.map((item) => item.evidenceId) });
   assert.equal(calls, 1);
@@ -56,4 +57,6 @@ test("direct analysis sends full approved owner experience and both order books 
   assert.equal(result.coverage.totalKlineRows, 2);
   assert.ok(result.coverage.contextBytes < 50000);
   assert.equal(result.decision.profitProbability, 0.55);
+  assert.equal(result.decision.operatorAssessment.likelihood, "MEDIUM");
+  assert.equal(result.decision.operatorAssessment.impact, "MEDIUM");
 });
