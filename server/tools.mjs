@@ -316,6 +316,31 @@ export function suggestionFormLabels(action) {
     : { price: "买价", quantity: "买量" };
 }
 
+async function selectPositionForSell(page, { symbol = "", symbolName = "", instrumentId = "" } = {}) {
+  const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase()).filter(Boolean);
+  if (!values.length) return { ok: false, code: "SELL_POSITION_TARGET_MISSING" };
+  try {
+    return await page.evaluate(({ targetValues }) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase();
+      const visible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const rows = Array.from(document.querySelectorAll("tr, [role='row'], .el-table__row, li, .position-row")).filter(visible);
+      const row = rows.find((item) => {
+        const text = normalize(item.textContent);
+        return text && targetValues.some((value) => text.includes(value));
+      });
+      if (!row) return { ok: false, code: "SELL_POSITION_NOT_FOUND" };
+      row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
+      return { ok: true, code: "SELL_POSITION_SELECTED" };
+    }, { targetValues: values });
+  } catch (error) {
+    return { ok: false, code: "SELL_POSITION_SELECT_FAILED", message: error.message };
+  }
+}
+
 export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "" } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
@@ -327,6 +352,7 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
     const selected = await selectPageBoardInstrument(sessionId, targetInstrument);
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false, fields: [] };
   }
+  const positionSelection = action === "SELL" ? await selectPositionForSell(page, targetInstrument) : null;
   const labels = suggestionFormLabels(action);
   try {
     const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
@@ -364,6 +390,7 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
       filled: result.filled.length > 0,
       submitted: false,
       fields: result.filled,
+      positionSelection,
       forbiddenButtons: result.forbiddenButtons || [],
     };
   } catch (error) {
