@@ -4,6 +4,11 @@ import test from "node:test";
 import { attachDesktopAiSocket, hasDesktopAi, invokeDesktopAi, resetDesktopAiForTests } from "../server/desktop-ai.mjs";
 import { callBrowserMethod } from "../server/desktop-browser.mjs";
 import { openBrowserPage } from "../server/browser.mjs";
+import packageConfig from "../package.json" with { type: "json" };
+
+test("packaged desktop unpacks ws beside ESM server modules", () => {
+  assert.ok(packageConfig.build.asarUnpack.includes("node_modules/ws/**"));
+});
 
 class Socket extends EventEmitter {
   readyState = 1;

@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "0.3.20",
+  "version": "0.3.21",
   "private": true,
   "description": "Axiom Agent desktop workflow console",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
@@ -69,6 +69,7 @@
     "asarUnpack": [
       "server/**",
       "electron/browser-host.cjs",
+      "node_modules/ws/**",
       "node_modules/playwright/**",
       "node_modules/playwright-core/**"
     ],
