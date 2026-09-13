@@ -13,7 +13,7 @@ import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
 import { adminAuthStatus, adminTokenFromRequest, createAdminSession, requireAdmin, revokeAdminSession } from "./auth.mjs";
-import { clearTaskAssignmentState, createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, removeTaskAssignmentState, removeUserState, requireUser, revokeUserSession, setUserPersistence, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
+import { createUser, createUserSession, getUserSession, hydrateUserSessions, hydrateUsers, listUsers, removeTaskAssignmentState, removeUserState, requireUser, revokeUserSession, setUserPersistence, updateUser, userAuthStatus, userIdsForTask, userTokenFromRequest } from "./users.mjs";
 import { isAllowedCorsOrigin, parseCsv } from "./cors.mjs";
 import { attachDesktopAiSocket, callProviderMethod, disconnectDesktopAiUser } from "./desktop-ai.mjs";
 import { createUpdateFeed, proxyUpdateAsset, sanitizeUpdateAssetName } from "./updates.mjs";
@@ -408,16 +408,6 @@ async function migrateTenantOwnership() {
       await persistTask(task);
     }
   }
-  const unownedConnectorIds = state.connectors
-    .filter((connector) => !connector.ownerUserId)
-    .map((connector) => connector.connectorId);
-  for (const connectorId of unownedConnectorIds) await persistDeletedConnector(connectorId);
-  if (unownedConnectorIds.length) {
-    const removed = new Set(unownedConnectorIds);
-    state.connectors = state.connectors.filter((connector) => !removed.has(connector.connectorId));
-  }
-  await persistence.clearTaskAssignments();
-  clearTaskAssignmentState();
 }
 
 if (stateLoadFailed) {

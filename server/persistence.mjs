@@ -1,5 +1,3 @@
-const LEGACY_DEMO_SKILL_IDS = ["skill_trend_1", "skill_guardrail_2"];
-
 function json(value) {
   return JSON.stringify(value ?? {});
 }
@@ -102,8 +100,6 @@ async function createMySqlAdapter() {
   await pool.query("ALTER TABLE providers ADD COLUMN models_url VARCHAR(1024) NOT NULL DEFAULT ''").catch(() => {});
   await pool.query("ALTER TABLE providers ADD COLUMN full_url_mode TINYINT(1) NOT NULL DEFAULT 0").catch(() => {});
   await pool.query("ALTER TABLE providers MODIFY COLUMN base_url VARCHAR(1024) NOT NULL").catch(() => {});
-  await pool.query("DELETE FROM skill_chunks WHERE skill_id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
-  await pool.query("DELETE FROM skills WHERE id IN (?, ?)", LEGACY_DEMO_SKILL_IDS).catch(() => {});
   await pool.query(`CREATE TABLE IF NOT EXISTS connectors (
     connector_id VARCHAR(96) PRIMARY KEY,
     owner_user_id VARCHAR(96) NOT NULL DEFAULT '',
@@ -234,16 +230,7 @@ async function createMySqlAdapter() {
       WHERE item.owner_user_id = ''
     `).catch(() => {});
   }
-  await pool.query("DELETE item FROM tasks item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
-  await pool.query("DELETE item FROM providers item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
-  await pool.query("DELETE chunk FROM skill_chunks chunk LEFT JOIN skills skill ON skill.id = chunk.skill_id LEFT JOIN users owner_row ON owner_row.id = skill.owner_user_id WHERE skill.id IS NULL OR owner_row.id IS NULL").catch(() => {});
-  await pool.query("DELETE item FROM skills item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
-  await pool.query("DELETE item FROM credentials item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
-  await pool.query("DELETE item FROM connectors item LEFT JOIN users owner_row ON owner_row.id = item.owner_user_id WHERE owner_row.id IS NULL").catch(() => {});
-  for (const table of ["analysis_runs", "agent_runs", "agent_output", "orders", "rules", "agent_decisions"]) {
-    await pool.query(`DELETE child FROM ${table} child LEFT JOIN tasks t ON t.id = child.task_id WHERE t.id IS NULL`).catch(() => {});
-  }
-  await pool.query("DELETE risk FROM risk_checks risk LEFT JOIN agent_decisions decision_row ON decision_row.id = risk.decision_id WHERE decision_row.id IS NULL").catch(() => {});
+  // Unresolved legacy ownership must survive startup for explicit repair.
   const foreignKeys = [
     "ALTER TABLE tasks ADD CONSTRAINT fk_tasks_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE providers ADD CONSTRAINT fk_providers_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
@@ -615,7 +602,6 @@ async function createMongoAdapter() {
     agentRuns: database.collection("agent_runs"),
     agentOutput: database.collection("agent_output"),
   };
-  await collections.skills.deleteMany({ _id: { $in: LEGACY_DEMO_SKILL_IDS } });
   const adapter = {
     mode: "mongo",
     available: true,
