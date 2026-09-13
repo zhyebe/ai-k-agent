@@ -40,6 +40,9 @@ test("自动化流程限制数量为 20，人工确认流程保留建议数量",
   const manual = buildPendingAction({ ...base, autoDecisionEnabled: false }, decision);
   assert.equal(manual.suggestedQty, 80);
   assert.equal(manual.automatedQuantityLimit, false);
+  const testDefault = buildPendingAction({ ...base, metrics: { equity: 0 } }, decision);
+  assert.equal(testDefault.suggestedQty, 1);
+  assert.equal(testDefault.automatedQuantityLimit, false);
 });
 
 test("最终决策上下文包含当前页面、账户、时间戳和全部盘口", () => {
