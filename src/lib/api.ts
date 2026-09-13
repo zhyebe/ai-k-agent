@@ -213,6 +213,10 @@ export async function setAutoDecision(taskId: string, enabled: boolean, countdow
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/auto-decision`, { method: "POST", body: JSON.stringify({ enabled, countdownSec }) })).task;
 }
 
+export async function setAutomationTestMode(taskId: string, enabled: boolean): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/automation-test-mode`, { method: "POST", body: JSON.stringify({ enabled }) })).task;
+}
+
 export async function setTaskProvider(taskId: string, providerId: string): Promise<Task> {
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/provider`, { method: "POST", body: JSON.stringify({ providerId }) })).task;
 }

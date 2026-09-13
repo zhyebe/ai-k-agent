@@ -32,11 +32,13 @@ test("获利概率分档：超过 50% 即允许方向性提示", () => {
 });
 
 test("自动化流程限制数量为 20，人工确认流程保留建议数量", () => {
-  const base = { id: "quantity-limit", mode: "PAPER", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
+  const base = { id: "quantity-limit", mode: "PAPER", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, automationTestMode: false, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
   const decision = { action: "BUY", targetSymbol: "A", profitProbability: 0.8, targetPositionPct: 30, maxOrderValuePct: 8 };
   const automated = buildPendingAction(base, decision);
   assert.equal(automated.suggestedQty, 20);
   assert.equal(automated.automatedQuantityLimit, true);
+  const testAutomated = buildPendingAction({ ...base, automationTestMode: true }, decision);
+  assert.equal(testAutomated.suggestedQty, 1);
   const manual = buildPendingAction({ ...base, autoDecisionEnabled: false }, decision);
   assert.equal(manual.suggestedQty, 80);
   assert.equal(manual.automatedQuantityLimit, false);

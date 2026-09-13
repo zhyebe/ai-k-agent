@@ -4,6 +4,11 @@ export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValue
 export const tradingExecutionPolicy = Object.freeze({ enabled: true, mode: "CONFIRM_THEN_SUBMIT" });
 export const DEFAULT_AUTO_DECISION_COUNTDOWN_SEC = 30;
 export const MAX_AUTOMATED_QUANTITY = 20;
+export const TEST_AUTOMATED_QUANTITY = 1;
+
+export function automatedQuantityLimit(task) {
+  return task?.automationTestMode === false ? MAX_AUTOMATED_QUANTITY : TEST_AUTOMATED_QUANTITY;
+}
 
 export function isTradingSwitchOn() {
   return process.env.AXIOM_TRADING_ENABLED !== "0";
@@ -15,7 +20,7 @@ export function isLiveTask(task) {
 
 export function shouldSubmitLiveOrder(task, source = "manual_confirm") {
   return isLiveTask(task)
-    && source === "manual_confirm"
+    && (source === "manual_confirm" || (source === "auto_timeout" && task?.autoDecisionEnabled === true))
     && task?.stopLocked !== true
     && isTradingSwitchOn();
 }
@@ -58,8 +63,9 @@ export function suggestOrderPreview(task, decision, { enforceAutomationQuantity 
   } else if (hasPrice) {
     suggestedQty = 1;
   }
-  const quantityLimitApplied = enforceAutomationQuantity && suggestedQty !== null && suggestedQty > MAX_AUTOMATED_QUANTITY;
-  if (quantityLimitApplied) suggestedQty = MAX_AUTOMATED_QUANTITY;
+  const quantityLimit = automatedQuantityLimit(task);
+  const quantityLimitApplied = enforceAutomationQuantity && suggestedQty !== null && suggestedQty > quantityLimit;
+  if (quantityLimitApplied) suggestedQty = quantityLimit;
   return {
     action: decision?.action === "SELL" ? "SELL" : decision?.action === "BUY" ? "BUY" : "HOLD",
     suggestedPrice: hasPrice ? price : null,

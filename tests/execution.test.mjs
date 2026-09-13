@@ -39,5 +39,6 @@ test("buy and sell stay suggestions even when automation is explicitly authorize
   assert.equal(preview.formSubmitBlocked, true);
   assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), true);
   assert.equal(shouldSubmitLiveOrder({ mode: "PAPER" }, "manual_confirm"), false);
-  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "auto_timeout"), false);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: true }, "auto_timeout"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false }, "auto_timeout"), false);
 });

@@ -8,7 +8,7 @@ import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
 import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
-import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
+import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setAutomationTestMode, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
@@ -586,6 +586,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     automationAuthorized: false,
     autoDecisionEnabled: false,
     autoDecisionCountdownSec: 30,
+    automationTestMode: true,
     providerId: request.auth?.type === "user" ? resolveDefaultProviderId(request.auth.user.id) : "",
     pendingAction: null,
     target: {
@@ -689,6 +690,15 @@ app.post("/api/tasks/:taskId/auto-judge", { preHandler: requireTaskAccess }, asy
 app.post("/api/tasks/:taskId/auto-decision", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
     const task = setAutoDecision(request.params.taskId, { enabled: request.body?.enabled === true, countdownSec: request.body?.countdownSec });
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) {
+    return reply.code(400).send({ error: error.message });
+  }
+});
+app.post("/api/tasks/:taskId/automation-test-mode", { preHandler: requireTaskAccess }, async (request, reply) => {
+  try {
+    const task = setAutomationTestMode(request.params.taskId, request.body?.enabled !== false);
     broadcast();
     return { task: publicTask(task) };
   } catch (error) {

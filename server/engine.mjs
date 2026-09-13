@@ -2,7 +2,7 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
@@ -57,6 +57,7 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
 }
 
 function pendingWaitMessage(task, { auto = false, countdownSec = 0 } = {}) {
+  if (isLiveTask(task) && auto) return "自动化已开启，分析通过后自动下单";
   if (isLiveTask(task)) return "请在弹窗中确认后才会下单";
   if (auto) return `${countdownSec} 秒内可人工接管；超时后自动确认建议，观察模式不会下单`;
   return "请在弹窗中确认建议；观察模式不会下单";
@@ -100,7 +101,7 @@ function enforceProfitProbability(decision) {
 
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const countdownSec = Math.max(5, Math.min(300, Number(task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC)));
-  const auto = !isLiveTask(task) && task.autoDecisionEnabled === true;
+  const auto = task.autoDecisionEnabled === true;
   const preview = suggestOrderPreview(task, decision, { enforceAutomationQuantity: auto });
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
@@ -124,10 +125,10 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     formFilled: false,
     formSubmitBlocked: true,
     createdAt: new Date(now).toISOString(),
-    deadlineAt: auto ? new Date(now + countdownSec * 1000).toISOString() : null,
-    countdownSec: auto ? countdownSec : 0,
+    deadlineAt: auto && !isLiveTask(task) ? new Date(now + countdownSec * 1000).toISOString() : null,
+    countdownSec: auto && !isLiveTask(task) ? countdownSec : 0,
     resolvedAt: null,
-    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}${preview.quantityLimitApplied ? " 自动流程数量上限为 20" : ""}`,
+    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}${preview.quantityLimitApplied ? ` 自动流程数量上限为 ${automatedQuantityLimit(task)}` : ""}`,
   };
 }
 
@@ -193,7 +194,9 @@ async function openPendingAction(task, { runtime, run } = {}) {
         runId: run.id,
         stage: "action",
         message: task.pendingAction.formFilled
-          ? `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`
+          ? (isLiveTask(task) && task.autoDecisionEnabled === true
+            ? `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，自动化流程将提交订单`
+            : `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`)
           : `${pendingTargetLabel(task.pendingAction)}建议待确认；目标页未填写表单，尚未提交`,
         data: { pendingActionId: task.pendingAction.id, targetSymbol: task.pendingAction.targetSymbol, targetSymbolName: task.pendingAction.targetSymbolName, targetInstrumentId: task.pendingAction.targetInstrumentId, filled: task.pendingAction.formFilled, submitted: false },
       });
@@ -201,6 +204,15 @@ async function openPendingAction(task, { runtime, run } = {}) {
   } catch (error) {
     task.pendingAction.formFilled = false;
     task.pendingAction.message = `${task.pendingAction.message}；填表失败：${error.message}`;
+  }
+  if (isLiveTask(task) && task.autoDecisionEnabled === true && task.pendingAction?.status === "WAITING") {
+    try {
+      await confirmPendingAction(task.id, { source: "auto_timeout", runtime });
+    } catch (error) {
+      task.pendingAction.message = `${task.pendingAction.message}；自动下单失败：${error.message}`;
+      persistTask(task);
+    }
+    return task.pendingAction;
   }
   schedulePendingActionTimeout(task);
   persistTask(task);
@@ -219,7 +231,13 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
     task.autoDecisionCountdownSec = DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
   }
   if (task.pendingAction?.status === "WAITING") {
-    if (task.autoDecisionEnabled && !isLiveTask(task)) {
+    if (task.autoDecisionEnabled && isLiveTask(task)) {
+      task.pendingAction.countdownSec = 0;
+      task.pendingAction.deadlineAt = null;
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: true })}`;
+      clearPendingActionTimer(task.id);
+      queueMicrotask(() => confirmPendingAction(task.id, { source: "auto_timeout" }).catch(() => {}));
+    } else if (task.autoDecisionEnabled && !isLiveTask(task)) {
       const waitSec = task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
       task.pendingAction.countdownSec = waitSec;
       task.pendingAction.deadlineAt = new Date(Date.now() + waitSec * 1000).toISOString();
@@ -234,8 +252,18 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
   }
   task.updatedAt = new Date().toISOString();
   addEvent("auto_decision_updated", isLiveTask(task)
-    ? "实盘必须弹窗确认，不会自动下单"
+    ? (task.autoDecisionEnabled ? "实盘自动化已开启，买卖建议将自动下单" : "实盘自动化已关闭，买卖建议需弹窗确认")
     : task.autoDecisionEnabled ? `已打开自动决策，倒计时 ${task.autoDecisionCountdownSec} 秒` : "已关闭自动决策，建议需弹窗确认", { taskId, enabled: task.autoDecisionEnabled, countdownSec: task.autoDecisionCountdownSec });
+  persistTask(task);
+  return task;
+}
+
+export function setAutomationTestMode(taskId, enabled) {
+  const task = getTask(taskId);
+  if (!task) throw new Error("TASK_NOT_FOUND");
+  task.automationTestMode = enabled !== false;
+  task.updatedAt = new Date().toISOString();
+  addEvent("automation_test_mode_updated", task.automationTestMode ? "自动化测试开关已打开，数量上限为 1" : "自动化测试开关已关闭，数量上限为 20", { taskId, enabled: task.automationTestMode });
   persistTask(task);
   return task;
 }
@@ -262,14 +290,25 @@ export function setTaskMode(taskId, mode) {
   if (task.pendingAction?.status === "SUBMITTING") throw new Error("PENDING_ACTION_BUSY");
   const previous = task.mode;
   task.mode = next;
-  if (next === "LIVE") task.autoDecisionEnabled = false;
   if (task.pendingAction?.status === "WAITING") {
-    task.pendingAction.countdownSec = 0;
-    task.pendingAction.deadlineAt = null;
-    task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${next === "LIVE"
-      ? "实盘必须弹窗确认后才会下单"
-      : "观察模式确认后也不会提交实盘"}`;
-    clearPendingActionTimer(task.id);
+    if (next === "LIVE" && task.autoDecisionEnabled === true) {
+      task.pendingAction.countdownSec = 0;
+      task.pendingAction.deadlineAt = null;
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：自动化已开启，分析通过后自动下单`;
+      clearPendingActionTimer(task.id);
+      queueMicrotask(() => confirmPendingAction(task.id, { source: "auto_timeout" }).catch(() => {}));
+    } else if (next !== "LIVE" && task.autoDecisionEnabled === true) {
+      const waitSec = task.autoDecisionCountdownSec || DEFAULT_AUTO_DECISION_COUNTDOWN_SEC;
+      task.pendingAction.countdownSec = waitSec;
+      task.pendingAction.deadlineAt = new Date(Date.now() + waitSec * 1000).toISOString();
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: true, countdownSec: waitSec })}`;
+      schedulePendingActionTimeout(task);
+    } else {
+      task.pendingAction.countdownSec = 0;
+      task.pendingAction.deadlineAt = null;
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${next === "LIVE" ? "实盘必须弹窗确认后才会下单" : "观察模式确认后也不会提交实盘"}`;
+      clearPendingActionTimer(task.id);
+    }
   }
   task.updatedAt = new Date().toISOString();
   addEvent("task_mode_updated", next === "LIVE"
@@ -311,7 +350,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (source === "auto_timeout" && task.autoDecisionEnabled !== true) throw new Error("AUTO_DECISION_DISABLED");
-  if (source === "auto_timeout" && isLiveTask(task)) throw new Error("LIVE_REQUIRES_MANUAL_CONFIRM");
+  if (source === "auto_timeout" && isLiveTask(task) && task.autoDecisionEnabled !== true) throw new Error("LIVE_REQUIRES_MANUAL_CONFIRM");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
   pendingConfirmLocks.add(taskId);
   try {

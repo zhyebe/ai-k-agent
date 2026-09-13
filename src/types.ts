@@ -287,6 +287,7 @@ export interface Task {
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
   autoDecisionCountdownSec?: number;
+  automationTestMode?: boolean;
   providerId?: string;
   pendingAction?: PendingAction | null;
   activeRunId?: string | null;

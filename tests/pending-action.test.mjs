@@ -86,12 +86,12 @@ test("takeover cancels pending auto confirm and locks trading", () => {
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
 
-test("live suggestion waits for the confirm dialog and does not auto-submit", () => {
+test("live suggestion with automation enabled is eligible for auto-submit", () => {
   const task = insertTask(`task_live_wait_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(task.pendingAction.deadlineAt, null);
-  assert.match(task.pendingAction.message, /弹窗/);
+  assert.match(task.pendingAction.message, /自动化已开启/);
 });
 
 test("live confirm submits only after the user confirms", async () => {
@@ -177,10 +177,10 @@ test("multi-board pending action uses and submits the selected board price and i
   assert.equal(order.instrumentId, "537");
 });
 
-test("live auto timeout cannot skip the confirm dialog", async () => {
-  const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+test("live auto timeout cannot skip the confirm dialog when switch is off", async () => {
+  const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: false });
   task.pendingAction = buildPendingAction(task, task.decision);
-  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /LIVE_REQUIRES_MANUAL_CONFIRM/);
+  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /AUTO_DECISION_DISABLED/);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
@@ -189,7 +189,7 @@ test("existing paper tasks can switch to confirm-gated live", () => {
   const task = insertTask(`task_mode_${Date.now()}`, { mode: "PAPER", autoDecisionEnabled: true });
   const next = setTaskMode(task.id, "LIVE");
   assert.equal(next.mode, "LIVE");
-  assert.equal(next.autoDecisionEnabled, false);
+  assert.equal(next.autoDecisionEnabled, true);
 });
 
 test("cancel pending keeps monitoring and does not create an order", () => {
