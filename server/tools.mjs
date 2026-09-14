@@ -460,6 +460,9 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (responseOk === false || /失败|不足|错误|拒绝/.test(pageHint)) {
       return { ok: false, code: "TRADE_REJECTED", message: pageHint || "交易所拒绝下单", filled: true, submitted: true, responseOk };
     }
+    if (!response && !/成功|提交|受理|已委托|已下单/.test(pageHint)) {
+      return { ok: false, code: "TRADE_RESPONSE_TIMEOUT", message: "已点击下单按钮，但未收到交易接口响应，请核对订单状态后重试", filled: true, submitted: false, responseOk: null };
+    }
     return {
       ok: true,
       code: response ? "TRADE_SUBMITTED" : "TRADE_CLICKED",
