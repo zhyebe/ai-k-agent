@@ -732,6 +732,7 @@ function App() {
       replaceTask(next);
       notify(next.pendingAction?.message || (next.mode === "LIVE" ? "已确认并提交订单" : "已确认建议"));
     } catch (error) {
+      if (error instanceof Error && error.message === "TRADE_SUBMIT_CANCELLED") return;
       notify(`确认失败：${error instanceof Error ? error.message : "没有待确认建议"}`);
     } finally { setBusyAction(null); }
   }
@@ -1518,7 +1519,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
         {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{pending.action === "BUY" ? "买入订立" : "卖出转让"}。</span></div> : null}
         <p className="trade-confirm-message">{pending.message}</p>
         <div className="modal-actions trade-confirm-actions">
-          <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction !== null}>暂不下单</button>
+          <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction === "cancel"}>{busyAction === "cancel" ? "取消中" : "暂不下单"}</button>
           <button type="button" className="button button-primary" onClick={onConfirm} disabled={busyAction !== null}>
             <BusyIcon busy={submitting}><Check size={15} /></BusyIcon>{submitting ? "提交中" : live ? "确认并下单" : `确认${actionText}建议`}
           </button>

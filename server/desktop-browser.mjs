@@ -10,7 +10,7 @@ export function desktopBrowserRequired() {
 
 const methods = { openMarketBrowser, observeMarket, browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm, closeBrowserSession };
 
-export async function callBrowserMethod(method, userId, input = {}) {
+export async function callBrowserMethod(method, userId, input = {}, options = {}) {
   if (!Object.hasOwn(methods, method)) throw new Error("BROWSER_METHOD_UNKNOWN");
   if (!desktopBrowserRequired()) {
     if (method === "openMarketBrowser" || method === "observeMarket") return methods[method](input.task, input.connector);
@@ -28,10 +28,12 @@ export async function callBrowserMethod(method, userId, input = {}) {
     const task = input.task;
     browserInput.task = { id: task.id, symbol: task.symbol, timeframe: task.timeframe, target: task.target };
   }
+  const { signal, ...callOptions } = options || {};
   return invokeDesktopAi(userId, method, {
     channel: "browser",
     input: browserInput,
     credential: credential ? { username: credential.username, password: credential.password, target: credential.target } : undefined,
-    options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : 45000 },
+    signal,
+    options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : method === "submitSuggestionForm" ? 15000 : 45000, ...callOptions },
   });
 }

@@ -13,6 +13,7 @@ const cycleWaiters = new Map();
 const controllerLoops = new Map();
 const pendingActionTimers = new Map();
 const pendingConfirmLocks = new Set();
+const pendingSubmissionCancels = new Map();
 const DEFAULT_MONITOR_POLL_MS = 5000;
 const MAX_MONITOR_POLL_MS = 120000;
 const MIN_PROFIT_PROBABILITY = 0.5;
@@ -52,7 +53,7 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
     fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
-    submitSuggestionForm: use("submitSuggestionForm", (input) => callBrowserMethod("submitSuggestionForm", userId, input)),
+    submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, input, options)),
   };
 }
 
@@ -365,16 +366,34 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       };
       persistTask(task);
       const sessionId = task.target?.browserSessionId || `task:${task.id}`;
-      const submitted = await tools.submitSuggestionForm({
-        sessionId,
-        confirmationId: task.pendingAction.id,
-        action: task.pendingAction.action,
-        price: task.pendingAction.suggestedPrice,
-        quantity: task.pendingAction.suggestedQty,
-        symbol: task.pendingAction.targetSymbol,
-        symbolName: task.pendingAction.targetSymbolName,
-        instrumentId: task.pendingAction.targetInstrumentId,
-      });
+      const submissionAbort = new AbortController();
+      pendingSubmissionCancels.set(taskId, () => submissionAbort.abort(new Error("TRADE_SUBMIT_CANCELLED")));
+      let submitted;
+      try {
+        submitted = await tools.submitSuggestionForm({
+          sessionId,
+          confirmationId: task.pendingAction.id,
+          action: task.pendingAction.action,
+          price: task.pendingAction.suggestedPrice,
+          quantity: task.pendingAction.suggestedQty,
+          symbol: task.pendingAction.targetSymbol,
+          symbolName: task.pendingAction.targetSymbolName,
+          instrumentId: task.pendingAction.targetInstrumentId,
+        }, { signal: submissionAbort.signal });
+      } catch (error) {
+        if (task.pendingAction?.status === "SUBMITTING") {
+          task.pendingAction = {
+            ...task.pendingAction,
+            status: "WAITING",
+            message: `确认后下单失败：${error?.message || "目标页未响应，请重试或取消"}`,
+          };
+          task.nextTrigger = task.pendingAction.message;
+          persistTask(task);
+        }
+        throw error;
+      } finally {
+        if (pendingSubmissionCancels.get(taskId)) pendingSubmissionCancels.delete(taskId);
+      }
       if (submitted?.submitted === true && submitted.ok !== true) {
         const order = recordConfirmedOrder(task, task.pendingAction, {
           status: "rejected",
@@ -486,6 +505,21 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
 export function cancelPendingAction(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
+  if (task.pendingAction?.status === "SUBMITTING") {
+    pendingSubmissionCancels.get(taskId)?.();
+    clearPendingActionTimer(task.id);
+    task.pendingAction = {
+      ...task.pendingAction,
+      status: "CANCELLED",
+      source: "manual_cancel",
+      resolvedAt: new Date().toISOString(),
+      message: "已取消下单请求，未下单",
+    };
+    task.nextTrigger = task.pendingAction.message;
+    addEvent("suggestion_cancelled", task.pendingAction.message, { taskId, action: task.pendingAction.action });
+    persistTask(task);
+    return task;
+  }
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   clearPendingActionTimer(task.id);
   task.pendingAction = {

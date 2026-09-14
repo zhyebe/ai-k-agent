@@ -157,12 +157,38 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
   const id = `ai_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
   const timeoutMs = Math.min(120000, Math.max(1000, Number(payload.options?.timeoutMs) || 45000)) + 8000;
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      payload.signal?.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const onAbort = () => {
+      if (!pendingCalls.has(id)) return;
+      clearTimeout(timer);
+      pendingCalls.delete(id);
+      try { socket.send(JSON.stringify({ type: `${channel}.cancel`, id })); } catch {}
+      finish(reject, payload.signal?.reason instanceof Error ? payload.signal.reason : new Error("DESKTOP_AI_CANCELLED"));
+    };
     const timer = setTimeout(() => {
       pendingCalls.delete(id);
       try { socket.send(JSON.stringify({ type: `${channel}.cancel`, id })); } catch {}
-      reject(new Error(channel === "browser" ? "DESKTOP_BROWSER_TIMEOUT" : "DESKTOP_AI_TIMEOUT"));
+      finish(reject, new Error(channel === "browser" ? "DESKTOP_BROWSER_TIMEOUT" : "DESKTOP_AI_TIMEOUT"));
     }, timeoutMs);
-    pendingCalls.set(id, { resolve, reject, timer, socket, channel, userId: String(userId || "") });
+    pendingCalls.set(id, {
+      resolve: (value) => finish(resolve, value),
+      reject: (error) => finish(reject, error),
+      timer,
+      socket,
+      channel,
+      userId: String(userId || ""),
+    });
+    if (payload.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    payload.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       socket.send(JSON.stringify({
         type: `${channel}.call`,
@@ -180,7 +206,7 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
     } catch (error) {
       clearTimeout(timer);
       pendingCalls.delete(id);
-      reject(new Error(error?.message || "DESKTOP_AI_SEND_FAILED"));
+      finish(reject, new Error(error?.message || "DESKTOP_AI_SEND_FAILED"));
     }
   });
 }

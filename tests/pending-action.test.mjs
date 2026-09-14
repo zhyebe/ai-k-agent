@@ -200,3 +200,27 @@ test("cancel pending keeps monitoring and does not create an order", () => {
   assert.equal(next.stopLocked, false);
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
+
+test("cancel while submitting aborts the browser call and keeps the action cancelled", async () => {
+  const task = insertTask(`task_cancel_submitting_${Date.now()}`, { mode: "LIVE" });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let submissionSignal;
+  const confirmation = confirmPendingAction(task.id, {
+    runtime: {
+      submitSuggestionForm: async (_input, { signal }) => {
+        submissionSignal = signal;
+        await new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+        return { ok: false, submitted: false };
+      },
+    },
+  });
+  for (let attempt = 0; !submissionSignal && attempt < 20; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(submissionSignal);
+  const cancelled = cancelPendingAction(task.id);
+  assert.equal(cancelled.pendingAction.status, "CANCELLED");
+  await assert.rejects(confirmation, /TRADE_SUBMIT_CANCELLED/);
+  assert.equal(task.pendingAction.status, "CANCELLED");
+  assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});

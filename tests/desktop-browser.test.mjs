@@ -52,6 +52,20 @@ test("browser result is bound to its owning socket and pending calls fail immedi
   assert.equal(hasDesktopAi("owner"), false);
 });
 
+test("aborting a browser call sends cancellation to the desktop runtime", async (t) => {
+  t.after(resetDesktopAiForTests);
+  const socket = new Socket();
+  attachDesktopAiSocket("owner", socket);
+  socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
+  const controller = new AbortController();
+  const operation = invokeDesktopAi("owner", "submitSuggestionForm", { channel: "browser", signal: controller.signal });
+  await Promise.resolve();
+  const message = socket.sent[0];
+  controller.abort(new Error("TRADE_SUBMIT_CANCELLED"));
+  await assert.rejects(operation, /TRADE_SUBMIT_CANCELLED/);
+  assert.deepEqual(socket.sent[1], { type: "browser.cancel", id: message.id });
+});
+
 test("heartbeat evicts an unresponsive desktop socket", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   t.after(resetDesktopAiForTests);
