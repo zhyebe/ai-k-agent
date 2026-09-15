@@ -42,3 +42,25 @@ test("buy and sell stay suggestions even when automation is explicitly authorize
   assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: true }, "auto_timeout"), true);
   assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false }, "auto_timeout"), false);
 });
+
+test("离场预览使用持仓数量并保留止盈类型", () => {
+  const preview = suggestOrderPreview({
+    symbol: "DGKZ",
+    mode: "LIVE",
+    autoDecisionEnabled: true,
+    automationTestMode: true,
+    metrics: { equity: 5000 },
+    market: {
+      latest: { price: 1165 },
+      account: { positions: [{ symbol: "DGKZ", positionOrderId: "P-123", quantity: 3 }] },
+    },
+  }, {
+    action: "SELL",
+    exitType: "TAKE_PROFIT",
+    targetSymbol: "DGKZ",
+    targetPositionIds: ["P-123"],
+    profitProbability: 0.8,
+  }, { enforceAutomationQuantity: true });
+  assert.equal(preview.suggestedQty, 1);
+  assert.equal(preview.exitType, "TAKE_PROFIT");
+});

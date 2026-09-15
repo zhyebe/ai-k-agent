@@ -197,6 +197,7 @@ const displayLabel = (value: string | null | undefined, labels: Record<string, s
 };
 const displayAction = (value: string | null | undefined) => actionLabels[value as keyof typeof actionLabels] || "待确认";
 const displaySuggestion = (value: string | null | undefined) => actionSuggestionLabels[value as keyof typeof actionSuggestionLabels] || "待确认";
+const exitActionLabel = (action: string, exitType?: string | null) => action === "BUY" ? "买多（涨）" : exitType === "TAKE_PROFIT" ? "止盈卖出" : exitType === "STOP_LOSS" ? "止损卖出" : "卖出";
 const operatorLikelihoodLabels: Record<string, string> = { UNKNOWN: "无法判断", LOW: "疑似较低", MEDIUM: "疑似中等", HIGH: "疑似较高" };
 const operatorImpactLabels: Record<string, string> = { LOW: "影响较低", MEDIUM: "需关注", HIGH: "影响较高" };
 const decisionTargetLabel = (value: Pick<Decision, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | Pick<PendingAction, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | null | undefined) => value?.targetSymbolName || value?.targetSymbol || value?.targetInstrumentId || "";
@@ -1221,7 +1222,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
     return () => window.clearInterval(timer);
   }, [pending.id, pending.status, pending.deadlineAt]);
   const waiting = pending.status === "WAITING";
-  const actionText = pending.action === "BUY" ? "买多（涨）" : "买空（跌）";
+  const actionText = exitActionLabel(pending.action, pending.exitType);
   const target = decisionTargetLabel(pending);
   const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
   const probability = Number(pending.profitProbability ?? 0);
@@ -1247,7 +1248,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
 function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAction, onTakeoverAction, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; onManual: () => void; onConfirmAction: () => void; onTakeoverAction: () => void; busyAction: string | null }) {
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
-  const actionText = analyzed ? displaySuggestion(decision.action) : "尚未分析";
+  const actionText = analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
   const profitProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
   const target = decisionTargetLabel(decision);
   const pending = task.pendingAction;
@@ -1529,7 +1530,7 @@ function ProviderModal({ provider, onClose, onSave }: { provider: Provider | nul
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {
   const live = task.mode === "LIVE";
-  const actionText = pending.action === "BUY" ? "买多（涨）" : "买空（跌）";
+  const actionText = exitActionLabel(pending.action, pending.exitType);
   const target = decisionTargetLabel(pending);
   const submitting = pending.status === "SUBMITTING" || busyAction === "confirm";
   const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
@@ -1549,7 +1550,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
           <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
           <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>
         </div>
-        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{pending.action === "BUY" ? "买多（涨）" : "买空（跌）"}。</span></div> : null}
+        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{actionText}。</span></div> : null}
         <p className="trade-confirm-message">{pending.message}</p>
         <div className="modal-actions trade-confirm-actions">
           <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction === "cancel"}>{busyAction === "cancel" ? "取消中" : "暂不下单"}</button>

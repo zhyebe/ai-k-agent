@@ -16,7 +16,27 @@ import {
   resolveBoardInstruments,
   resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
-import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, uniqueBoardAssessments, uniquePageInstruments } from "../server/haohan.mjs";
+import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, parseHaohanPositions, uniqueBoardAssessments, uniquePageInstruments } from "../server/haohan.mjs";
+
+test("持仓明细解析止盈止损价和持仓单号", () => {
+  const positions = parseHaohanPositions([{ rows: [
+    ["商品名称", "买 | 卖", "订单价格", "止盈价", "止损价", "存货数量", "冻结数量", "存货订金", "订立时间", "持仓单号", "转让", "止盈 | 止损"],
+    ["DGKZ 丹桂康砖（二期）", "买", "1140", "1165", "1120", "3", "0", "3420", "2026-09-15 10:00", "P-123", "", "止盈 | 止损"],
+  ] }]);
+  assert.deepEqual(positions[0], {
+    symbol: "DGKZ",
+    symbolName: "DGKZ 丹桂康砖（二期）",
+    side: "买",
+    orderPrice: 1140,
+    takeProfitPrice: 1165,
+    stopLossPrice: 1120,
+    quantity: 3,
+    frozenQuantity: 0,
+    orderDeposit: 3420,
+    orderTime: "2026-09-15 10:00",
+    positionOrderId: "P-123",
+  });
+});
 
 test("浩瀚 K 线按真实列位解析 OHLC、成交量和库存", () => {
   const candle = normalizeHaohanKlineRow([1700000000000, 100, 101, 105, 99, 103, 200, 20600, 50]);

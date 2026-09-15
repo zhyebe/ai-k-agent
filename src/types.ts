@@ -85,6 +85,8 @@ export interface Rule {
 export interface PendingAction {
   id: string;
   action: "BUY" | "SELL";
+  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
+  targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
   targetInstrumentId?: string;
@@ -106,6 +108,8 @@ export interface PendingAction {
 
 export interface Decision {
   action: "BUY" | "SELL" | "HOLD";
+  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
+  targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
   targetInstrumentId?: string;
@@ -244,6 +248,19 @@ export interface MarketSnapshot {
     maxOrderQty?: number | null;
     exposurePct?: number | null;
     positionEmpty?: boolean;
+    positions?: Array<{
+      symbol?: string;
+      symbolName?: string;
+      side?: string;
+      orderPrice?: number | null;
+      takeProfitPrice?: number | null;
+      stopLossPrice?: number | null;
+      quantity?: number | null;
+      frozenQuantity?: number | null;
+      orderDeposit?: number | null;
+      orderTime?: string;
+      positionOrderId?: string;
+    }>;
   };
   pageView?: Record<string, unknown> | null;
   orderBook?: OrderBook | null;
@@ -413,6 +430,7 @@ export interface OrderItem {
   taskId: string;
   symbol: string;
   action: "BUY" | "SELL";
+  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
   mode: "PAPER" | "SHADOW" | "LIVE";
   status: string;
   targetPositionPct: number;

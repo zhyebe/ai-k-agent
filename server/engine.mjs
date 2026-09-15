@@ -70,6 +70,13 @@ function pendingTargetLabel(pending) {
   return String(pending?.targetSymbolName || pending?.targetSymbol || pending?.targetInstrumentId || "目标盘口");
 }
 
+function pendingActionLabel(pending) {
+  if (pending?.action === "BUY") return "买多（涨）";
+  if (pending?.exitType === "TAKE_PROFIT") return "止盈卖出";
+  if (pending?.exitType === "STOP_LOSS") return "止损卖出";
+  return "卖出";
+}
+
 export function profitSignalTier(value) {
   const probability = Number(value || 0);
   if (probability > 0.9) return "VERY_STRONG";
@@ -121,6 +128,8 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     action,
+    exitType: decision.exitType || null,
+    targetPositionIds: Array.isArray(decision.targetPositionIds) ? decision.targetPositionIds : [],
     targetSymbol: String(decision.targetSymbol || ""),
     targetSymbolName: String(decision.targetSymbolName || ""),
     targetInstrumentId: String(decision.targetInstrumentId || ""),
@@ -137,7 +146,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     deadlineAt: auto && !isLiveTask(task) ? new Date(now + countdownSec * 1000).toISOString() : null,
     countdownSec: auto && !isLiveTask(task) ? countdownSec : 0,
     resolvedAt: null,
-    message: `${targetLabel}：${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}${preview.quantityLimitApplied ? ` 自动流程数量上限为 ${automatedQuantityLimit(task)}` : ""}`,
+    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto, countdownSec })}${preview.quantityLimitApplied ? ` 自动流程数量上限为 ${automatedQuantityLimit(task)}` : ""}`,
   };
 }
 
@@ -186,6 +195,8 @@ async function openPendingAction(task, { runtime, run } = {}) {
     const filled = await runtime.fillSuggestionForm({
       sessionId,
       action: task.pendingAction.action,
+      exitType: task.pendingAction.exitType,
+      targetPositionIds: task.pendingAction.targetPositionIds,
       price: task.pendingAction.suggestedPrice,
       quantity: task.pendingAction.suggestedQty,
       symbol: task.pendingAction.targetSymbol,
@@ -195,8 +206,8 @@ async function openPendingAction(task, { runtime, run } = {}) {
     task.pendingAction.formFilled = filled?.filled === true && filled?.submitted !== true;
     if (filled?.submitted === true) task.pendingAction.formFilled = false;
     task.pendingAction.message = task.pendingAction.formFilled
-      ? `${task.pendingAction.message}；目标页已填入建议价格/数量`
-      : `${task.pendingAction.message}；目标页未找到可填字段，建议仍待确认`;
+      ? `${task.pendingAction.message}；${task.pendingAction.exitType ? "目标页已定位持仓并准备执行" : "目标页已填入建议价格/数量"}`
+      : `${task.pendingAction.message}；目标页未找到可操作持仓，建议仍待确认`;
     if (run) {
       appendAgentOutput({
         taskId: task.id,
@@ -204,8 +215,8 @@ async function openPendingAction(task, { runtime, run } = {}) {
         stage: "action",
         message: task.pendingAction.formFilled
           ? (isLiveTask(task) && task.autoDecisionEnabled === true
-            ? `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，自动化流程将提交订单`
-            : `已切换到${pendingTargetLabel(task.pendingAction)}并填写${task.pendingAction.action === "BUY" ? "买" : "卖"}价/量，等待弹窗确认后才会提交`)
+            ? `已定位${pendingTargetLabel(task.pendingAction)}持仓，自动化流程将执行${pendingActionLabel(task.pendingAction)}`
+            : `已定位${pendingTargetLabel(task.pendingAction)}持仓，等待弹窗确认后执行${pendingActionLabel(task.pendingAction)}`)
           : `${pendingTargetLabel(task.pendingAction)}建议待确认；目标页未填写表单，尚未提交`,
         data: { pendingActionId: task.pendingAction.id, targetSymbol: task.pendingAction.targetSymbol, targetSymbolName: task.pendingAction.targetSymbolName, targetInstrumentId: task.pendingAction.targetInstrumentId, filled: task.pendingAction.formFilled, submitted: false },
       });
@@ -364,6 +375,8 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
     symbolName: String(pending.targetSymbolName || ""),
     instrumentId: String(pending.targetInstrumentId || ""),
     action: pending.action,
+    exitType: pending.exitType || null,
+    targetPositionIds: pending.targetPositionIds || [],
     mode: task.mode,
     status,
     targetPositionPct: Number(task.decision?.targetPositionPct || 0),
@@ -390,13 +403,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   pendingConfirmLocks.add(taskId);
   try {
     clearPendingActionTimer(task.id);
-    const actionLabel = task.pendingAction.action === "BUY" ? "买入" : "卖出";
+    const actionLabel = pendingActionLabel(task.pendingAction);
     const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "" });
     if (shouldSubmitLiveOrder(task, source)) {
       task.pendingAction = {
         ...task.pendingAction,
         status: "SUBMITTING",
-        message: `正在向${pendingTargetLabel(task.pendingAction)}提交${actionLabel}订单…`,
+          message: `正在向${pendingTargetLabel(task.pendingAction)}执行${actionLabel}…`,
       };
       persistTask(task);
       const sessionId = task.target?.browserSessionId || `task:${task.id}`;
@@ -413,6 +426,8 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           symbol: task.pendingAction.targetSymbol,
           symbolName: task.pendingAction.targetSymbolName,
           instrumentId: task.pendingAction.targetInstrumentId,
+          exitType: task.pendingAction.exitType,
+          targetPositionIds: task.pendingAction.targetPositionIds,
         }, { signal: submissionAbort.signal });
       } catch (error) {
         if (task.pendingAction?.status === "SUBMITTING") {
@@ -1607,7 +1622,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
                 : invalidEvidence ? "HOLD_INVALID_EVIDENCE"
                   : providerUnavailable ? "HOLD_PROVIDER"
                     : "HOLD";
-      const actionLabel = task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望";
+      const actionLabel = task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? pendingActionLabel(task.decision) : "观望";
       const targetedActionLabel = decisionBoardLabel ? `${decisionBoardLabel} ${actionLabel}` : actionLabel;
       const ruleMessage = blocked
         ? `${targetedActionLabel}建议已保留，但红线触发，自动动作暂停`
@@ -1641,7 +1656,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const pending = task.pendingAction?.status === "WAITING";
       completeWorkflow(task, "action", pending ? `${decisionBoardLabel} ${task.decision.action} 建议待弹窗确认` : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${task.decision.action} 建议已生成`);
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${decisionBoardLabel} ${task.decision.action === "BUY" ? "买入" : "卖出"}建议待确认；${isLiveTask(task) ? "确认后才会下单" : "观察模式不会下单"}` : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? "卖出" : "观望"}建议已生成`, data: { action: task.decision.action, targetSymbol: task.decision.targetSymbol, targetSymbolName: task.decision.targetSymbolName, targetInstrumentId: task.decision.targetInstrumentId, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
+        appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: pending ? `${decisionBoardLabel} ${pendingActionLabel(task.pendingAction)}建议待确认；${isLiveTask(task) ? "确认后才会下单" : "观察模式不会下单"}` : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? pendingActionLabel(task.decision) : "观望"}建议已生成`, data: { action: task.decision.action, exitType: task.decision.exitType || null, targetPositionIds: task.decision.targetPositionIds || [], targetSymbol: task.decision.targetSymbol, targetSymbolName: task.decision.targetSymbolName, targetInstrumentId: task.decision.targetInstrumentId, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
     } else if (!execution.ok) {
       task.status = "PAUSED";
       route = execution.route || "BLOCKED";

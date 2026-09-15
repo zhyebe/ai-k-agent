@@ -427,14 +427,78 @@ export function extractHaohanPageInstrument(snapshot = {}) {
   };
 }
 
-export function parseHaohanAccount(visibleText) {
+function tableNumber(value) {
+  const raw = String(value ?? "").replace(/,/g, "").trim();
+  if (!raw || raw === "--") return null;
+  const match = raw.match(/[-+]?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const parsed = Number(match[0]);
+  if (!Number.isFinite(parsed)) return null;
+  if (/亿/.test(raw)) return parsed * 100000000;
+  if (/万/.test(raw)) return parsed * 10000;
+  return parsed;
+}
+
+export function parseHaohanPositions(tables = []) {
+  const positions = [];
+  for (const table of Array.isArray(tables) ? tables : []) {
+    const rows = Array.isArray(table?.rows) ? table.rows : [];
+    if (!rows.length) continue;
+    const header = rows.find((row) => Array.isArray(row) && row.some((cell) => /商品名称|持仓单号/.test(String(cell || ""))));
+    if (!header) continue;
+    const indexOf = (patterns) => header.findIndex((cell) => patterns.some((pattern) => pattern.test(String(cell || ""))));
+    const indexes = {
+      symbolName: indexOf([/商品名称/]),
+      side: indexOf([/^买\s*\|\s*卖$/, /买\s*卖/]),
+      orderPrice: indexOf([/订单价格/, /订立价/]),
+      takeProfitPrice: indexOf([/止盈价/]),
+      stopLossPrice: indexOf([/止损价/]),
+      quantity: indexOf([/存货数量/, /持仓数量/]),
+      frozenQuantity: indexOf([/冻结数量/]),
+      orderDeposit: indexOf([/存货订金/, /持仓订金/]),
+      orderTime: indexOf([/订立时间/, /开仓时间/]),
+      positionOrderId: indexOf([/持仓单号/, /订单号/]),
+    };
+    if (indexes.positionOrderId < 0 && indexes.symbolName < 0) continue;
+    const headerIndex = rows.indexOf(header);
+    for (const row of rows.slice(headerIndex + 1)) {
+      if (!Array.isArray(row) || !row.length) continue;
+      const text = row.join(" ").replace(/\s+/g, " ").trim();
+      if (!text || /暂无数据|合计/.test(text)) continue;
+      const valueAt = (key) => indexes[key] >= 0 ? String(row[indexes[key]] ?? "").trim() : "";
+      const positionOrderId = valueAt("positionOrderId");
+      const symbolName = valueAt("symbolName");
+      const quantity = tableNumber(valueAt("quantity"));
+      if (!positionOrderId && !symbolName) continue;
+      if (quantity !== null && quantity <= 0) continue;
+      const codeMatch = symbolName.match(/^([A-Z][A-Z0-9_.-]{1,24})(?:\s+|$)/);
+      positions.push({
+        symbol: codeMatch?.[1] || "",
+        symbolName,
+        side: valueAt("side"),
+        orderPrice: tableNumber(valueAt("orderPrice")),
+        takeProfitPrice: tableNumber(valueAt("takeProfitPrice")),
+        stopLossPrice: tableNumber(valueAt("stopLossPrice")),
+        quantity,
+        frozenQuantity: tableNumber(valueAt("frozenQuantity")),
+        orderDeposit: tableNumber(valueAt("orderDeposit")),
+        orderTime: valueAt("orderTime"),
+        positionOrderId,
+      });
+    }
+  }
+  return positions;
+}
+
+export function parseHaohanAccount(visibleText, tables = []) {
   const availableFunds = labeledValue(visibleText, ["可用资金"]);
   const equity = labeledValue(visibleText, ["账户权益", "客户权益", "动态权益"]) ?? availableFunds;
   const realtimeValueChange = labeledValue(visibleText, ["实时货值变化"]);
   const valueChange = labeledValue(visibleText, ["货值变化"]);
   const dayPnl = labeledValue(visibleText, ["今日盈亏", "当日盈亏"]) ?? valueChange ?? realtimeValueChange;
   const riskRate = labeledValue(visibleText, ["风险率"]);
-  const positionEmpty = /持仓明细/.test(visibleText) && /暂无数据/.test(visibleText);
+  const positions = parseHaohanPositions(tables);
+  const positionEmpty = positions.length === 0 && /持仓明细/.test(visibleText) && /暂无数据/.test(visibleText);
   return {
     availableFunds: round(availableFunds, 2),
     equity: round(equity, 2),
@@ -445,6 +509,7 @@ export function parseHaohanAccount(visibleText) {
     maxOrderQty: round(labeledValue(visibleText, ["最大下单量"]), 4),
     deposit: round(labeledValue(visibleText, ["订金"]), 2),
     positionEmpty,
+    positions,
     exposurePct: positionEmpty ? 0 : null,
   };
 }
@@ -513,7 +578,8 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   if (/#\/login(?:\?|$)/.test(String(snapshot.url || "")) || (!/最新价/.test(visibleText) && /登录|密码登录/.test(visibleText))) {
     return { ok: false, code: "REAUTH_REQUIRED", message: "目标网页登录态已失效，需要重新登录", page: { url: pageUrl, title, instrument }, instrument, observedAt: new Date(capturedAt).toISOString(), executionEnabled: false };
   }
-  const account = parseHaohanAccount(visibleText);
+  const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];
+  const account = parseHaohanAccount(visibleText, tables);
   const pageQuote = parseHaohanPageQuote(visibleText);
   const orderBook = { ...parseHaohanOrderBook(visibleText), observedAt: new Date(capturedAt).toISOString(), source: "browser-dom" };
   const pageView = { quote: pageQuote, orderBook, account };
@@ -543,7 +609,6 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   const inventory = pageQuote.inventory;
   const positionChange = pageQuote.positionChange;
   const closed = /(?:^|\s)闭市(?:\s|$)/.test(visibleText);
-  const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];
   const chartSamples = Array.isArray(snapshot.chartSamples) ? snapshot.chartSamples : [];
   const pageChart = uniqueCandles((Array.isArray(snapshot.klines) ? snapshot.klines : []).map(normalizeHqChartCandle).filter(Boolean));
   const hoverCandles = pageChart.length >= 20

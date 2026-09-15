@@ -316,32 +316,67 @@ export function suggestionFormLabels(action) {
     : { price: "买价", quantity: "买量" };
 }
 
-async function selectPositionForSell(page, { symbol = "", symbolName = "", instrumentId = "" } = {}) {
-  const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase()).filter(Boolean);
-  if (!values.length) return { ok: false, code: "SELL_POSITION_TARGET_MISSING" };
+async function selectPositionForSell(page, { symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [], activate = true } = {}) {
+  const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+  const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+  if (!values.length && !ids.length) return { ok: false, code: "SELL_POSITION_TARGET_MISSING" };
   try {
-    return await page.evaluate(({ targetValues }) => {
-      const normalize = (value) => String(value || "").replace(/\s+/g, "").toLocaleLowerCase();
+    return await page.evaluate(({ targetValues, targetIds, shouldActivate }) => {
+      const normalize = (value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
       const visible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
         return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
       };
       const rows = Array.from(document.querySelectorAll("tr, [role='row'], .el-table__row, li, .position-row")).filter(visible);
-      const row = rows.find((item) => {
+      const matches = rows.filter((item) => {
         const text = normalize(item.textContent);
-        return text && targetValues.some((value) => text.includes(value));
-      });
-      if (!row) return { ok: false, code: "SELL_POSITION_NOT_FOUND" };
-      row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
-      return { ok: true, code: "SELL_POSITION_SELECTED" };
-    }, { targetValues: values });
+        return text && (targetIds.some((value) => text.includes(value)) || targetValues.some((value) => text.includes(value)));
+      }).filter((item, _, list) => !list.some((other) => other !== item && other.contains(item)));
+      if (!matches.length) return { ok: false, code: "SELL_POSITION_NOT_FOUND", selectedCount: 0 };
+      if (shouldActivate) {
+        for (const row of matches) row.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, view: window }));
+      }
+      return { ok: true, code: "SELL_POSITION_SELECTED", selectedCount: matches.length, positionTexts: matches.map((row) => normalize(row.textContent).slice(0, 240)) };
+    }, { targetValues: values, targetIds: ids, shouldActivate: activate });
   } catch (error) {
     return { ok: false, code: "SELL_POSITION_SELECT_FAILED", message: error.message };
   }
 }
 
-export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "" } = {}) {
+async function clickPositionExitControl(page, { symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [], exitType = "" } = {}) {
+  const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+  const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+  const controlText = exitType === "STOP_LOSS" ? "止损" : exitType === "TAKE_PROFIT" ? "止盈" : "";
+  if (!controlText || (!values.length && !ids.length)) return { ok: false, code: "EXIT_TARGET_MISSING" };
+  try {
+    return await page.evaluate(({ targetValues, targetIds, label }) => {
+      const normalize = (value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      const visible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const rows = Array.from(document.querySelectorAll("tr, [role='row'], .el-table__row, li, .position-row")).filter(visible);
+      const matches = rows.filter((row) => {
+        const text = normalize(row.textContent);
+        return text && (targetIds.some((value) => text.includes(value)) || targetValues.some((value) => text.includes(value)));
+      }).filter((row, _, list) => !list.some((other) => other !== row && other.contains(row)));
+      let clicked = 0;
+      for (const row of matches) {
+        const controls = Array.from(row.querySelectorAll("button, [role='button'], a, [data-action], span, div"));
+        const control = controls.find((node) => visible(node) && normalize(node.textContent).includes(label)
+          && (node.matches("button, [role='button'], a, [data-action]") || node.children.length === 0));
+        if (control && typeof control.click === "function") { control.click(); clicked += 1; }
+      }
+      return { ok: clicked > 0, code: clicked > 0 ? "EXIT_CONTROL_CLICKED" : "EXIT_CONTROL_NOT_FOUND", selectedCount: matches.length, clickedCount: clicked };
+    }, { targetValues: values, targetIds: ids, label: controlText });
+  } catch (error) {
+    return { ok: false, code: "EXIT_CONTROL_CLICK_FAILED", message: error.message };
+  }
+}
+
+export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, targetPositionIds = [] } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
   }
@@ -352,7 +387,7 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
     const selected = await selectPageBoardInstrument(sessionId, targetInstrument);
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false, fields: [] };
   }
-  const positionSelection = action === "SELL" ? await selectPositionForSell(page, targetInstrument) : null;
+  const positionSelection = action === "SELL" ? await selectPositionForSell(page, { ...targetInstrument, targetPositionIds, activate: !exitType }) : null;
   const labels = suggestionFormLabels(action);
   try {
     const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
@@ -385,9 +420,9 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
       return { filled, forbiddenButtons, submitted: false };
     }, { labels, priceValue: price, quantityValue: quantity });
     return {
-      ok: result.filled.length > 0,
-      code: result.filled.length ? "FORM_FILLED_NOT_SUBMITTED" : "FORM_FIELDS_NOT_FOUND",
-      filled: result.filled.length > 0,
+      ok: result.filled.length > 0 || Boolean(exitType && positionSelection?.ok),
+      code: result.filled.length ? "FORM_FILLED_NOT_SUBMITTED" : exitType && positionSelection?.ok ? "EXIT_POSITION_READY" : "FORM_FIELDS_NOT_FOUND",
+      filled: result.filled.length > 0 || Boolean(exitType && positionSelection?.ok),
       submitted: false,
       fields: result.filled,
       positionSelection,
@@ -398,14 +433,14 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
   }
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "" } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, targetPositionIds = [] } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   }
-  if (price == null || quantity == null || !Number(quantity)) {
+  if (!exitType && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
-  const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId });
+  const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, targetPositionIds });
   if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };
@@ -413,12 +448,14 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   try {
     const writeWait = page.waitForResponse((response) => {
       try {
-        return /\/intraday-trade\/trade\/(make|marketTake)/.test(response.url());
+        return response.request?.().method?.() !== "GET" && /intraday-trade|position|holding|warehouse|trade/.test(response.url());
       } catch {
         return false;
       }
     }, { timeout: 12000 }).catch(() => null);
-    const clicked = await page.evaluate(({ buttonLabel }) => {
+    const clicked = exitType
+      ? await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType })
+      : await page.evaluate(({ buttonLabel }) => {
       const normalize = (value) => String(value || "").replace(/\s+/g, "");
       function acceptAgreement() {
         const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
@@ -443,8 +480,13 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       if (!button) return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND" };
       button.click();
       return { clicked: true, label: normalize(button.textContent) };
-    }, { buttonLabel: submitLabel });
-    if (!clicked.clicked) {
+      }, { buttonLabel: submitLabel });
+    if (exitType && !clicked.ok) {
+      const fallback = await selectPositionForSell(page, { symbol, symbolName, instrumentId, targetPositionIds, activate: true });
+      if (!fallback.ok) return { ok: false, code: fallback.code, message: "目标页未找到可操作持仓", filled: true, submitted: false };
+      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到止盈/止损按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
+    }
+    if (!exitType && !clicked.clicked) {
       return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: "目标页未找到下单按钮", filled: true, submitted: false };
     }
     const response = await writeWait;

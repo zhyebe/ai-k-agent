@@ -58,7 +58,15 @@ export function suggestOrderPreview(task, decision, { enforceAutomationQuantity 
   );
   const hasPrice = Number.isFinite(price) && price > 0;
   let suggestedQty = null;
-  if (hasPrice && Number.isFinite(equity) && equity > 0 && pct > 0) {
+  const positions = Array.isArray(task?.market?.account?.positions) ? task.market.account.positions : [];
+  const targetIds = new Set(Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds.map(String) : []);
+  const targetPosition = decision?.exitType && positions.find((position) => {
+    if (targetIds.size && targetIds.has(String(position?.positionOrderId || ""))) return true;
+    return [position?.symbol, position?.symbolName, position?.positionOrderId].some((value) => String(value || "") && normalizedTargetValues(decision).includes(String(value).trim().toLocaleLowerCase()));
+  });
+  if (decision?.exitType && Number(targetPosition?.quantity) > 0) {
+    suggestedQty = Number(targetPosition.quantity);
+  } else if (hasPrice && Number.isFinite(equity) && equity > 0 && pct > 0) {
     suggestedQty = Math.max(1, Math.floor((equity * (pct / 100)) / price));
   } else if (hasPrice) {
     suggestedQty = 1;
@@ -68,6 +76,8 @@ export function suggestOrderPreview(task, decision, { enforceAutomationQuantity 
   if (quantityLimitApplied) suggestedQty = quantityLimit;
   return {
     action: decision?.action === "SELL" ? "SELL" : decision?.action === "BUY" ? "BUY" : "HOLD",
+    exitType: decision?.exitType || null,
+    targetPositionIds: Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : [],
     suggestedPrice: hasPrice ? price : null,
     suggestedQty,
     quantityLimitApplied,
