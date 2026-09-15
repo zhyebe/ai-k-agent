@@ -1,7 +1,7 @@
 import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-ai.mjs";
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
-import { approvedKnowledgeForAnalysis } from "./rag.mjs";
+import { approvedKnowledgeForAnalysis, buildApprovedExperiencePrompt } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
@@ -1175,7 +1175,8 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       ...(market.account || {}),
     },
     rules: task.rules,
-    evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, segmentId, rowStart, rowEnd, rowCount, contentHash })),
+    experiencePrompt: buildApprovedExperiencePrompt(evidence),
+    evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash })),
     evidenceIds: evidence.map((item) => item.evidenceId).filter(Boolean),
     previousAnalysis: {
       fingerprint: task.lastAnalyzedFingerprint || null,
@@ -1240,7 +1241,8 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
     symbolName: market.symbolName,
     primaryTimeframe: market.timeframe,
     rules: task.rules,
-    evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score })),
+    experiencePrompt: buildApprovedExperiencePrompt(evidence),
+    evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags })),
     coverage: plan.coverage,
   };
   appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `分层行情已拆分为 ${plan.segments.length} 个 AI 分析片段，覆盖 ${plan.coverage.totalKlineRows} 根 K 线（分钟/小时/日/月，不含秒级逐笔）`, data: { coverage: plan.coverage } });
@@ -1432,6 +1434,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     });
     const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
     const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
+    const experiencePrompt = buildApprovedExperiencePrompt(knowledge, (Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES) + 4096);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
@@ -1468,6 +1471,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           account: { ...task.metrics, ...(market.account || {}) },
           rules: task.rules,
           evidence,
+          experiencePrompt,
           evidenceIds: evidence.map((item) => item.evidenceId),
           previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
           conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },

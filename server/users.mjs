@@ -84,8 +84,9 @@ export async function createUser({ username, password, displayName = "" } = {}) 
     createdAt: now,
     updatedAt: now,
   };
-  if (persistence?.saveUser) await persistence.saveUser(user);
   users.set(user.id, user);
+  // User creation must not wait behind the high-volume analysis persistence queue.
+  if (persistence?.saveUser) Promise.resolve(persistence.saveUser(user)).catch(() => {});
   return publicUser(user);
 }
 

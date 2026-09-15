@@ -191,6 +191,27 @@ test("provider decision receives bounded evidence context", async () => {
   }
 });
 
+test("provider decision sends approved experience as a separate analysis prompt", async () => {
+  let received;
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    received = JSON.parse(body);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD" }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+    await requestDecision(provider, { evidenceIds: ["evidence:skill:one:v1"], experiencePrompt: "标题：盘口回撤经验\n原文：放量突破后观察回撤" });
+    const promptMessage = received.messages.find((message) => message.content.includes("标题：盘口回撤经验"));
+    assert.ok(promptMessage);
+    assert.match(promptMessage.content, /审核通过的 Skill/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("provider decision preserves target board identity and per-board assessments", async () => {
   const server = http.createServer(async (_request, response) => {
     response.setHeader("content-type", "application/json");

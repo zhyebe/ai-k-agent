@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { analyzeCollectedMarket } from "../server/market-analysis.mjs";
-import { approvedKnowledgeForAnalysis } from "../server/rag.mjs";
+import { approvedKnowledgeForAnalysis, buildApprovedExperiencePrompt } from "../server/rag.mjs";
 import { marketDataFingerprint } from "../server/market.mjs";
 import { summarizeOrderBook } from "../server/order-book.mjs";
 import { parseHaohanOrderBook } from "../server/haohan.mjs";
@@ -33,6 +33,9 @@ test("direct analysis sends full approved owner experience and both order books 
   ], "owner");
   assert.equal(evidence.length, 1);
   assert.equal(evidence[0].excerpt, content);
+  const experiencePrompt = buildApprovedExperiencePrompt(evidence);
+  assert.match(experiencePrompt, /标题：经验/);
+  assert.match(experiencePrompt, /原文：/);
   assert.throws(() => approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content }], "owner", 10), /EXPERIENCE_CONTEXT_TOO_LARGE/);
   const now = Date.now();
   const makeBook = (symbol, price) => ({ symbol, timeframe: "1m", dataAt: new Date(now).toISOString(), history: [{ timestamp: now - 60000, open: price, high: price + 1, low: price - 1, close: price, volume: 10 }], orderBook: summarizeOrderBook({ bids: [{ level: 1, price, volume: 100 }], asks: [{ level: 1, price: price + 1, volume: 40 }] }), raw: { duplicate: "x".repeat(300000) } });
@@ -44,13 +47,14 @@ test("direct analysis sends full approved owner experience and both order books 
     const input = JSON.parse(payload.messages.at(-1).content);
     const context = input.context || input;
     assert.equal(context.evidence[0].excerpt, content);
+    assert.equal(context.experiencePrompt, experiencePrompt);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);
     assert.equal(context.market.books[1].raw, undefined);
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", profit_probability: 0.55, confidence: 0.6, target_symbol: "B", operator_assessment: { likelihood: "MEDIUM", confidence: 0.7, evidence: ["固定间隔逐笔样本"], limitations: ["没有撤单数据"], impact: "MEDIUM" } }) } }] }), { headers: { "content-type": "application/json" } });
   });
-  const result = await analyzeCollectedMarket({ apiKey: "test", apiFormat: "chat", baseUrl: "https://provider.example.test", model: "model" }, market, { evidence, evidenceIds: evidence.map((item) => item.evidenceId) });
+  const result = await analyzeCollectedMarket({ apiKey: "test", apiFormat: "chat", baseUrl: "https://provider.example.test", model: "model" }, market, { evidence, evidenceIds: evidence.map((item) => item.evidenceId), experiencePrompt });
   assert.equal(calls, 1);
   assert.equal(result.coverage.mode, "direct_client");
   assert.equal(result.coverage.bookCount, 2);
