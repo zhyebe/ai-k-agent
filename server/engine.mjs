@@ -84,6 +84,12 @@ export function profitSignalLabel(tier) {
   return ({ EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示" })[tier] || "观望";
 }
 
+function profitProbabilityLabel(value) {
+  const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
+  const label = percent >= 49 && percent < 52 ? percent.toFixed(1) : Math.round(percent).toString();
+  return label.endsWith(".0") ? label.slice(0, -2) : label;
+}
+
 function enforceProfitProbability(decision) {
   const profitProbability = Math.min(1, Math.max(0, Number(decision?.profitProbability ?? decision?.confidence ?? 0) || 0));
   const signalTier = profitSignalTier(profitProbability);
@@ -111,7 +117,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const decisionProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
   const signalTier = profitSignalTier(decisionProbability);
   const signalLabel = profitSignalLabel(signalTier);
-  const probabilityLabel = `${Math.round(decisionProbability * 100)}%`;
+  const probabilityLabel = `${profitProbabilityLabel(decisionProbability)}%`;
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     action,

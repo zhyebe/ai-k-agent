@@ -1078,6 +1078,11 @@ function MetricCard({ label, value, detail, change, tone, icon }: { label: strin
 
 const timeframeLabels: Record<string, string> = { fs: "分时", "1m": "1 分", "3m": "3 分", "5m": "5 分", "10m": "10 分", "15m": "15 分", "30m": "30 分", "1h": "60 分", "2h": "2 小时", "4h": "4 小时", "1d": "日线", "1w": "周线", "1mo": "月线" };
 const marketNumber = (value: number | null | undefined, digits = 2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits }) : "--";
+const profitProbabilityLabel = (value: number) => {
+  const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
+  const label = percent >= 49 && percent < 52 ? percent.toFixed(1) : Math.round(percent).toString();
+  return label.endsWith(".0") ? label.slice(0, -2) : label;
+};
 
 function CandleChart({ candles }: { candles: MarketCandle[] }) {
   const complete = candles.filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => typeof value === "number" && Number.isFinite(value) && value > 0));
@@ -1228,7 +1233,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
       </div>
       <p>{pending.message}</p>
       <div className="pending-action-meta">
-        <span>{signalLabel} {Math.round(probability * 100)}%</span>
+        <span>{signalLabel} {profitProbabilityLabel(probability)}%</span>
         <span>目标盘 {target || "--"}</span>
         <span>建议价 {pending.suggestedPrice ?? "--"}</span>
         <span>建议量 {pending.suggestedQty ?? "--"}</span>
@@ -1254,12 +1259,12 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${Math.round(profitProbability * 100)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${profitProbabilityLabel(profitProbability)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
-      <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{Math.round(profitProbability * 100)}%</b></span></div>
+      <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{profitProbabilityLabel(profitProbability)}%</b></span></div>
       <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
-      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {Math.round(Number(item.profitProbability ?? item.confidence ?? 0) * 100)}% 获利概率</span></div>)}</div> : null}
+      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {profitProbabilityLabel(Number(item.profitProbability ?? item.confidence ?? 0))}% 获利概率</span></div>)}</div> : null}
       {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}
       <div className="reason-block">
         <span className="block-label">机器可验证依据</span>
