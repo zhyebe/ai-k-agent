@@ -40,6 +40,7 @@ export function publicTask(task) {
   if (!task) return task;
   const { ownerUserId, ...safeTask } = task;
   const target = task.target ? { ...task.target, credentialRef: "" } : task.target;
+  if (target?.marketAnalysis) target.marketAnalysis = { ...target.marketAnalysis, credentialRef: "" };
   if (target) {
     delete target.credentialOwnerUserId;
     delete target.browserSessionId;
@@ -51,6 +52,7 @@ export function publicTask(task) {
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     automationTestMode: task.automationTestMode !== false,
     providerId: String(task.providerId || ""),
+    monitorAllBoards: task.monitorAllBoards === true,
     pendingAction: task.pendingAction || null,
     target,
   };
@@ -161,6 +163,7 @@ function sanitizeHydratedTask(task) {
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
     monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : Boolean(task.monitoringEnabled),
+    monitorAllBoards: task.monitorAllBoards === true,
     monitorGeneration: Number(task.monitorGeneration || 0),
     monitoringRound: Number(task.monitoringRound || 0),
     monitorFailureCount: Number(task.monitorFailureCount || 0),

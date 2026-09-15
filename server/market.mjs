@@ -642,7 +642,7 @@ function instrumentFromDetail(detail) {
   };
 }
 
-export function resolveBoardInstruments({ pageInstruments = [], marketDetails = [], pageCurrent = null, configuredSymbol = "" } = {}) {
+export function resolveBoardInstruments({ pageInstruments = [], marketDetails = [], pageCurrent = null, configuredSymbol = "", selectedOnly = false } = {}) {
   const details = Array.isArray(marketDetails) ? marketDetails : [];
   const pageList = uniquePageInstruments(pageInstruments);
   const current = normalizePageInstrument(pageCurrent);
@@ -667,14 +667,20 @@ export function resolveBoardInstruments({ pageInstruments = [], marketDetails = 
       detail: source?.detail || null,
     };
   });
-  if (pageList.length >= 2) return uniqueBoards(pageList.map(attachDetail));
-  if (details.length) return uniqueBoards(details.map((item) => {
+  let result;
+  if (pageList.length >= 2) result = uniqueBoards(pageList.map(attachDetail));
+  else if (details.length) result = uniqueBoards(details.map((item) => {
     const fromDetail = instrumentFromDetail(item);
     return { symbol: fromDetail.symbol, symbolName: fromDetail.symbolName, instrumentId: fromDetail.instrumentId, detail: fromDetail };
   }));
-  if (pageList.length) return uniqueBoards(pageList.map(attachDetail));
-  const fallback = attachDetail(current || { symbol: configuredSymbol, symbolName: "", instrumentId: "" });
-  return fallback.symbol || fallback.symbolName || fallback.instrumentId ? [fallback] : [];
+  else if (pageList.length) result = uniqueBoards(pageList.map(attachDetail));
+  else {
+    const fallback = attachDetail(current || { symbol: configuredSymbol, symbolName: "", instrumentId: "" });
+    result = fallback.symbol || fallback.symbolName || fallback.instrumentId ? [fallback] : [];
+  }
+  if (!selectedOnly) return result;
+  const target = pageList[0] || normalizePageInstrument(current) || { symbol: configuredSymbol };
+  return result.filter((item) => samePageInstrument(item, target));
 }
 
 export function pickPrimaryBoard(books = [], { configuredSymbol = "", pageSymbol = "" } = {}) {
@@ -1096,7 +1102,7 @@ export async function fetchHaohanBoardMarkets({ instruments = [], pageCurrent = 
     try { socket?.close(); } catch {}
   }
   const { primary, requested } = analysisTimeframes(timeframe);
-  const targets = resolveBoardInstruments({ pageInstruments: instruments, marketDetails: details, pageCurrent, configuredSymbol });
+  const targets = resolveBoardInstruments({ pageInstruments: instruments, marketDetails: details, pageCurrent, configuredSymbol, selectedOnly: instruments.length === 1 && Boolean(configuredSymbol) });
   const books = [];
   await Promise.all(targets.map(async (item) => {
     if (!item.instrumentId) return;
@@ -1197,11 +1203,21 @@ export async function observeMarket(task, connector) {
   const timeframe = task.timeframe || "15m";
   const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe });
   if (parsed.code === "REAUTH_REQUIRED") return parsed;
-  const pageInstruments = uniquePageInstruments([
+  const allPageInstruments = uniquePageInstruments([
     ...(Array.isArray(pageSnapshot.instruments) ? pageSnapshot.instruments : []),
     pageInstrument,
     ...(await listPageBoardInstruments(sessionId)),
   ]);
+  const monitorAllBoards = task.monitorAllBoards === true;
+  const selectedTarget = {
+    symbol: String(task.target?.selectedSymbol || configuredSymbol || "").trim(),
+    symbolName: String(task.target?.selectedSymbolName || "").trim(),
+    instrumentId: String(task.target?.selectedInstrumentId || "").trim(),
+  };
+  const pageInstruments = monitorAllBoards || !selectedTarget.symbol
+    ? allPageInstruments
+    : allPageInstruments.filter((instrument) => samePageInstrument(instrument, selectedTarget));
+  if (!pageInstruments.length && selectedTarget.symbol) pageInstruments.push(selectedTarget);
   const apiBoard = await fetchHaohanBoardMarkets({
     instruments: pageInstruments,
     pageCurrent: pageInstrument,
@@ -1213,6 +1229,7 @@ export async function observeMarket(task, connector) {
     marketDetails: apiBoard.details,
     pageCurrent: pageInstrument,
     configuredSymbol,
+    selectedOnly: !monitorAllBoards,
   });
   const pageBooks = [];
   const recordPageSnapshot = (snapshot, intended) => {
@@ -1230,7 +1247,7 @@ export async function observeMarket(task, connector) {
     return parsedPage;
   };
   recordPageSnapshot(pageSnapshot, pageInstrument);
-  if (cycleTargets.length > 1) {
+  if (cycleTargets.length && !samePageInstrument(cycleTargets[0], pageInstrument)) {
     const collected = await collectAllPageBoards(sessionId, cycleTargets);
     for (const item of collected) {
       if (!item.selected) continue;
@@ -1283,6 +1300,7 @@ export async function observeMarket(task, connector) {
     books: mergedBooks,
     raw: { ...(primary.raw || {}), page, bookCount: mergedBooks.length, boards: apiBoard.targets },
   });
+  enriched.availableBoards = allPageInstruments.map((item) => ({ symbol: item.symbol || "", symbolName: item.symbolName || "", instrumentId: item.instrumentId || "" }));
   enriched.boardCoverage = boardCoverageForTargets(cycleTargets, mergedBooks);
   enriched.expectedBookCount = enriched.boardCoverage.expected || mergedBooks.length;
   if (!enriched.boardCoverage.complete) {

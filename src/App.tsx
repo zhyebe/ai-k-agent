@@ -75,6 +75,7 @@ import {
   setAutoDecision,
   setAutomationTestMode,
   setTaskMode,
+  setTaskMarketSelection,
   setTaskProvider,
   startTask,
   stopTask,
@@ -116,8 +117,8 @@ const statusMetaLabels: Record<string, string> = Object.fromEntries(Object.entri
 
 const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买入", SELL: "卖出", HOLD: "观望" };
-const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买入", SELL: "建议卖出", HOLD: "保持观望" };
+const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买多", SELL: "买空", HOLD: "观望" };
+const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买多（涨）", SELL: "建议买空（跌）", HOLD: "保持观望" };
 const profitSignalLabels: Record<string, string> = { EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
 const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（确认后下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
@@ -141,6 +142,7 @@ const routeLabels: Record<string, string> = {
   STOP_LOCKED: "停止锁定",
   TRADING_DISABLED: "交易动作已锁定",
   WAITING_FOR_CHANGE: "等待行情变化",
+  WAITING_FOR_ENTRY: "等待入场条件",
 };
 const riskLabels: Record<string, string> = {
   NOT_ANALYZED: "尚未分析",
@@ -686,6 +688,18 @@ function App() {
     } finally { setBusyAction(null); }
   }
 
+  async function handleSelectMarket(selection: { symbol: string; symbolName?: string; instrumentId?: string }) {
+    if (!task || !selection.symbol || (selection.symbol === (task.target.selectedSymbol || task.symbol) && String(selection.instrumentId || "") === String(task.target.selectedInstrumentId || ""))) return;
+    setBusyAction("market-selection");
+    try {
+      const next = await setTaskMarketSelection(task.id, selection);
+      replaceTask(next);
+      notify(`已切换监测盘口：${selection.symbolName || selection.symbol}`);
+    } catch (error) {
+      notify(`切换监测盘口失败：${error instanceof Error ? error.message : "请稍后重试"}`);
+    } finally { setBusyAction(null); }
+  }
+
   async function handleSetMode(mode: string) {
     if (!task || !mode || mode === task.mode) return;
     setBusyAction("mode");
@@ -1022,7 +1036,7 @@ function App() {
           {loadError && <LoadError title={workspaceReady ? "同步失败，当前显示上次数据" : "工作区加载失败"} message={loadError} busy={workspaceLoading} onRetry={() => setRefreshVersion((value) => value + 1)} />}
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
-          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onToggleAutomationTestMode={handleAutomationTestModeToggle} onSelectProvider={handleSelectProvider} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onToggleAutomationTestMode={handleAutomationTestModeToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
@@ -1044,7 +1058,7 @@ function App() {
   );
 }
 
-function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onManual, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onToggleAutomationTestMode, onSelectProvider, onSetMode, onConfirmAction, onTakeoverAction }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onManual: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onToggleAutomationTestMode: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onSetMode: (mode: string) => void; onConfirmAction: () => void; onTakeoverAction: () => void }) {
+function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onManual, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onToggleAutomationTestMode, onSelectProvider, onSelectMarket, onSetMode, onConfirmAction, onTakeoverAction }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onManual: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onToggleAutomationTestMode: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onSelectMarket: (selection: { symbol: string; symbolName?: string; instrumentId?: string }) => void; onSetMode: (mode: string) => void; onConfirmAction: () => void; onTakeoverAction: () => void }) {
   const pendingReview = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
   const providers = configuredProviders(workspace.providers);
   const currentProviderId = selectedProviderId(task, workspace.providers);
@@ -1052,7 +1066,7 @@ function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, 
     <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BusyIcon busy={busyAction === "analyze"}><BarChart3 size={15} /></BusyIcon>{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
     <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{task.monitoringEnabled && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{task.monitoringEnabled ? (task.status === "MONITORING" ? "Agent 正在持续读取行情，数据变化后启动新一轮分析" : "本轮出现问题，Agent 将继续重试，不会因单轮失败结束") : task.status === "MANUAL_CONTROL" ? "Agent 已释放控制权，账户由人工操作" : (task.decision.riskFlags || []).includes("REAUTH_REQUIRED") ? "登录态失效，需要重新登录" : "当前任务需要你的注意"}</span></div><div className="status-meta"><label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（确认后下单）</option></select></label><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label><label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>{task.mode === "LIVE" ? "自动下单" : "自动确认"} {task.autoDecisionEnabled ? "开" : "关"}</span></label><label className={`auto-decision-switch ${task.automationTestMode !== false ? "on" : ""}`}><input type="checkbox" checked={task.automationTestMode !== false} disabled={busyAction !== null} onChange={(event) => onToggleAutomationTestMode(event.target.checked)} /><span>测试数量 {task.automationTestMode !== false ? "1" : "20"}</span></label><span><LockKeyhole size={13} />{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "下单 自动" : "下单 确认后") : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.indexedChunks || 0} 个索引切片</span></div></section>
     <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail="只读" change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change="观察" tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
-    <div className="console-grid"><MarketPanel task={task} /><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} onManual={onManual} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} busyAction={busyAction} /></div>
+    <div className="console-grid"><MarketPanel task={task} onSelectMarket={onSelectMarket} busyAction={busyAction} /><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} onManual={onManual} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} busyAction={busyAction} /></div>
     <WorkflowPanel task={task} onConnectorTest={onConnectorTest} busyAction={busyAction} />
     <RulesPanel rules={task.rules} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
   </>;
@@ -1089,7 +1103,7 @@ function CandleChart({ candles }: { candles: MarketCandle[] }) {
   return <div className="market-chart"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="真实历史 K 线图" preserveAspectRatio="none"><line x1={left} y1={priceBottom} x2={width - right} y2={priceBottom} className="chart-grid-line" />{visible.map((candle, index) => { const open = candle.open as number; const close = candle.close as number; const high = candle.high as number; const low = candle.low as number; const rising = close >= open; const bodyTop = y(Math.max(open, close)); const bodyHeight = Math.max(1, Math.abs(y(open) - y(close))); const volumeHeight = ((candle.volume || 0) / maxVolume) * 38; return <g key={`${candle.timestamp}-${index}`} className={rising ? "candle candle-up" : "candle candle-down"}><title>{new Date(candle.timestamp).toLocaleString("zh-CN")} 开 {marketNumber(open)} 高 {marketNumber(high)} 低 {marketNumber(low)} 收 {marketNumber(close)} 量 {marketNumber(candle.volume, 0)}</title><line x1={x(index)} y1={y(high)} x2={x(index)} y2={y(low)} /><rect x={x(index) - candleWidth / 2} y={bodyTop} width={candleWidth} height={bodyHeight} /><rect className="candle-volume" x={x(index) - candleWidth / 2} y={volumeTop + 38 - volumeHeight} width={candleWidth} height={Math.max(1, volumeHeight)} /></g>; })}</svg><div className="chart-axis"><span>{first ? new Date(first.timestamp).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" }) : "--"}</span><span>显示最近 {visible.length} 根</span><span>{last ? new Date(last.timestamp).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" }) : "--"}</span></div></div>;
 }
 
-function MarketPanel({ task }: { task: Task }) {
+function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelectMarket: (selection: { symbol: string; symbolName?: string; instrumentId?: string }) => void; busyAction: string | null }) {
   const [browserOpening, setBrowserOpening] = useState(false);
   const [browserError, setBrowserError] = useState("");
   const showBrowser = async () => {
@@ -1105,11 +1119,12 @@ function MarketPanel({ task }: { task: Task }) {
   };
   const market = task.market;
   const books = market?.books?.length ? market.books : market ? [market] : [];
+  const boardOptions = market?.availableBoards?.length ? market.availableBoards : books;
   const missingBoards = market?.boardCoverage?.missing || [];
-  const boardKey = (book: MarketSnapshot | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
-  const [selectedSymbol, setSelectedSymbol] = useState(boardKey(market) || task.symbol);
+  const boardKey = (book: { instrumentId?: string | null; symbol?: string; symbolName?: string } | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
+  const [selectedSymbol, setSelectedSymbol] = useState(task.target.selectedSymbol || boardKey(market) || task.symbol);
   const [selectedTimeframe, setSelectedTimeframe] = useState(task.timeframe);
-  useEffect(() => setSelectedSymbol(boardKey(market) || task.symbol), [market?.symbol, market?.symbolName, market?.instrumentId, market?.observedAt]);
+  useEffect(() => setSelectedSymbol(task.target.selectedSymbol || task.symbol), [task.target.selectedSymbol, task.symbol]);
   useEffect(() => setSelectedTimeframe(task.timeframe), [task.timeframe]);
   const selectedBook = books.find((book) => boardKey(book) === selectedSymbol) || books[0] || market;
   const timeframes = selectedBook?.timeframes || market?.timeframes || {};
@@ -1139,9 +1154,9 @@ function MarketPanel({ task }: { task: Task }) {
         </div>
         <span className="quote-time">{market ? `${market.source} · ${books.length}/${market.expectedBookCount || books.length} 个盘 · ${formatTime(market.observedAt)}` : "等待首次只读采集"}</span>
       </div>
-      {books.length + missingBoards.length > 1 ? (
+      {boardOptions.length + missingBoards.length > 1 ? (
         <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">
-          {books.map((book) => <button type="button" role="tab" aria-selected={boardKey(selectedBook) === boardKey(book)} className={boardKey(selectedBook) === boardKey(book) ? "active" : ""} key={boardKey(book)} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(book.timeframe || task.timeframe); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
+          {boardOptions.map((book) => <button type="button" role="tab" aria-selected={boardKey(selectedBook) === boardKey(book)} className={boardKey(selectedBook) === boardKey(book) ? "active" : ""} key={boardKey(book)} disabled={busyAction !== null} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(task.timeframe); onSelectMarket({ symbol: book.symbol || book.instrumentId || "", symbolName: book.symbolName, instrumentId: book.instrumentId || "" }); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
           {missingBoards.map((book) => <button type="button" disabled className="missing-board" key={`missing-${book.instrumentId || book.symbol || book.symbolName}`}>{book.symbolName || book.symbol || book.instrumentId} · 未采集</button>)}
         </div>
       ) : null}
@@ -1197,7 +1212,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
     return () => window.clearInterval(timer);
   }, [pending.id, pending.status, pending.deadlineAt]);
   const waiting = pending.status === "WAITING";
-  const actionText = pending.action === "BUY" ? "买入" : "卖出";
+  const actionText = pending.action === "BUY" ? "买多（涨）" : "买空（跌）";
   const target = decisionTargetLabel(pending);
   const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
   const probability = Number(pending.profitProbability ?? 0);
@@ -1407,6 +1422,10 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   const [appId, setAppId] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [analysisName, setAnalysisName] = useState("行情分析端");
+  const [analysisUrl, setAnalysisUrl] = useState("");
+  const [analysisUsername, setAnalysisUsername] = useState("");
+  const [analysisPassword, setAnalysisPassword] = useState("");
   const [symbol, setSymbol] = useState("DGJJ");
   const [timeframe, setTimeframe] = useState("15m");
   const [mode, setMode] = useState("LIVE");
@@ -1420,7 +1439,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
     lock.current = true;
     setBusy(true);
     try {
-      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode });
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, analysisName, analysisUrl, analysisUsername, analysisPassword });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1444,6 +1463,11 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
         </div>
         <label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} placeholder={saved ? `已保存 ${saved.accountLabel}，留空则复用` : "目标网站登录名"} autoComplete="username" required={!saved} /></label>
         <label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} placeholder={saved ? "已保存到当前账号，留空则复用" : "加密保存到当前登录用户"} autoComplete="new-password" type="password" required={!saved} /></label>
+        <div className="form-section-label">行情分析端（可选）</div>
+        <label>分析端名称<input value={analysisName} onChange={(event) => setAnalysisName(event.target.value)} placeholder="行情分析端" /></label>
+        <label>分析端 Web 地址<input value={analysisUrl} onChange={(event) => setAnalysisUrl(event.target.value)} type="url" placeholder="https://analysis.example.com" /></label>
+        {analysisUrl ? <><label>分析端账号<input value={analysisUsername} onChange={(event) => setAnalysisUsername(event.target.value)} autoComplete="username" placeholder="行情分析端账号" /></label><label>分析端密码<input value={analysisPassword} onChange={(event) => setAnalysisPassword(event.target.value)} autoComplete="new-password" type="password" placeholder="加密保存到当前登录用户" /></label></> : null}
+        <div className="modal-footnote"><Globe2 size={14} />分析端独立于交易端，当前先保存地址和账号凭据，后续适配器可读取其指标数据并合并分析。</div>
         <div className="modal-footnote"><LockKeyhole size={14} />{saved ? "当前账号已有该网站凭据，密码留空会自动复用。Provider 也会按当前用户带出。" : "账号密码绑定当前登录用户，写入服务端加密托管。下次登录同一账号不用再填。"}</div>
         <div className="modal-actions">
           <button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button>
@@ -1496,7 +1520,7 @@ function ProviderModal({ provider, onClose, onSave }: { provider: Provider | nul
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {
   const live = task.mode === "LIVE";
-  const actionText = pending.action === "BUY" ? "买入" : "卖出";
+  const actionText = pending.action === "BUY" ? "买多（涨）" : "买空（跌）";
   const target = decisionTargetLabel(pending);
   const submitting = pending.status === "SUBMITTING" || busyAction === "confirm";
   const signalLabel = profitSignalLabels[pending.signalTier || ""] || "风险提示";
@@ -1516,7 +1540,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
           <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
           <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>
         </div>
-        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{pending.action === "BUY" ? "买入订立" : "卖出转让"}。</span></div> : null}
+        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>请核对价格和数量。点「确认并下单」后才会提交{pending.action === "BUY" ? "买多（涨）" : "买空（跌）"}。</span></div> : null}
         <p className="trade-confirm-message">{pending.message}</p>
         <div className="modal-actions trade-confirm-actions">
           <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction === "cancel"}>{busyAction === "cancel" ? "取消中" : "暂不下单"}</button>

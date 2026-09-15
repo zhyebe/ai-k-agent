@@ -373,6 +373,20 @@ test("页面下拉的多个盘口会匹配只读合约并全部纳入监测", ()
   assert.equal(pickPrimaryBoard(boards.map((board) => ({ symbol: board.symbol, symbolName: board.symbolName })), { pageSymbol: "DGKZ" }).symbol, "DGKZ");
 });
 
+test("单盘口模式只解析选中盘口，避免为未选盘口请求历史数据", () => {
+  const boards = resolveBoardInstruments({
+    pageInstruments: [{ symbol: "DGJJ", symbolName: "丹桂金尖（二期）" }],
+    marketDetails: [
+      { symbol: "DGJJ", symbolId: "536", name: "丹桂金尖（二期）", close: 1830 },
+      { symbol: "DGKZ", symbolId: "537", name: "丹桂康砖（二期）", close: 1168 },
+    ],
+    configuredSymbol: "DGJJ",
+    selectedOnly: true,
+  });
+  assert.equal(boards.length, 1);
+  assert.equal(boards[0].symbol, "DGJJ");
+});
+
 test("盘口覆盖检查会明确报告未采集的盘口", () => {
   const targets = [
     { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536" },

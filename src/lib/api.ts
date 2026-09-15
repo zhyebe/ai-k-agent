@@ -221,6 +221,10 @@ export async function setTaskProvider(taskId: string, providerId: string): Promi
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/provider`, { method: "POST", body: JSON.stringify({ providerId }) })).task;
 }
 
+export async function setTaskMarketSelection(taskId: string, selection: { symbol: string; symbolName?: string; instrumentId?: string }): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/market-selection`, { method: "POST", body: JSON.stringify(selection) })).task;
+}
+
 export async function setTaskMode(taskId: string, mode: string): Promise<Task> {
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/mode`, { method: "POST", body: JSON.stringify({ mode }) })).task;
 }

@@ -14,9 +14,10 @@ const controllerLoops = new Map();
 const pendingActionTimers = new Map();
 const pendingConfirmLocks = new Set();
 const pendingSubmissionCancels = new Map();
-const DEFAULT_MONITOR_POLL_MS = 5000;
+const DEFAULT_MONITOR_POLL_MS = 30000;
 const MAX_MONITOR_POLL_MS = 120000;
 const MIN_PROFIT_PROBABILITY = 0.5;
+const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 24000;
 
 class CycleAbortError extends Error {
   constructor(code) {
@@ -280,6 +281,31 @@ export function setTaskProvider(taskId, providerId, userId = "") {
   task.updatedAt = new Date().toISOString();
   addEvent("provider_selected", `已切换分析模型：${provider.name} / ${provider.model}`, { taskId, providerId: provider.id, userId });
   persistTask(task);
+  return task;
+}
+
+export function setTaskMarketSelection(taskId, selection = {}, userId = "") {
+  const task = getTask(taskId);
+  if (!task) throw new Error("TASK_NOT_FOUND");
+  const ownerUserId = String(task.ownerUserId || userId || "");
+  if (!ownerUserId || (userId && String(userId) !== ownerUserId)) throw new Error("TASK_ACCESS_DENIED");
+  const symbol = String(selection.symbol || selection.instrumentId || "").trim().slice(0, 64);
+  if (!symbol) throw new Error("MARKET_SYMBOL_REQUIRED");
+  const wasMonitoring = monitoringIntent(task);
+  if (wasMonitoring) stopController(task.id);
+  advanceTaskGeneration(task);
+  task.symbol = symbol;
+  task.target.selectedSymbol = symbol;
+  task.target.selectedSymbolName = String(selection.symbolName || "").trim().slice(0, 160);
+  task.target.selectedInstrumentId = String(selection.instrumentId || "").trim().slice(0, 64);
+  task.lastObservedFingerprint = "";
+  task.lastAnalyzedFingerprint = "";
+  task.lastAnalysisSucceeded = false;
+  task.nextTrigger = `已切换监测盘口：${task.target.selectedSymbolName || symbol}`;
+  task.updatedAt = new Date().toISOString();
+  addEvent("market_selected", `已切换监测盘口：${task.target.selectedSymbolName || symbol}`, { taskId, symbol, instrumentId: task.target.selectedInstrumentId, userId });
+  persistTask(task);
+  if (wasMonitoring) startController(task.id, { userId: task.ownerUserId || userId });
   return task;
 }
 
@@ -560,10 +586,47 @@ export function monitoringPollIntervalMs(task) {
   if (Number.isFinite(configured) && configured > 0) return Math.min(MAX_MONITOR_POLL_MS, Math.max(1000, configured));
   const timeframe = String(task?.timeframe || "15m").toLowerCase();
   if (["1m", "1min"].includes(timeframe)) return DEFAULT_MONITOR_POLL_MS;
-  if (["3m", "3min", "5m", "5min"].includes(timeframe)) return 7000;
-  if (["10m", "10min", "15m", "15min"].includes(timeframe)) return 10000;
-  if (["30m", "30min", "1h", "60m", "2h"].includes(timeframe)) return 15000;
-  return 30000;
+  if (["3m", "3min", "5m", "5min"].includes(timeframe)) return 45000;
+  if (["10m", "10min", "15m", "15min"].includes(timeframe)) return 60000;
+  if (["30m", "30min", "1h", "60m", "2h"].includes(timeframe)) return 90000;
+  return MAX_MONITOR_POLL_MS;
+}
+
+function latestPrice(market) {
+  const value = Number(market?.latest?.price);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function indicatorNumber(market, key) {
+  const value = Number(market?.indicators?.[key]);
+  return Number.isFinite(value) ? value : null;
+}
+
+function selectedBook(market) {
+  return market?.books?.find((book) => String(book?.symbol || "") === String(market?.symbol || "")) || market;
+}
+
+export function entryConditionReached(previous, next, task) {
+  if (!previous || decisionExpired(task)) return true;
+  const before = selectedBook(previous);
+  const current = selectedBook(next);
+  const beforePrice = latestPrice(before);
+  const currentPrice = latestPrice(current);
+  if (beforePrice && currentPrice && Math.abs(currentPrice / beforePrice - 1) >= 0.004) return true;
+  const beforeEma = indicatorNumber(before, "ema20");
+  const currentEma = indicatorNumber(current, "ema20");
+  if (beforePrice && currentPrice && beforeEma && currentEma && ((beforePrice <= beforeEma && currentPrice > currentEma) || (beforePrice >= beforeEma && currentPrice < currentEma))) return true;
+  const beforeRsi = indicatorNumber(before, "rsi14");
+  const currentRsi = indicatorNumber(current, "rsi14");
+  const rsiZone = (value) => value !== null && (value <= 35 || value >= 65);
+  if (!rsiZone(beforeRsi) && rsiZone(currentRsi)) return true;
+  const beforeVolume = indicatorNumber(before, "volumeRatio");
+  const currentVolume = indicatorNumber(current, "volumeRatio");
+  if ((beforeVolume === null || beforeVolume < 1.2) && currentVolume !== null && currentVolume >= 1.2) return true;
+  const beforeImbalance = Number(before?.orderBook?.imbalance);
+  const currentImbalance = Number(current?.orderBook?.imbalance);
+  if (Number.isFinite(currentImbalance) && (!Number.isFinite(beforeImbalance) || Math.sign(beforeImbalance) !== Math.sign(currentImbalance) || Math.abs(currentImbalance) >= 0.35 && Math.abs(beforeImbalance) < 0.35)) return true;
+  return String(before?.trend || "") !== String(current?.trend || "");
 }
 
 function monitorRetryDelay(task) {
@@ -934,6 +997,7 @@ function toTaskMarket(market) {
     raw: market.raw || null,
     account: market.account || { availableFunds: null, equity: null, riskRate: null, dayPnl: null },
     books: Array.isArray(market.books) ? market.books : [],
+    availableBoards: Array.isArray(market.availableBoards) ? market.availableBoards : [],
     bookCount: Number(market.bookCount || market.books?.length || 0),
     expectedBookCount: Number(market.expectedBookCount || market.boardCoverage?.expected || market.books?.length || 0),
     boardCoverage: market.boardCoverage || null,
@@ -1283,6 +1347,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       persistTask(task);
       return { task, market, run, route };
     }
+    const previousMarket = task.market;
     task.market = toTaskMarket(market);
     syncTaskMetricsFromMarket(task, market);
     task.lastPolledAt = new Date().toISOString();
@@ -1315,6 +1380,19 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       persistTask(task);
       return { task, market, run, skipped: true, reason: "MARKET_UNCHANGED", route: "WAITING_FOR_CHANGE", analysisTriggered: false };
     }
+    const entryTriggered = !skipIfUnchanged || entryConditionReached(previousMarket, task.market, task);
+    if (skipIfUnchanged && !entryTriggered && !decisionExpired(task)) {
+      task.status = monitoringIntent(task) ? "MONITORING" : "MANUAL_CONTROL";
+      task.nextTrigger = "等待入场条件，达到价格、趋势、量能或盘口阈值后再请求模型";
+      completeWorkflow(task, "analyze", "行情已更新，尚未达到入场条件，跳过模型请求");
+      completeWorkflow(task, "rules", "未触发入场分析");
+      completeWorkflow(task, "action", "等待入场点，不生成新建议");
+      appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "行情已更新但未达到入场条件，跳过模型请求" });
+      finishAgentRun(run.id, { status: "skipped", action: task.decision.action, route: "WAITING_FOR_ENTRY", code: "ENTRY_NOT_REACHED" });
+      setNextPoll(task);
+      persistTask(task);
+      return { task, market, run, skipped: true, reason: "ENTRY_NOT_REACHED", route: "WAITING_FOR_ENTRY", analysisTriggered: false };
+    }
     if (skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && decisionExpired(task)) {
       appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "上一轮建议已过期，重新请求模型确认" });
     }
@@ -1333,7 +1411,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
       data: analysisMarket.analysisLayers,
     });
-    const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId);
+    const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
+    const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,

@@ -8,7 +8,7 @@ import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
 import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
-import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setAutomationTestMode, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
+import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setAutomationTestMode, setTaskMarketSelection, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
 import { credentialExists, findOwnedCredential, initVault, listCredentials, removeOwnedCredentials, setVaultPersistence, storeCredential, vaultStatus } from "./vault.mjs";
@@ -575,6 +575,17 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
       return reply.code(400).send({ error: error.message || "CREDENTIALS_REQUIRED" });
     }
   }
+  const analysisUrl = String(body.analysisUrl || "").trim();
+  let analysisResolved = { credentialRef: "", accountLabel: "未配置", hasCredential: false };
+  if (analysisUrl) {
+    try { new URL(analysisUrl); } catch { return reply.code(400).send({ error: "INVALID_ANALYSIS_URL" }); }
+    const analysisProfile = { type: "website", target: analysisUrl, name: String(body.analysisName || "行情分析端"), adapterId: "market-analysis" };
+    try {
+      analysisResolved = await resolveOwnedCredential({ auth: request.auth, profile: analysisProfile, username: body.analysisUsername, password: body.analysisPassword });
+    } catch (error) {
+      return reply.code(400).send({ error: error.message || "ANALYSIS_CREDENTIALS_REQUIRED" });
+    }
+  }
   const task = {
     id: `task_${crypto.randomUUID()}`,
     ownerUserId: request.auth.user.id,
@@ -607,7 +618,20 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
       executionModes: profile?.executionModes || [],
       adapterStatus: profile?.adapterStatus || "待发现",
       discoveryStatus: profile?.discoveryStatus || "未发现",
+      selectedSymbol: String(body.symbol || "DGJJ"),
+      selectedSymbolName: "",
+      selectedInstrumentId: "",
+      marketAnalysis: {
+        enabled: Boolean(analysisUrl),
+        name: String(body.analysisName || "行情分析端"),
+        url: analysisUrl,
+        accountLabel: analysisResolved.accountLabel,
+        credentialStatus: analysisResolved.hasCredential ? "已托管" : "未配置",
+        connectionStatus: analysisUrl ? "待连接" : "未配置",
+        credentialRef: analysisResolved.credentialRef,
+      },
     },
+    monitorAllBoards: false,
     riskProfile: "Balanced",
     workflow: createWorkflow(),
     rules: createDefaultRules(),
@@ -708,6 +732,15 @@ app.post("/api/tasks/:taskId/automation-test-mode", { preHandler: requireTaskAcc
 app.post("/api/tasks/:taskId/provider", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
     const task = setTaskProvider(request.params.taskId, request.body?.providerId, request.auth.user.id);
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) {
+    return reply.code(400).send({ error: error.message });
+  }
+});
+app.post("/api/tasks/:taskId/market-selection", { preHandler: requireTaskAccess }, async (request, reply) => {
+  try {
+    const task = setTaskMarketSelection(request.params.taskId, request.body || {}, request.auth.user.id);
     broadcast();
     return { task: publicTask(task) };
   } catch (error) {

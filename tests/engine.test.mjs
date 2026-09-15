@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, entryConditionReached, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -156,6 +156,15 @@ test("只有获利概率没有方向时继续保持观望", () => {
     books: [{ symbol: "DGKZ", instrumentId: "537" }],
   });
   assert.equal(decision.action, "HOLD");
+});
+
+test("持续监控默认低频轮询，只有入场阈值变化才触发分析", () => {
+  assert.equal(monitoringPollIntervalMs({ timeframe: "1m" }), 30000);
+  assert.equal(monitoringPollIntervalMs({ timeframe: "15m" }), 60000);
+  const task = { decision: { createdAt: new Date().toISOString(), ttlSec: 300 } };
+  const base = { symbol: "A", latest: { price: 100 }, indicators: { ema20: 99, rsi14: 50, volumeRatio: 1 }, trend: "up", orderBook: { imbalance: 0.1 } };
+  assert.equal(entryConditionReached(base, { ...base, latest: { price: 100.1 } }, task), false);
+  assert.equal(entryConditionReached(base, { ...base, latest: { price: 100.6 } }, task), true);
 });
 
 function insertNorthstarTask(id) {

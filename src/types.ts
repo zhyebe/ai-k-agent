@@ -248,6 +248,7 @@ export interface MarketSnapshot {
   pageView?: Record<string, unknown> | null;
   orderBook?: OrderBook | null;
   books?: MarketSnapshot[];
+  availableBoards?: Array<{ symbol?: string; symbolName?: string; instrumentId?: string }>;
   bookCount?: number;
   expectedBookCount?: number;
   boardCoverage?: {
@@ -283,7 +284,19 @@ export interface Task {
     adapterStatus?: string;
     discoveryStatus?: string;
     browserSessionId?: string;
+    selectedSymbol?: string;
+    selectedSymbolName?: string;
+    selectedInstrumentId?: string;
+    marketAnalysis?: {
+      enabled: boolean;
+      name: string;
+      url: string;
+      accountLabel: string;
+      credentialStatus: string;
+      connectionStatus: string;
+    };
   };
+  monitorAllBoards?: boolean;
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
   autoDecisionCountdownSec?: number;
