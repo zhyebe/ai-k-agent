@@ -566,7 +566,7 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     },
     requestDecision: async (_provider, context) => {
       finalContext = context;
-      return { action: "BUY", confidence: 0.82, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: ["FULL_COVERAGE"], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", riskFlags: [], decisionTtlSec: 300 };
+      return { action: "BUY", confidence: 0.82, profitProbability: 0.82, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: ["FULL_COVERAGE"], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", riskFlags: [], decisionTtlSec: 300 };
     },
   };
   try {
