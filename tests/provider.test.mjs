@@ -186,6 +186,7 @@ test("provider decision receives bounded evidence context", async () => {
     });
     assert.equal(result.action, "HOLD");
     assert.deepEqual(received.messages[1].content.includes("EMA20 slope is flat"), true);
+    assert.match(received.messages[0].content, /counterparty may be AI-controlled/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -207,6 +208,21 @@ test("provider decision sends approved experience as a separate analysis prompt"
     const promptMessage = received.messages.find((message) => message.content.includes("标题：盘口回撤经验"));
     assert.ok(promptMessage);
     assert.match(promptMessage.content, /审核通过的 Skill/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("provider decision never derives profit probability from confidence", async () => {
+  const server = http.createServer(async (_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", confidence: 0.92 }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+    const result = await requestDecision(provider, { evidenceIds: [] });
+    assert.equal(result.profitProbability, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

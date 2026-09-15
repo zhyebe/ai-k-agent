@@ -210,7 +210,7 @@ export function uniqueBoardAssessments(values = [], books = []) {
     if (!instrument) continue;
     const action = ["BUY", "SELL", "HOLD"].includes(item.action) ? item.action : "HOLD";
     const confidence = Math.min(1, Math.max(0, Number(item.confidence) || 0));
-    const profitProbability = Math.min(1, Math.max(0, Number(item.profitProbability ?? item.profit_probability ?? item.confidence) || 0));
+    const profitProbability = Math.min(1, Math.max(0, Number(item.profitProbability ?? item.profit_probability) || 0));
     const summary = String(item.summary || "").slice(0, 600);
     const existing = result.find((candidate) => samePageInstrument(candidate, instrument));
     if (existing) {

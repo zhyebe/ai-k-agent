@@ -91,7 +91,7 @@ function profitProbabilityLabel(value) {
 }
 
 function enforceProfitProbability(decision) {
-  const profitProbability = Math.min(1, Math.max(0, Number(decision?.profitProbability ?? decision?.confidence ?? 0) || 0));
+  const profitProbability = Math.min(1, Math.max(0, Number(decision?.profitProbability ?? 0) || 0));
   const signalTier = profitSignalTier(profitProbability);
   if ((decision?.action === "BUY" || decision?.action === "SELL") && signalTier === "HOLD") {
     return {
@@ -1059,10 +1059,10 @@ export function bindDecisionToMarket(decision, market) {
   const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) {
     const directional = boardAssessments
-      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability ?? item.confidence ?? 0) > MIN_PROFIT_PROBABILITY)
-      .sort((left, right) => Number(right.profitProbability ?? right.confidence ?? 0) - Number(left.profitProbability ?? left.confidence ?? 0))[0];
+      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability || 0) > MIN_PROFIT_PROBABILITY)
+      .sort((left, right) => Number(right.profitProbability || 0) - Number(left.profitProbability || 0))[0];
     if (!directional) return decision ? { ...decision, boardAssessments } : decision;
-    decision = { ...decision, action: directional.action, profitProbability: directional.profitProbability ?? directional.confidence, confidence: directional.confidence, targetSymbol: directional.symbol, targetSymbolName: directional.symbolName, targetInstrumentId: directional.instrumentId, targetPositionPct: decision.targetPositionPct || 0, maxOrderValuePct: decision.maxOrderValuePct || 0, reasonCodes: [...new Set([...(decision.reasonCodes || []), "BOARD_PROFIT_PROBABILITY_THRESHOLD"])], boardAssessments };
+    decision = { ...decision, action: directional.action, profitProbability: directional.profitProbability, confidence: directional.confidence, targetSymbol: directional.symbol, targetSymbolName: directional.symbolName, targetInstrumentId: directional.instrumentId, targetPositionPct: decision.targetPositionPct || 0, maxOrderValuePct: decision.maxOrderValuePct || 0, reasonCodes: [...new Set([...(decision.reasonCodes || []), "BOARD_PROFIT_PROBABILITY_THRESHOLD"])], boardAssessments };
   }
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
@@ -1072,7 +1072,7 @@ export function bindDecisionToMarket(decision, market) {
   const assessmentTarget = !requestedTarget.length
     ? boardAssessments
       .filter((item) => item.action === decision.action)
-      .sort((left, right) => Number(right.profitProbability ?? right.confidence ?? 0) - Number(left.profitProbability ?? left.confidence ?? 0))[0]
+      .sort((left, right) => Number(right.profitProbability || 0) - Number(left.profitProbability || 0))[0]
     : null;
   const primaryValues = normalizedInstrumentValues(market);
   const target = decisionTargetBook(decision, market)
