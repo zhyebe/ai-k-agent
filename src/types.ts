@@ -85,11 +85,13 @@ export interface Rule {
 export interface PendingAction {
   id: string;
   action: "BUY" | "SELL";
+  orderType?: "MARKET" | "LIMIT";
   exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
   targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
   targetInstrumentId?: string;
+  targetPrice?: number | null;
   profitProbability?: number;
   signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
@@ -108,11 +110,13 @@ export interface PendingAction {
 
 export interface Decision {
   action: "BUY" | "SELL" | "HOLD";
+  orderType?: "MARKET" | "LIMIT";
   exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
   targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
   targetInstrumentId?: string;
+  targetPrice?: number | null;
   confidence: number;
   profitProbability?: number;
   signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
@@ -263,6 +267,7 @@ export interface MarketSnapshot {
     }>;
   };
   pageView?: Record<string, unknown> | null;
+  positions?: Array<Record<string, unknown>>;
   orderBook?: OrderBook | null;
   books?: MarketSnapshot[];
   availableBoards?: Array<{ symbol?: string; symbolName?: string; instrumentId?: string }>;

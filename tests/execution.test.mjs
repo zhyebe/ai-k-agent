@@ -56,6 +56,7 @@ test("离场预览使用持仓数量并保留止盈类型", () => {
     },
   }, {
     action: "SELL",
+    orderType: "LIMIT",
     exitType: "TAKE_PROFIT",
     targetSymbol: "DGKZ",
     targetPositionIds: ["P-123"],

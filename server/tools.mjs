@@ -376,7 +376,7 @@ async function clickPositionExitControl(page, { symbol = "", symbolName = "", in
   }
 }
 
-export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, targetPositionIds = [] } = {}) {
+export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
   }
@@ -387,7 +387,7 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
     const selected = await selectPageBoardInstrument(sessionId, targetInstrument);
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false, fields: [] };
   }
-  const positionSelection = action === "SELL" ? await selectPositionForSell(page, { ...targetInstrument, targetPositionIds, activate: !exitType }) : null;
+  const positionSelection = exitType && !formAlreadyFilled ? await selectPositionForSell(page, { ...targetInstrument, targetPositionIds, activate: true }) : null;
   const labels = suggestionFormLabels(action);
   try {
     const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
@@ -420,9 +420,9 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
       return { filled, forbiddenButtons, submitted: false };
     }, { labels, priceValue: price, quantityValue: quantity });
     return {
-      ok: result.filled.length > 0 || Boolean(exitType && positionSelection?.ok),
-      code: result.filled.length ? "FORM_FILLED_NOT_SUBMITTED" : exitType && positionSelection?.ok ? "EXIT_POSITION_READY" : "FORM_FIELDS_NOT_FOUND",
-      filled: result.filled.length > 0 || Boolean(exitType && positionSelection?.ok),
+      ok: result.filled.length > 0 || Boolean(exitType && orderType !== "LIMIT" && positionSelection?.ok),
+      code: result.filled.length ? "FORM_FILLED_NOT_SUBMITTED" : exitType && orderType !== "LIMIT" && positionSelection?.ok ? "EXIT_POSITION_READY" : "FORM_FIELDS_NOT_FOUND",
+      filled: result.filled.length > 0 || Boolean(exitType && orderType !== "LIMIT" && positionSelection?.ok),
       submitted: false,
       fields: result.filled,
       positionSelection,
@@ -433,14 +433,16 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
   }
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, targetPositionIds = [] } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   }
-  if (!exitType && (price == null || quantity == null || !Number(quantity))) {
+  if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
-  const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, targetPositionIds });
+  const filled = formAlreadyFilled
+    ? { ok: true, filled: true, submitted: false, fields: [suggestionFormLabels(action).price, suggestionFormLabels(action).quantity], positionSelection: { ok: true, code: "FORM_ALREADY_FILLED" } }
+    : await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, orderType, targetPositionIds });
   if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };
@@ -453,7 +455,8 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
         return false;
       }
     }, { timeout: 12000 }).catch(() => null);
-    const clicked = exitType
+    const exitUsesForm = Boolean(exitType && (orderType === "LIMIT" || filled.fields?.length));
+    const clicked = exitType && !exitUsesForm
       ? await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType })
       : await page.evaluate(({ buttonLabel }) => {
       const normalize = (value) => String(value || "").replace(/\s+/g, "");

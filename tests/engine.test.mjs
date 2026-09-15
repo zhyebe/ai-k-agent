@@ -21,9 +21,9 @@ test("风险上限只阻断执行路由，不把真实 BUY 意图改成 HOLD", (
   assert.ok(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"));
 });
 
-test("获利概率分档：超过 50% 即允许方向性提示", () => {
-  assert.equal(profitSignalTier(0.5), "HOLD");
-  assert.equal(profitSignalTier(0.5001), "EXPLORATORY");
+test("获利概率分档：超过 45% 即允许方向性提示", () => {
+  assert.equal(profitSignalTier(0.45), "HOLD");
+  assert.equal(profitSignalTier(0.4501), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6001), "CAUTIOUS");
   assert.equal(profitSignalTier(0.7001), "STANDARD");
@@ -131,7 +131,7 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   assert.equal(merged.boardAssessments[1].summary, "康砖二");
 });
 
-test("盘口获利概率超过 50% 即生成方向性待确认建议", () => {
+test("盘口获利概率超过 45% 即生成方向性待确认建议", () => {
   const market = {
     symbol: "DGKZ",
     symbolName: "丹桂康砖（二期）",

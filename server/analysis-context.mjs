@@ -706,6 +706,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
       view: market.page.view || market.pageView || null,
     } : null,
     account: market.account || null,
+    positions: Array.isArray(market.account?.positions) ? market.account.positions : [],
     pageView: market.pageView || market.page?.view || null,
     orderBook: market.orderBook || null,
     source: market.source,

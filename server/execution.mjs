@@ -47,7 +47,10 @@ export function previewMarketForDecision(task, decision) {
 
 export function suggestOrderPreview(task, decision, { enforceAutomationQuantity = false } = {}) {
   const targetMarket = previewMarketForDecision(task, decision);
-  const price = Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);
+  const requestedPrice = decision?.orderType === "LIMIT" ? Number(decision?.targetPrice) : NaN;
+  const price = Number.isFinite(requestedPrice) && requestedPrice > 0
+    ? requestedPrice
+    : Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);
   const requestedPct = Number(decision?.targetPositionPct || 0);
   const orderPct = Number(decision?.maxOrderValuePct || executionLimits.maxOrderValuePct);
@@ -77,7 +80,9 @@ export function suggestOrderPreview(task, decision, { enforceAutomationQuantity 
   return {
     action: decision?.action === "SELL" ? "SELL" : decision?.action === "BUY" ? "BUY" : "HOLD",
     exitType: decision?.exitType || null,
+    orderType: decision?.orderType === "LIMIT" ? "LIMIT" : "MARKET",
     targetPositionIds: Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : [],
+    targetPrice: Number.isFinite(requestedPrice) && requestedPrice > 0 ? requestedPrice : null,
     suggestedPrice: hasPrice ? price : null,
     suggestedQty,
     quantityLimitApplied,

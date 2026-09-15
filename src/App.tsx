@@ -197,7 +197,7 @@ const displayLabel = (value: string | null | undefined, labels: Record<string, s
 };
 const displayAction = (value: string | null | undefined) => actionLabels[value as keyof typeof actionLabels] || "待确认";
 const displaySuggestion = (value: string | null | undefined) => actionSuggestionLabels[value as keyof typeof actionSuggestionLabels] || "待确认";
-const exitActionLabel = (action: string, exitType?: string | null) => action === "BUY" ? "买多（涨）" : exitType === "TAKE_PROFIT" ? "止盈卖出" : exitType === "STOP_LOSS" ? "止损卖出" : "卖出";
+const exitActionLabel = (action: string, exitType?: string | null) => exitType === "TAKE_PROFIT" ? (action === "BUY" ? "止盈回补" : "止盈卖出") : exitType === "STOP_LOSS" ? (action === "BUY" ? "止损回补" : "止损卖出") : action === "BUY" ? "买多（涨）" : "买空（跌）";
 const operatorLikelihoodLabels: Record<string, string> = { UNKNOWN: "无法判断", LOW: "疑似较低", MEDIUM: "疑似中等", HIGH: "疑似较高" };
 const operatorImpactLabels: Record<string, string> = { LOW: "影响较低", MEDIUM: "需关注", HIGH: "影响较高" };
 const decisionTargetLabel = (value: Pick<Decision, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | Pick<PendingAction, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | null | undefined) => value?.targetSymbolName || value?.targetSymbol || value?.targetInstrumentId || "";

@@ -17,7 +17,7 @@ const pendingSubmissionCancels = new Map();
 const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
-const MIN_PROFIT_PROBABILITY = 0.5;
+const MIN_PROFIT_PROBABILITY = 0.45;
 const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 24000;
 
 class CycleAbortError extends Error {
@@ -71,9 +71,9 @@ function pendingTargetLabel(pending) {
 }
 
 function pendingActionLabel(pending) {
+  if (pending?.exitType === "TAKE_PROFIT") return pending?.action === "BUY" ? "止盈回补" : "止盈卖出";
+  if (pending?.exitType === "STOP_LOSS") return pending?.action === "BUY" ? "止损回补" : "止损卖出";
   if (pending?.action === "BUY") return "买多（涨）";
-  if (pending?.exitType === "TAKE_PROFIT") return "止盈卖出";
-  if (pending?.exitType === "STOP_LOSS") return "止损卖出";
   return "卖出";
 }
 
@@ -109,7 +109,7 @@ function enforceProfitProbability(decision) {
       targetPositionPct: 0,
       maxOrderValuePct: 0,
       riskFlags: [...new Set([...(decision.riskFlags || []), "LOW_PROFIT_PROBABILITY"])],
-      invalidation: "获利概率不超过 50%，本轮保持观望",
+      invalidation: "获利概率不超过 45%，本轮保持观望",
     };
   }
   return { ...decision, profitProbability, signalTier };
@@ -128,11 +128,13 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     action,
+    orderType: decision.orderType || "MARKET",
     exitType: decision.exitType || null,
     targetPositionIds: Array.isArray(decision.targetPositionIds) ? decision.targetPositionIds : [],
     targetSymbol: String(decision.targetSymbol || ""),
     targetSymbolName: String(decision.targetSymbolName || ""),
     targetInstrumentId: String(decision.targetInstrumentId || ""),
+    targetPrice: preview.targetPrice ?? preview.suggestedPrice,
     profitProbability: decisionProbability,
     signalTier,
     status: "WAITING",
@@ -196,7 +198,9 @@ async function openPendingAction(task, { runtime, run } = {}) {
       sessionId,
       action: task.pendingAction.action,
       exitType: task.pendingAction.exitType,
+      orderType: task.pendingAction.orderType,
       targetPositionIds: task.pendingAction.targetPositionIds,
+      targetPrice: task.pendingAction.targetPrice,
       price: task.pendingAction.suggestedPrice,
       quantity: task.pendingAction.suggestedQty,
       symbol: task.pendingAction.targetSymbol,
@@ -375,6 +379,7 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
     symbolName: String(pending.targetSymbolName || ""),
     instrumentId: String(pending.targetInstrumentId || ""),
     action: pending.action,
+    orderType: pending.orderType || "MARKET",
     exitType: pending.exitType || null,
     targetPositionIds: pending.targetPositionIds || [],
     mode: task.mode,
@@ -427,7 +432,9 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           symbolName: task.pendingAction.targetSymbolName,
           instrumentId: task.pendingAction.targetInstrumentId,
           exitType: task.pendingAction.exitType,
+          orderType: task.pendingAction.orderType,
           targetPositionIds: task.pendingAction.targetPositionIds,
+          targetPrice: task.pendingAction.targetPrice,
         }, { signal: submissionAbort.signal });
       } catch (error) {
         if (task.pendingAction?.status === "SUBMITTING") {
@@ -1182,6 +1189,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       boardCoverage: layered.boardCoverage || null,
       page: layered.page ?? task.market.page,
       pageView: layered.pageView ?? task.market.pageView ?? task.market.page?.view ?? null,
+      positions: Array.isArray(layered.positions) ? layered.positions : Array.isArray(market.account?.positions) ? market.account.positions : [],
       orderBook: layered.orderBook || null,
       raw: layered.raw,
     },
