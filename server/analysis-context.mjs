@@ -277,6 +277,40 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   };
 }
 
+// Controller polling uses only the latest minute window; manual analysis keeps full layered history.
+export function buildRecentMonitoringMarket(market = {}, nowMs = null) {
+  const layered = market?.analysisLayers ? market : buildLayeredAnalysisMarket(market, nowMs);
+  const recent = layered.timeframes?.["1m"] || {
+    timeframe: "1m",
+    label: "近1小时·分钟",
+    history: [],
+    historyCount: 0,
+    completeHistoryCount: 0,
+    dataQuality: "EMPTY",
+    missingFields: ["LAYER_1M_EMPTY"],
+    analysisLayer: layered.analysisLayers?.layers?.[0] || null,
+    ok: false,
+    trend: "unknown",
+    anomaly: false,
+    indicators: {},
+  };
+  const books = Array.isArray(layered.books)
+    ? layered.books.map((book) => buildRecentMonitoringMarket(book, layered.analysisLayers?.now)).filter(Boolean)
+    : [];
+  return {
+    ...layered,
+    timeframe: "1m",
+    history: recent.history || [],
+    historyCount: recent.historyCount ?? recent.history?.length ?? 0,
+    completeHistoryCount: recent.completeHistoryCount ?? 0,
+    timeframes: { "1m": recent },
+    availableTimeframes: ["1m"],
+    analysisLayers: layered.analysisLayers ? { ...layered.analysisLayers, layers: layered.analysisLayers.layers?.slice(0, 1) || [] } : null,
+    books,
+    bookCount: books.length,
+  };
+}
+
 export function describeAnalysisLayers(market = {}) {
   const layers = market?.analysisLayers?.layers;
   if (!Array.isArray(layers) || !layers.length) return "未分层";

@@ -1122,11 +1122,15 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
   const boardOptions = market?.availableBoards?.length ? market.availableBoards : books;
   const missingBoards = market?.boardCoverage?.missing || [];
   const boardKey = (book: { instrumentId?: string | null; symbol?: string; symbolName?: string } | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
+  const matchesBook = (book: { instrumentId?: string | null; symbol?: string; symbolName?: string } | null | undefined, selected: string) => {
+    if (!book || !selected) return false;
+    return [boardKey(book), book.symbol, book.instrumentId, book.symbolName].some((value) => String(value || "") === selected);
+  };
   const [selectedSymbol, setSelectedSymbol] = useState(task.target.selectedSymbol || boardKey(market) || task.symbol);
   const [selectedTimeframe, setSelectedTimeframe] = useState(task.timeframe);
   useEffect(() => setSelectedSymbol(task.target.selectedSymbol || task.symbol), [task.target.selectedSymbol, task.symbol]);
   useEffect(() => setSelectedTimeframe(task.timeframe), [task.timeframe]);
-  const selectedBook = books.find((book) => boardKey(book) === selectedSymbol) || books[0] || market;
+  const selectedBook = books.find((book) => matchesBook(book, selectedSymbol)) || books[0] || market;
   const timeframes = selectedBook?.timeframes || market?.timeframes || {};
   const timeframeKeys = Object.keys(timeframes).length ? Object.keys(timeframes) : [task.timeframe];
   const selected: MarketTimeframe | null = timeframes[selectedTimeframe] || timeframes[task.timeframe] || null;
@@ -1156,7 +1160,7 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
       </div>
       {boardOptions.length + missingBoards.length > 1 ? (
         <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">
-          {boardOptions.map((book) => <button type="button" role="tab" aria-selected={boardKey(selectedBook) === boardKey(book)} className={boardKey(selectedBook) === boardKey(book) ? "active" : ""} key={boardKey(book)} disabled={busyAction !== null} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(task.timeframe); onSelectMarket({ symbol: book.symbol || book.instrumentId || "", symbolName: book.symbolName, instrumentId: book.instrumentId || "" }); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
+          {boardOptions.map((book) => <button type="button" role="tab" aria-selected={matchesBook(book, selectedSymbol)} className={matchesBook(book, selectedSymbol) ? "active" : ""} key={boardKey(book)} disabled={busyAction !== null} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(task.timeframe); onSelectMarket({ symbol: book.symbol || book.instrumentId || "", symbolName: book.symbolName, instrumentId: book.instrumentId || "" }); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
           {missingBoards.map((book) => <button type="button" disabled className="missing-board" key={`missing-${book.instrumentId || book.symbol || book.symbolName}`}>{book.symbolName || book.symbol || book.instrumentId} · 未采集</button>)}
         </div>
       ) : null}

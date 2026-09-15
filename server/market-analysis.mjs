@@ -1,9 +1,11 @@
-import { buildLayeredAnalysisMarket, compactCollectedMarket, estimateMarketContextBytes } from "./analysis-context.mjs";
+import { buildLayeredAnalysisMarket, buildRecentMonitoringMarket, compactCollectedMarket, estimateMarketContextBytes } from "./analysis-context.mjs";
 import { requestDecision } from "./provider.mjs";
 
 // Runs inside the desktop runtime. No database, RAG index or server engine dependency.
 export async function analyzeCollectedMarket(provider, market, context, options = {}) {
-  const layered = buildLayeredAnalysisMarket(compactCollectedMarket(market));
+  const layered = context?.monitoringWindow === "last_1h"
+    ? buildRecentMonitoringMarket(compactCollectedMarket(market))
+    : buildLayeredAnalysisMarket(compactCollectedMarket(market));
   const { marketRef, ...decisionContext } = context;
   const input = { ...decisionContext, market: layered, analysisMode: "direct_client" };
   const contextBytes = estimateMarketContextBytes(input);

@@ -1,6 +1,6 @@
 import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-ai.mjs";
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
-import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
+import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
@@ -14,7 +14,8 @@ const controllerLoops = new Map();
 const pendingActionTimers = new Map();
 const pendingConfirmLocks = new Set();
 const pendingSubmissionCancels = new Map();
-const DEFAULT_MONITOR_POLL_MS = 30000;
+const DEFAULT_MONITOR_POLL_MS = 0;
+const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
 const MIN_PROFIT_PROBABILITY = 0.5;
 const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 24000;
@@ -301,6 +302,7 @@ export function setTaskMarketSelection(taskId, selection = {}, userId = "") {
   task.lastObservedFingerprint = "";
   task.lastAnalyzedFingerprint = "";
   task.lastAnalysisSucceeded = false;
+  setNextPoll(task, 0);
   task.nextTrigger = `已切换监测盘口：${task.target.selectedSymbolName || symbol}`;
   task.updatedAt = new Date().toISOString();
   addEvent("market_selected", `已切换监测盘口：${task.target.selectedSymbolName || symbol}`, { taskId, symbol, instrumentId: task.target.selectedInstrumentId, userId });
@@ -525,6 +527,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     return task;
   } finally {
     pendingConfirmLocks.delete(taskId);
+    resumeMonitoringAfterAction(task);
   }
 }
 
@@ -544,6 +547,7 @@ export function cancelPendingAction(taskId) {
     task.nextTrigger = task.pendingAction.message;
     addEvent("suggestion_cancelled", task.pendingAction.message, { taskId, action: task.pendingAction.action });
     persistTask(task);
+    resumeMonitoringAfterAction(task);
     return task;
   }
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
@@ -558,6 +562,7 @@ export function cancelPendingAction(taskId) {
   task.nextTrigger = task.pendingAction.message;
   addEvent("suggestion_cancelled", task.pendingAction.message, { taskId, action: task.pendingAction.action });
   persistTask(task);
+  resumeMonitoringAfterAction(task);
   return task;
 }
 
@@ -584,12 +589,7 @@ function monitoringIntent(task) {
 export function monitoringPollIntervalMs(task) {
   const configured = Number(process.env.MONITOR_POLL_INTERVAL_MS || 0);
   if (Number.isFinite(configured) && configured > 0) return Math.min(MAX_MONITOR_POLL_MS, Math.max(1000, configured));
-  const timeframe = String(task?.timeframe || "15m").toLowerCase();
-  if (["1m", "1min"].includes(timeframe)) return DEFAULT_MONITOR_POLL_MS;
-  if (["3m", "3min", "5m", "5min"].includes(timeframe)) return 45000;
-  if (["10m", "10min", "15m", "15min"].includes(timeframe)) return 60000;
-  if (["30m", "30min", "1h", "60m", "2h"].includes(timeframe)) return 90000;
-  return MAX_MONITOR_POLL_MS;
+  return DEFAULT_MONITOR_POLL_MS;
 }
 
 function latestPrice(market) {
@@ -631,7 +631,7 @@ export function entryConditionReached(previous, next, task) {
 
 function monitorRetryDelay(task) {
   const failures = Math.max(1, Number(task?.monitorFailureCount || 1));
-  const base = monitoringPollIntervalMs(task);
+  const base = Math.max(DEFAULT_MONITOR_RETRY_MS, monitoringPollIntervalMs(task));
   return Math.min(MAX_MONITOR_POLL_MS, base * (2 ** Math.min(5, failures - 1)));
 }
 
@@ -644,6 +644,17 @@ function decisionExpired(task) {
 function setNextPoll(task, delayMs = monitoringPollIntervalMs(task)) {
   task.nextPollAt = new Date(Date.now() + Math.max(0, Number(delayMs) || 0)).toISOString();
   task.nextTrigger = `等待行情变化，约 ${Math.ceil(Math.max(0, Number(delayMs) || 0) / 1000)} 秒后检查`;
+}
+
+function pauseForPendingAction(task) {
+  return task?.pendingAction?.status === "WAITING";
+}
+
+function resumeMonitoringAfterAction(task) {
+  if (!monitoringIntent(task) || pauseForPendingAction(task)) return;
+  setNextPoll(task, 0);
+  persistTask(task);
+  scheduleController(task.id, 0);
 }
 
 function renewLease(task) {
@@ -1298,7 +1309,7 @@ export function enforceDecisionLimits(decision) {
   return { ...decision, targetPositionPct, maxOrderValuePct };
 }
 
-export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, runtime: runtimeOverrides = {} } = {}) {
+export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, monitorRecentOnly = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
   const resolvedUserId = userId || existing.ownerUserId || "";
@@ -1402,7 +1413,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
 
     logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
     const clientAnalysis = desktopBrowserRequired();
-    let analysisMarket = clientAnalysis ? null : buildLayeredAnalysisMarket(compactCollectedMarket(task.market));
+    let analysisMarket = clientAnalysis ? null : (monitorRecentOnly
+      ? buildRecentMonitoringMarket(compactCollectedMarket(task.market))
+      : buildLayeredAnalysisMarket(compactCollectedMarket(task.market)));
     if (analysisMarket) appendAgentOutput({
       taskId,
       runId: run.id,
@@ -1452,6 +1465,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           evidenceIds: evidence.map((item) => item.evidenceId),
           previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
           conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },
+          monitoringWindow: monitorRecentOnly ? "last_1h" : "layered",
         }, { timeoutMs: 120000 });
         assertCurrent();
         decision = result.decision;
@@ -1645,7 +1659,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (state.analyses.length > 20) state.analyses.length = 20;
     persistAnalysis(analysis);
     finishAgentRun(run.id, { status: "completed", action: task.decision.action, route, code: execution.code || route });
-    if (monitoringIntent(task)) setNextPoll(task);
+    if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task);
+    else if (pauseForPendingAction(task)) task.nextPollAt = null;
     persistTask(task);
     return { task, market: task.market, evidence, execution, run, route, analysisTriggered: true };
   } catch (error) {
@@ -1687,6 +1702,7 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
     trigger: "controller",
     userId: userId || task.ownerUserId || "",
     skipIfUnchanged: true,
+    monitorRecentOnly: true,
     runtime,
   });
   const current = getTask(taskId);
@@ -1700,14 +1716,14 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
   }
   const failed = result.market?.ok !== true || result.task.lastAnalysisSucceeded === false || ["REAUTH_REQUIRED", "CONNECT_FAILED", "COLLECT_FAILED"].includes(result.route);
   task.monitorFailureCount = failed ? Math.max(1, Number(task.monitorFailureCount || 0)) : 0;
-  if (monitoringIntent(task)) setNextPoll(task, failed ? monitorRetryDelay(task) : monitoringPollIntervalMs(task));
+  if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task, failed ? monitorRetryDelay(task) : monitoringPollIntervalMs(task));
   persistTask(task);
   return result;
 }
 
 function scheduleController(taskId, delayMs) {
   const entry = controllerLoops.get(taskId);
-  if (!entry || entry.stopped || entry.timer) return;
+  if (!entry || entry.stopped || entry.timer || entry.running) return;
   const task = getTask(taskId);
   if (!monitoringIntent(task)) {
     stopController(taskId);
@@ -1737,7 +1753,7 @@ function scheduleController(taskId, delayMs) {
       entry.running = false;
       if (controllerLoops.get(taskId) === entry && !entry.stopped) {
         const current = getTask(taskId);
-        if (current && taskGeneration(current) === entry.generation && monitoringIntent(current)) {
+        if (current && taskGeneration(current) === entry.generation && monitoringIntent(current) && !pauseForPendingAction(current)) {
           const nextPollAt = new Date(current.nextPollAt || "").getTime();
           const fallbackDelay = monitoringPollIntervalMs(current);
           scheduleController(taskId, Number.isFinite(nextPollAt) ? Math.max(0, nextPollAt - Date.now()) : fallbackDelay);

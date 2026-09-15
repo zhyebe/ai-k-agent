@@ -158,9 +158,9 @@ test("只有获利概率没有方向时继续保持观望", () => {
   assert.equal(decision.action, "HOLD");
 });
 
-test("持续监控默认低频轮询，只有入场阈值变化才触发分析", () => {
-  assert.equal(monitoringPollIntervalMs({ timeframe: "1m" }), 30000);
-  assert.equal(monitoringPollIntervalMs({ timeframe: "15m" }), 60000);
+test("持续监控完成一轮后立即继续，只有入场阈值变化才触发分析", () => {
+  assert.equal(monitoringPollIntervalMs({ timeframe: "1m" }), 0);
+  assert.equal(monitoringPollIntervalMs({ timeframe: "15m" }), 0);
   const task = { decision: { createdAt: new Date().toISOString(), ttlSec: 300 } };
   const base = { symbol: "A", latest: { price: 100 }, indicators: { ema20: 99, rsi14: 50, volumeRatio: 1 }, trend: "up", orderBook: { imbalance: 0.1 } };
   assert.equal(entryConditionReached(base, { ...base, latest: { price: 100.1 } }, task), false);
@@ -385,7 +385,8 @@ test("成功监控轮次持续运行，未变行情不请求模型，变化后�
   assert.equal(requests[0].account.availableFunds, 1000);
   assert.equal(requests[0].account.equity, 1000);
   assert.equal(requests[0].market.ticks.length, 0);
-  assert.deepEqual(requests[0].market.availableTimeframes, ["1m", "1h", "1d", "1mo"]);
+  assert.deepEqual(requests[0].market.availableTimeframes, ["1m"]);
+  assert.equal(requests[0].market.timeframes["1h"], undefined);
   assert.ok(requests[0].market.timeframes["1m"].historyCount >= 20);
   assert.equal(requests[0].market.analysisLayers.timezone, "Asia/Shanghai");
   assert.equal(requests[0].market.raw?.timeline, undefined);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
+import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
 function history(size, start = 1700000000000, step = 60000) {
   return Array.from({ length: size }, (_, index) => ({
@@ -150,4 +150,20 @@ test("分析行情按上海时区近密远疏分层，不含秒级逐笔", () =>
   assert.equal(fromTicks.timeframes["1m"].history.length, 2);
   assert.ok(fromTicks.timeframes["1m"].history.every((item) => item.timestamp % 60000 === 0));
   assert.ok(!fromTicks.timeframes["1m"].history.some((item) => item.timestamp === now - 20_000));
+});
+
+test("监控上下文只保留最近1小时分钟数据", () => {
+  const now = Date.parse("2026-09-10T03:32:00.000Z");
+  const layered = buildLayeredAnalysisMarket({
+    dataAt: new Date(now).toISOString(),
+    timeframes: {
+      "1m": { timeframe: "1m", history: [candle(now - 30 * 60000), candle(now - 2 * 60 * 60000)] },
+      "1h": { timeframe: "1h", history: [candle(now - 5 * 60 * 60000)] },
+    },
+  }, now);
+  const monitoring = buildRecentMonitoringMarket(layered, now);
+  assert.deepEqual(monitoring.availableTimeframes, ["1m"]);
+  assert.deepEqual(monitoring.timeframes["1m"].history.map((item) => item.timestamp), [now - 30 * 60000]);
+  assert.equal(monitoring.timeframes["1h"], undefined);
+  assert.equal(monitoring.analysisLayers.layers.length, 1);
 });
