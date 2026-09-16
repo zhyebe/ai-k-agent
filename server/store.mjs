@@ -275,16 +275,16 @@ export function persistOrder(order) {
   return persistValue("saveOrder", order);
 }
 
-export function persistAnalysis(analysis) {
-  return persistValue("saveAnalysis", analysis);
+export function persistAnalysis() {
+  return Promise.resolve();
 }
 
-export function persistAgentRun(run) {
-  return persistValue("saveAgentRun", run);
+export function persistAgentRun() {
+  return Promise.resolve();
 }
 
-export function persistAgentOutput(line) {
-  return persistValue("saveAgentOutput", line);
+export function persistAgentOutput() {
+  return Promise.resolve();
 }
 
 export function startAgentRun(taskId, { trigger = "manual" } = {}) {

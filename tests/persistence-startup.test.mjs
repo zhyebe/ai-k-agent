@@ -9,7 +9,7 @@ function databaseMode(t, mode) {
   t.after(() => { if (previous === undefined) delete process.env.DB_MODE; else process.env.DB_MODE = previous; });
 }
 
-test("MySQL startup and restart preserve existing records without cleanup deletes", async (t) => {
+test("MySQL startup keeps account and task rows and only truncates AI dumps", async (t) => {
   databaseMode(t, "mysql");
   const statements = [];
   const mysql = createRequire(import.meta.url)("mysql2/promise");
@@ -23,7 +23,9 @@ test("MySQL startup and restart preserve existing records without cleanup delete
     await adapter.close();
   }
   assert.ok(statements.some((sql) => /CREATE TABLE/i.test(sql)));
-  assert.deepEqual(statements.filter((sql) => /^\s*(DELETE|TRUNCATE|DROP)\b/i.test(sql)), []);
+  const cleanup = statements.filter((sql) => /^\s*(DELETE|TRUNCATE|DROP)\b/i.test(sql));
+  assert.ok(cleanup.every((sql) => /TRUNCATE TABLE (risk_checks|agent_decisions|agent_output|agent_runs|analysis_runs|market_candles)/i.test(sql) || /DELETE FROM audit_logs WHERE event_type NOT IN/i.test(sql)));
+  assert.equal(cleanup.some((sql) => /FROM (users|tasks|providers|connectors|credentials|task_assignments)\b/i.test(sql)), false);
 });
 
 test("MongoDB startup keeps stored experience including legacy identifiers", async (t) => {

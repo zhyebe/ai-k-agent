@@ -31,6 +31,139 @@ function byDesc(column) {
   return (a, b) => new Date(b?.[column] || 0).getTime() - new Date(a?.[column] || 0).getTime();
 }
 
+const PERSISTED_AUDIT_TYPES = new Set([
+  "admin_login",
+  "user_login",
+  "user_created",
+  "user_updated",
+  "user_deleted",
+  "user_bootstrapped",
+]);
+
+function compactBookSummary(book) {
+  if (!book || typeof book !== "object") return null;
+  return {
+    symbol: book.symbol || "",
+    symbolName: book.symbolName || "",
+    instrumentId: book.instrumentId || "",
+    latest: book.latest || book.quote || null,
+    changePct: book.changePct ?? null,
+    timeframe: book.timeframe || "",
+    source: book.source || "",
+    historyCount: Number(book.historyCount || book.history?.length || 0),
+    dataQuality: book.dataQuality || "",
+  };
+}
+
+function compactPersistedMarket(market) {
+  if (!market || typeof market !== "object") return null;
+  const books = Array.isArray(market.books) ? market.books.map(compactBookSummary).filter(Boolean) : [];
+  return {
+    ...compactBookSummary(market),
+    observedAt: market.observedAt || null,
+    expectedBookCount: Number(market.expectedBookCount || books.length || 0),
+    boardCoverage: market.boardCoverage || null,
+    books,
+    account: market.account || null,
+  };
+}
+
+function compactPersistedDecision(decision) {
+  if (!decision || typeof decision !== "object") return decision;
+  return {
+    action: decision.action || "HOLD",
+    confidence: Number(decision.confidence || 0),
+    profitProbability: Number(decision.profitProbability ?? decision.confidence ?? 0),
+    targetSymbol: decision.targetSymbol || "",
+    targetSymbolName: decision.targetSymbolName || "",
+    targetInstrumentId: decision.targetInstrumentId || "",
+    targetPositionPct: Number(decision.targetPositionPct || 0),
+    maxOrderValuePct: Number(decision.maxOrderValuePct || 0),
+    reasonCodes: Array.isArray(decision.reasonCodes) ? decision.reasonCodes.slice(0, 8) : [],
+    evidenceIds: [],
+    invalidation: String(decision.invalidation || "").slice(0, 240),
+    riskFlags: Array.isArray(decision.riskFlags) ? decision.riskFlags.slice(0, 12) : [],
+    createdAt: decision.createdAt || null,
+    ttlSec: Number(decision.ttlSec || decision.decisionTtlSec || 300),
+    analysisSummary: String(decision.analysisSummary || "").slice(0, 400),
+    boardAssessments: Array.isArray(decision.boardAssessments)
+      ? decision.boardAssessments.slice(0, 8).map((item) => ({
+        symbol: item.symbol || "",
+        symbolName: item.symbolName || "",
+        instrumentId: item.instrumentId || "",
+        action: item.action || "HOLD",
+        confidence: Number(item.confidence || 0),
+        profitProbability: Number(item.profitProbability ?? item.confidence ?? 0),
+        summary: String(item.summary || "").slice(0, 160),
+      }))
+      : [],
+  };
+}
+
+export function compactTaskRuntime(task = {}) {
+  return {
+    workflow: task.workflow || [],
+    rules: task.rules || [],
+    decision: compactPersistedDecision(task.decision),
+    metrics: task.metrics || null,
+    nextTrigger: task.nextTrigger || "",
+    lastAnalysisAt: task.lastAnalysisAt || null,
+    heartbeatAt: task.heartbeatAt || null,
+    leaseExpiresAt: task.leaseExpiresAt || null,
+    monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : task.monitoringEnabled === true,
+    monitorAllBoards: task.monitorAllBoards === true,
+    monitorGeneration: Number(task.monitorGeneration || 0),
+    monitoringRound: Number(task.monitoringRound || 0),
+    monitorFailureCount: Number(task.monitorFailureCount || 0),
+    lastObservedFingerprint: task.lastObservedFingerprint || "",
+    lastAnalyzedFingerprint: task.lastAnalyzedFingerprint || "",
+    lastAnalysisSucceeded: task.lastAnalysisSucceeded === true,
+    lastPolledAt: task.lastPolledAt || null,
+    lastCycleAt: task.lastCycleAt || null,
+    nextPollAt: task.nextPollAt || null,
+    autoDecisionEnabled: task.autoDecisionEnabled === true,
+    autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
+    automationTestMode: task.automationTestMode !== false,
+    providerId: String(task.providerId || ""),
+    pendingAction: task.pendingAction || null,
+    market: compactPersistedMarket(task.market),
+    connectorId: task.target?.connectorId || "",
+    credentialRef: task.target?.credentialRef || "",
+  };
+}
+
+export function shouldPersistAuditEvent(type) {
+  return PERSISTED_AUDIT_TYPES.has(String(type || ""));
+}
+
+const EPHEMERAL_MYSQL_TABLES = [
+  "risk_checks",
+  "agent_decisions",
+  "agent_output",
+  "agent_runs",
+  "analysis_runs",
+  "market_candles",
+];
+
+async function purgeEphemeralMysql(pool) {
+  await pool.query("SET FOREIGN_KEY_CHECKS = 0").catch(() => {});
+  for (const table of EPHEMERAL_MYSQL_TABLES) {
+    await pool.query(`TRUNCATE TABLE ${table}`).catch(() => {});
+  }
+  await pool.query(
+    "DELETE FROM audit_logs WHERE event_type NOT IN ('admin_login','user_login','user_created','user_updated','user_deleted','user_bootstrapped')",
+  ).catch(() => {});
+  await pool.query("SET FOREIGN_KEY_CHECKS = 1").catch(() => {});
+}
+
+async function compactStoredTaskRuntimes(pool) {
+  const [rows] = await pool.query("SELECT id, runtime_json FROM tasks").catch(() => [[]]);
+  for (const row of rows) {
+    const compact = compactTaskRuntime(parse(row.runtime_json, {}));
+    await pool.execute("UPDATE tasks SET runtime_json = ? WHERE id = ?", [json(compact), row.id]).catch(() => {});
+  }
+}
+
 function serializeWrites(adapter, methodNames) {
   let queue = Promise.resolve();
   for (const methodName of methodNames) {
@@ -247,6 +380,8 @@ async function createMySqlAdapter() {
     "ALTER TABLE risk_checks ADD CONSTRAINT fk_risk_checks_decision FOREIGN KEY (decision_id) REFERENCES agent_decisions(id) ON DELETE CASCADE",
   ];
   for (const statement of foreignKeys) await pool.query(statement).catch(() => {});
+  await compactStoredTaskRuntimes(pool);
+  await purgeEphemeralMysql(pool);
   const adapter = {
     mode: "mysql",
     available: true,
@@ -255,44 +390,14 @@ async function createMySqlAdapter() {
       return { mode: adapter.mode, available: adapter.available, detail: adapter.detail };
     },
     async recordAudit(event) {
+      if (!shouldPersistAuditEvent(event?.type)) return;
       await pool.execute(
         "INSERT INTO audit_logs (event_id, event_type, payload_json, created_at) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE payload_json = VALUES(payload_json)",
         [event.id, event.type, json(event)],
       );
     },
     async saveTask(task) {
-      const runtime = {
-        workflow: task.workflow,
-        rules: task.rules,
-        decision: task.decision,
-        metrics: task.metrics,
-        nextTrigger: task.nextTrigger,
-        lastAnalysisAt: task.lastAnalysisAt || null,
-        lastHeartbeatEventAt: task.lastHeartbeatEventAt || null,
-        heartbeatAt: task.heartbeatAt,
-        leaseExpiresAt: task.leaseExpiresAt,
-        monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : task.monitoringEnabled === true,
-        monitorAllBoards: task.monitorAllBoards === true,
-        monitorGeneration: task.monitorGeneration || 0,
-        monitoringRound: task.monitoringRound || 0,
-        monitorFailureCount: task.monitorFailureCount || 0,
-        lastObservedFingerprint: task.lastObservedFingerprint || "",
-        lastAnalyzedFingerprint: task.lastAnalyzedFingerprint || "",
-        lastAnalysisSucceeded: task.lastAnalysisSucceeded === true,
-        lastPolledAt: task.lastPolledAt || null,
-        lastCycleAt: task.lastCycleAt || null,
-        nextPollAt: task.nextPollAt || null,
-        analysisCoverage: task.analysisCoverage || null,
-        autoDecisionEnabled: task.autoDecisionEnabled === true,
-        autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-        automationTestMode: task.automationTestMode !== false,
-        providerId: String(task.providerId || ""),
-        pendingAction: task.pendingAction || null,
-        market: task.market || null,
-        activeRunId: task.activeRunId || null,
-        connectorId: task.target?.connectorId || "",
-        credentialRef: task.target?.credentialRef || "",
-      };
+      const runtime = compactTaskRuntime(task);
       await pool.execute(
         `INSERT INTO tasks (id, owner_user_id, name, status, mode, symbol, timeframe, target_json, risk_profile, stop_locked, runtime_json, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
@@ -390,30 +495,9 @@ async function createMySqlAdapter() {
         [order.id, order.idempotencyKey, order.taskId, order.symbol, order.action, order.mode, order.status, json(order)],
       );
     },
-    async saveAnalysis(analysis) {
-      await pool.execute(
-        `INSERT INTO analysis_runs (id, task_id, market_snapshot_json, evidence_json, decision_json, route, round_no, trigger_name, coverage_json, segment_reviews_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE market_snapshot_json=VALUES(market_snapshot_json), evidence_json=VALUES(evidence_json), decision_json=VALUES(decision_json), route=VALUES(route), round_no=VALUES(round_no), trigger_name=VALUES(trigger_name), coverage_json=VALUES(coverage_json), segment_reviews_json=VALUES(segment_reviews_json)`,
-        [analysis.id, analysis.taskId, json(analysis.market), json(analysis.evidence), json(analysis.decision), analysis.route, analysis.round ?? null, analysis.trigger || null, json(analysis.coverage), json(analysis.segmentReviews || [])],
-      );
-    },
-    async saveAgentRun(run) {
-      await pool.execute(
-        `INSERT INTO agent_runs (id, task_id, status, trigger_name, current_stage, line_count, final_action, route, code, started_at, completed_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-         ON DUPLICATE KEY UPDATE status=VALUES(status), current_stage=VALUES(current_stage), line_count=VALUES(line_count), final_action=VALUES(final_action), route=VALUES(route), code=VALUES(code), completed_at=VALUES(completed_at), updated_at=NOW()`,
-        [run.id, run.taskId, run.status, run.trigger || "manual", run.currentStage || "system", run.lineCount || 0, run.finalAction, run.route, run.code || null, toDateValue(run.startedAt), toDateValue(run.completedAt)],
-      );
-    },
-    async saveAgentOutput(line) {
-      await pool.execute(
-        `INSERT INTO agent_output (id, task_id, run_id, sequence_no, stage, kind, level_name, message, data_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE message=VALUES(message), data_json=VALUES(data_json)`,
-        [line.id, line.taskId, line.runId, line.sequence || 0, line.stage, line.kind, line.level, line.message, line.data === null ? null : json(line.data), toDateValue(line.createdAt)],
-      );
-    },
+    async saveAnalysis() {},
+    async saveAgentRun() {},
+    async saveAgentOutput() {},
     async saveUser(user) {
       await pool.execute(
         `INSERT INTO users (id, username, display_name, password_hash, status, updated_at)
@@ -492,21 +576,17 @@ async function createMySqlAdapter() {
       const [providerRows] = await pool.query("SELECT * FROM providers");
       const [connectorRows] = await pool.query("SELECT * FROM connectors");
       const [orderRows] = await pool.query(recentRowsSql("orders", "id", "created_at", 200)).catch(() => [[]]);
-      const [eventRows] = await pool.query(recentRowsSql("audit_logs", "event_id", "created_at", 80, "t.payload_json")).catch(() => [[]]);
+      const [eventRows] = await pool.query(
+        "SELECT payload_json FROM audit_logs WHERE event_type IN ('admin_login','user_login','user_created','user_updated','user_deleted','user_bootstrapped') ORDER BY created_at DESC LIMIT 80",
+      ).catch(() => [[]]);
       const [userRows] = await pool.query("SELECT * FROM users");
       const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments");
-      const [analysisRows] = await pool.query(recentRowsSql("analysis_runs", "id", "created_at", 20)).catch(() => [[]]);
-      const [agentRunRows] = await pool.query(recentRowsSql("agent_runs", "id", "started_at", 100)).catch(() => [[]]);
-      const [agentOutputRows] = await pool.query(recentRowsSql("agent_output", "id", "created_at", 1200)).catch(() => [[]]);
       taskRows.sort(byDesc("updated_at"));
       skillRows.sort(byDesc("updated_at"));
       providerRows.sort(byDesc("updated_at"));
       connectorRows.sort(byDesc("updated_at"));
       userRows.sort(byDesc("updated_at"));
       orderRows.sort(byDesc("created_at"));
-      analysisRows.sort(byDesc("created_at"));
-      agentRunRows.sort(byDesc("started_at"));
-      agentOutputRows.sort(byDesc("created_at"));
       return {
         tasks: taskRows.map((row) => {
           const target = parse(row.target_json, {});
@@ -560,9 +640,9 @@ async function createMySqlAdapter() {
         events: eventRows.map((row) => parse(row.payload_json, null)).filter(Boolean).sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || ""))),
         users: userRows.map((row) => ({ id: row.id, username: row.username, displayName: row.display_name, passwordHash: row.password_hash, status: row.status, createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || ""), updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || "") })),
         assignments: assignmentRows.map((row) => ({ userId: row.user_id, taskId: row.task_id })),
-        analyses: analysisRows.map((row) => ({ id: row.id, taskId: row.task_id, round: row.round_no === null || row.round_no === undefined ? null : Number(row.round_no), trigger: row.trigger_name || "", market: parse(row.market_snapshot_json, {}), evidence: parse(row.evidence_json, []), decision: parse(row.decision_json, {}), coverage: parse(row.coverage_json, null), segmentReviews: parse(row.segment_reviews_json, []), route: row.route, createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at || "") })),
-        agentRuns: agentRunRows.map((row) => ({ id: row.id, taskId: row.task_id, status: row.status, trigger: row.trigger_name, currentStage: row.current_stage, lineCount: row.line_count, finalAction: row.final_action, route: row.route, code: row.code, startedAt: dateValue(row.started_at), completedAt: dateValue(row.completed_at) })),
-        agentOutput: agentOutputRows.map((row) => ({ id: row.id, taskId: row.task_id, runId: row.run_id, sequence: row.sequence_no, stage: row.stage, kind: row.kind, level: row.level_name, message: row.message, data: parse(row.data_json, null), createdAt: dateValue(row.created_at) })),
+        analyses: [],
+        agentRuns: [],
+        agentOutput: [],
       };
     },
     async loadCredentials() {
@@ -613,8 +693,11 @@ async function createMongoAdapter() {
     async health() {
       return { mode: adapter.mode, available: adapter.available, detail: adapter.detail };
     },
-    recordAudit: (event) => collections.audit.replaceOne({ _id: event.id }, { ...event, _id: event.id }, { upsert: true }),
-    saveTask: (task) => collections.tasks.replaceOne({ _id: task.id }, { ...task, _id: task.id }, { upsert: true }),
+    async recordAudit(event) {
+      if (!shouldPersistAuditEvent(event?.type)) return;
+      await collections.audit.replaceOne({ _id: event.id }, { ...event, _id: event.id }, { upsert: true });
+    },
+    saveTask: (task) => collections.tasks.replaceOne({ _id: task.id }, { ...task, ...compactTaskRuntime(task), _id: task.id }, { upsert: true }),
     async deleteTaskData({ taskId, ownerUserId }) {
       const owned = await collections.tasks.findOne({ _id: taskId, ownerUserId });
       if (!owned) throw new Error("TASK_NOT_FOUND");
@@ -636,9 +719,9 @@ async function createMongoAdapter() {
     deleteConnector: (id) => collections.connectors.deleteOne({ _id: id }),
     saveCredential: (record) => collections.credentials.replaceOne({ _id: record.id }, { ...record, _id: record.id }, { upsert: true }),
     saveOrder: (order) => collections.orders.replaceOne({ _id: order.id }, { ...order, _id: order.id }, { upsert: true }),
-    saveAnalysis: (analysis) => collections.analyses.replaceOne({ _id: analysis.id }, { ...analysis, _id: analysis.id }, { upsert: true }),
-    saveAgentRun: (run) => collections.agentRuns.replaceOne({ _id: run.id }, { ...run, _id: run.id }, { upsert: true }),
-    saveAgentOutput: (line) => collections.agentOutput.replaceOne({ _id: line.id }, { ...line, _id: line.id }, { upsert: true }),
+    async saveAnalysis() {},
+    async saveAgentRun() {},
+    async saveAgentOutput() {},
     saveUser: (user) => collections.users.replaceOne({ _id: user.id }, { ...user, _id: user.id }, { upsert: true }),
     async deleteUserData({ userId, taskIds = [] }) {
       const ids = [...new Set(taskIds.map(String).filter(Boolean))];
@@ -664,20 +747,17 @@ async function createMongoAdapter() {
     saveAssignment: (assignment) => collections.assignments.replaceOne({ _id: `${assignment.userId}:${assignment.taskId}` }, { ...assignment, _id: `${assignment.userId}:${assignment.taskId}` }, { upsert: true }),
     deleteAssignment: (assignment) => collections.assignments.deleteOne({ _id: `${assignment.userId}:${assignment.taskId}` }),
     async loadState() {
-      const [tasks, skills, providers, connectors, orders, events, users, assignments, analyses, agentRuns, agentOutput] = await Promise.all([
+      const [tasks, skills, providers, connectors, orders, events, users, assignments] = await Promise.all([
         collections.tasks.find().sort({ updatedAt: -1 }).toArray(),
         collections.skills.find().sort({ updatedAt: -1 }).toArray(),
         collections.providers.find().sort({ updatedAt: -1 }).toArray(),
         collections.connectors.find().sort({ updatedAt: -1 }).toArray(),
         collections.orders.find().sort({ createdAt: -1 }).limit(200).toArray(),
-        collections.audit.find().sort({ createdAt: -1 }).limit(80).toArray(),
+        collections.audit.find({ type: { $in: [...PERSISTED_AUDIT_TYPES] } }).sort({ createdAt: -1 }).limit(80).toArray(),
         collections.users.find().sort({ updatedAt: -1 }).toArray(),
         collections.assignments.find().toArray(),
-        collections.analyses.find().sort({ createdAt: -1 }).limit(200).toArray(),
-        collections.agentRuns.find().sort({ startedAt: -1 }).limit(100).toArray(),
-        collections.agentOutput.find().sort({ createdAt: -1 }).limit(1200).toArray(),
       ]);
-      return { tasks: tasks.map(({ _id, ...item }) => item), skills: skills.map(({ _id, ...item }) => item), providers: providers.map(({ _id, ...item }) => item), connectors: connectors.map(({ _id, ...item }) => item), orders: orders.map(({ _id, ...item }) => item), events: events.map(({ _id, ...item }) => item), users: users.map(({ _id, ...item }) => item), assignments: assignments.map(({ _id, ...item }) => item), analyses: analyses.map(({ _id, ...item }) => item), agentRuns: agentRuns.map(({ _id, ...item }) => item), agentOutput: agentOutput.map(({ _id, ...item }) => item) };
+      return { tasks: tasks.map(({ _id, ...item }) => item), skills: skills.map(({ _id, ...item }) => item), providers: providers.map(({ _id, ...item }) => item), connectors: connectors.map(({ _id, ...item }) => item), orders: orders.map(({ _id, ...item }) => item), events: events.map(({ _id, ...item }) => item), users: users.map(({ _id, ...item }) => item), assignments: assignments.map(({ _id, ...item }) => item), analyses: [], agentRuns: [], agentOutput: [] };
     },
     async loadCredentials() {
       const rows = await collections.credentials.find().toArray();
