@@ -1250,6 +1250,8 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const actionText = analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
   const profitProbability = Number(decision.profitProbability ?? decision.confidence ?? 0);
+  const bullishProbability = Number(decision.bullishProfitProbability ?? (decision.action === "BUY" ? profitProbability : 0));
+  const bearishProbability = Number(decision.bearishProfitProbability ?? (decision.action === "SELL" ? profitProbability : 0));
   const target = decisionTargetLabel(decision);
   const pending = task.pendingAction;
   return (
@@ -1263,9 +1265,10 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
         <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · ${profitProbabilityLabel(profitProbability)}% 获利概率 · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
-      <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>获利概率 <b>{profitProbabilityLabel(profitProbability)}%</b></span></div>
+      <div className="confidence-bar"><div style={{ width: `${profitProbability * 100}%` }} /><span>AI 获利概率 <b>{profitProbabilityLabel(profitProbability)}%</b></span></div>
+      {analyzed ? <div className="direction-probabilities"><span className="direction-long">买涨 {profitProbabilityLabel(bullishProbability)}%</span><span className="direction-short">买跌 {profitProbabilityLabel(bearishProbability)}%</span></div> : null}
       <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
-      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · {profitProbabilityLabel(Number(item.profitProbability ?? item.confidence ?? 0))}% 获利概率</span></div>)}</div> : null}
+      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · 涨 {profitProbabilityLabel(Number(item.bullishProfitProbability ?? (item.action === "BUY" ? item.profitProbability : 0)))}% · 跌 {profitProbabilityLabel(Number(item.bearishProfitProbability ?? (item.action === "SELL" ? item.profitProbability : 0)))}%</span></div>)}</div> : null}
       {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}
       <div className="reason-block">
         <span className="block-label">机器可验证依据</span>

@@ -98,7 +98,12 @@ function profitProbabilityLabel(value) {
 }
 
 function enforceProfitProbability(decision) {
-  const profitProbability = Math.min(1, Math.max(0, Number(decision?.profitProbability ?? 0) || 0));
+  const selectedProbability = decision?.action === "BUY"
+    ? Number(decision?.bullishProfitProbability ?? decision?.profitProbability ?? 0)
+    : decision?.action === "SELL"
+      ? Number(decision?.bearishProfitProbability ?? decision?.profitProbability ?? 0)
+      : Number(decision?.profitProbability ?? 0);
+  const profitProbability = Math.min(1, Math.max(0, Number(selectedProbability) || 0));
   const signalTier = profitSignalTier(profitProbability);
   if ((decision?.action === "BUY" || decision?.action === "SELL") && signalTier === "HOLD") {
     return {
@@ -1079,13 +1084,7 @@ export function decisionTargetBook(decision, market) {
 export function bindDecisionToMarket(decision, market) {
   const books = monitoredBooks(market);
   const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
-  if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) {
-    const directional = boardAssessments
-      .filter((item) => (item.action === "BUY" || item.action === "SELL") && Number(item.profitProbability || 0) > MIN_PROFIT_PROBABILITY)
-      .sort((left, right) => Number(right.profitProbability || 0) - Number(left.profitProbability || 0))[0];
-    if (!directional) return decision ? { ...decision, boardAssessments } : decision;
-    decision = { ...decision, action: directional.action, profitProbability: directional.profitProbability, confidence: directional.confidence, targetSymbol: directional.symbol, targetSymbolName: directional.symbolName, targetInstrumentId: directional.instrumentId, targetPositionPct: decision.targetPositionPct || 0, maxOrderValuePct: decision.maxOrderValuePct || 0, reasonCodes: [...new Set([...(decision.reasonCodes || []), "BOARD_PROFIT_PROBABILITY_THRESHOLD"])], boardAssessments };
-  }
+  if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision ? { ...decision, boardAssessments } : decision;
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
     symbolName: decision.targetSymbolName,
@@ -1421,19 +1420,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       setNextPoll(task);
       persistTask(task);
       return { task, market, run, skipped: true, reason: "MARKET_UNCHANGED", route: "WAITING_FOR_CHANGE", analysisTriggered: false };
-    }
-    const entryTriggered = !skipIfUnchanged || entryConditionReached(previousMarket, task.market, task);
-    if (skipIfUnchanged && !entryTriggered && !decisionExpired(task)) {
-      task.status = monitoringIntent(task) ? "MONITORING" : "MANUAL_CONTROL";
-      task.nextTrigger = "等待入场条件，达到价格、趋势、量能或盘口阈值后再请求模型";
-      completeWorkflow(task, "analyze", "行情已更新，尚未达到入场条件，跳过模型请求");
-      completeWorkflow(task, "rules", "未触发入场分析");
-      completeWorkflow(task, "action", "等待入场点，不生成新建议");
-      appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "行情已更新但未达到入场条件，跳过模型请求" });
-      finishAgentRun(run.id, { status: "skipped", action: task.decision.action, route: "WAITING_FOR_ENTRY", code: "ENTRY_NOT_REACHED" });
-      setNextPoll(task);
-      persistTask(task);
-      return { task, market, run, skipped: true, reason: "ENTRY_NOT_REACHED", route: "WAITING_FOR_ENTRY", analysisTriggered: false };
     }
     if (skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && decisionExpired(task)) {
       appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "上一轮建议已过期，重新请求模型确认" });

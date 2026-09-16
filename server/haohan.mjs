@@ -211,6 +211,8 @@ export function uniqueBoardAssessments(values = [], books = []) {
     const action = ["BUY", "SELL", "HOLD"].includes(item.action) ? item.action : "HOLD";
     const confidence = Math.min(1, Math.max(0, Number(item.confidence) || 0));
     const profitProbability = Math.min(1, Math.max(0, Number(item.profitProbability ?? item.profit_probability) || 0));
+    const bullishProfitProbability = Math.min(1, Math.max(0, Number(item.bullishProfitProbability ?? item.bullish_profit_probability) || 0));
+    const bearishProfitProbability = Math.min(1, Math.max(0, Number(item.bearishProfitProbability ?? item.bearish_profit_probability) || 0));
     const summary = String(item.summary || "").slice(0, 600);
     const existing = result.find((candidate) => samePageInstrument(candidate, instrument));
     if (existing) {
@@ -222,6 +224,8 @@ export function uniqueBoardAssessments(values = [], books = []) {
         existing.action = action;
         existing.confidence = Math.max(existing.confidence, confidence);
         existing.profitProbability = Math.max(existing.profitProbability, profitProbability);
+        existing.bullishProfitProbability = Math.max(existing.bullishProfitProbability || 0, bullishProfitProbability);
+        existing.bearishProfitProbability = Math.max(existing.bearishProfitProbability || 0, bearishProfitProbability);
         if (summary) existing.summary = summary;
       } else if (summary && !existing.summary) existing.summary = summary;
       continue;
@@ -233,6 +237,8 @@ export function uniqueBoardAssessments(values = [], books = []) {
       action,
       confidence,
       profitProbability,
+      bullishProfitProbability,
+      bearishProfitProbability,
       summary,
     });
   }

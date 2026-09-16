@@ -93,6 +93,8 @@ export interface PendingAction {
   targetInstrumentId?: string;
   targetPrice?: number | null;
   profitProbability?: number;
+  bullishProfitProbability?: number;
+  bearishProfitProbability?: number;
   signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
@@ -119,6 +121,8 @@ export interface Decision {
   targetPrice?: number | null;
   confidence: number;
   profitProbability?: number;
+  bullishProfitProbability?: number;
+  bearishProfitProbability?: number;
   signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   targetPositionPct: number;
   maxOrderValuePct: number;
@@ -139,6 +143,8 @@ export interface Decision {
     action: "BUY" | "SELL" | "HOLD";
     confidence: number;
     profitProbability?: number;
+    bullishProfitProbability?: number;
+    bearishProfitProbability?: number;
     summary?: string;
   }>;
   operatorAssessment?: {

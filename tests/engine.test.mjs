@@ -107,9 +107,8 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
       { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "BUY", confidence: 0.86, profitProbability: 0.91 },
     ],
   }, market);
-  assert.equal(inferred.action, "BUY");
-  assert.equal(inferred.profitProbability, 0.91);
-  assert.equal(inferred.targetInstrumentId, "537");
+  assert.equal(inferred.action, "HOLD");
+  assert.equal(inferred.targetInstrumentId, undefined);
 
   const ambiguous = bindDecisionToMarket({ action: "SELL", riskFlags: [] }, market);
   assert.equal(ambiguous.action, "HOLD");
@@ -131,7 +130,7 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   assert.equal(merged.boardAssessments[1].summary, "康砖二");
 });
 
-test("盘口获利概率超过 45% 即生成方向性待确认建议", () => {
+test("方向必须由 AI 顶层 action 决定，盘口评估不会替 AI 选方向", () => {
   const market = {
     symbol: "DGKZ",
     symbolName: "丹桂康砖（二期）",
@@ -144,10 +143,9 @@ test("盘口获利概率超过 45% 即生成方向性待确认建议", () => {
     confidence: 0.55,
     boardAssessments: [{ symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "BUY", profitProbability: 0.55, confidence: 0.55 }],
   }, market);
-  assert.equal(inferred.action, "BUY");
+  assert.equal(inferred.action, "HOLD");
   assert.equal(inferred.profitProbability, 0.55);
-  assert.equal(inferred.targetInstrumentId, "537");
-  assert.equal(inferred.reasonCodes.includes("BOARD_PROFIT_PROBABILITY_THRESHOLD"), true);
+  assert.equal(inferred.targetInstrumentId, undefined);
 });
 
 test("只有获利概率没有方向时继续保持观望", () => {
@@ -361,13 +359,13 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
   }
 });
 
-test("成功监控轮次持续运行，未变行情不请求模型，变化后开启下一轮并携带上下文", async () => {
+test("成功监控轮次持续运行，未变行情不请求模型，任何变化都交给 AI 判断", async () => {
   const taskId = `task_monitor_success_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.status = "MONITORING";
   task.monitoringEnabled = true;
   task.stopLocked = false;
-  const snapshots = [testMarketSnapshot("fingerprint-a", 100), testMarketSnapshot("fingerprint-a", 100), testMarketSnapshot("fingerprint-b", 101)];
+  const snapshots = [testMarketSnapshot("fingerprint-a", 100), testMarketSnapshot("fingerprint-a", 100), testMarketSnapshot("fingerprint-b", 100.1)];
   const requests = [];
   const runtime = {
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
@@ -412,7 +410,7 @@ test("成功监控轮次持续运行，未变行情不请求模型，变化后�
   assert.equal(requests[1].conversation.recentRounds[0].round, 1);
 
   task.decision.createdAt = new Date(Date.now() - 301000).toISOString();
-  snapshots.push(testMarketSnapshot("fingerprint-b", 101));
+  snapshots.push(testMarketSnapshot("fingerprint-c", 101));
   const refreshed = await runMonitoringCycle(taskId, { runtime });
   assert.equal(refreshed.analysisTriggered, true);
   assert.equal(requests.length, 3);
