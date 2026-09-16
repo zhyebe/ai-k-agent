@@ -10,7 +10,22 @@ IMAGE_VERSION="$(git rev-parse HEAD)"
 export AXIOM_API_IMAGE="axiom-agent-api:${IMAGE_VERSION}"
 export AXIOM_ADMIN_IMAGE="axiom-agent-nginx:${IMAGE_VERSION}"
 
-# Release the old browser processes before loading images. Data services stay running.
+# Recover data services first. `--no-deps` below keeps image deployment isolated,
+# but a previously stopped MySQL/Mongo would otherwise leave the API in a crash loop.
+docker compose up -d --no-build mysql mongo
+for _ in $(seq 1 40); do
+  MYSQL_STATE="$(docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q mysql)" 2>/dev/null || true)"
+  MONGO_STATE="$(docker inspect --format '{{.State.Running}}' "$(docker compose ps -q mongo)" 2>/dev/null || true)"
+  if [[ "$MYSQL_STATE" == "healthy" && "$MONGO_STATE" == "true" ]]; then break; fi
+  sleep 3
+done
+if [[ "$MYSQL_STATE" != "healthy" || "$MONGO_STATE" != "true" ]]; then
+  docker compose ps -a
+  docker compose logs --tail=80 mysql mongo
+  exit 1
+fi
+
+# Release the old API process before loading images.
 docker compose stop -t 30 api
 docker load -i "$ARCHIVE"
 docker image inspect "$AXIOM_API_IMAGE" "$AXIOM_ADMIN_IMAGE" >/dev/null
@@ -38,5 +53,6 @@ for _ in $(seq 1 40); do
   fi
   sleep 3
 done
-docker compose logs --tail=60 api nginx
+docker compose ps -a
+docker compose logs --tail=80 api nginx mysql mongo
 exit 1
