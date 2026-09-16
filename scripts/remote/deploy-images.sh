@@ -11,7 +11,11 @@ export AXIOM_API_IMAGE="axiom-agent-api:${IMAGE_VERSION}"
 export AXIOM_ADMIN_IMAGE="axiom-agent-nginx:${IMAGE_VERSION}"
 
 if ! docker info >/dev/null 2>&1; then
-  systemctl start docker >/dev/null 2>&1 || true
+  systemctl restart docker >/dev/null 2>&1 || systemctl start docker >/dev/null 2>&1 || true
+  for _ in $(seq 1 30); do
+    docker info >/dev/null 2>&1 && break
+    sleep 2
+  done
 fi
 docker info >/dev/null
 
