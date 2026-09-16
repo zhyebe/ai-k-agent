@@ -126,7 +126,7 @@ export function compactTaskRuntime(task = {}) {
     automationTestMode: task.automationTestMode !== false,
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
-    market: compactPersistedMarket(task.market),
+    market: null,
     connectorId: task.target?.connectorId || "",
     credentialRef: task.target?.credentialRef || "",
   };
@@ -628,7 +628,7 @@ async function createMySqlAdapter() {
             automationTestMode: runtime.automationTestMode !== false,
             providerId: String(runtime.providerId || ""),
             pendingAction: runtime.pendingAction || null,
-            market: runtime.market,
+            market: null,
             activeRunId: runtime.activeRunId,
             updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at || new Date().toISOString()),
           };

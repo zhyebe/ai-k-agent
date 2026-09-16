@@ -36,6 +36,41 @@ function normalizedTaskIds(taskIds) {
   return Array.isArray(taskIds) ? new Set(taskIds.map((value) => String(value))) : null;
 }
 
+function asRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function publicOrderBook(book) {
+  const source = asRecord(book);
+  if (!source) return null;
+  return {
+    ...source,
+    asks: Array.isArray(source.asks) ? source.asks : [],
+    bids: Array.isArray(source.bids) ? source.bids : [],
+  };
+}
+
+function publicMarketBook(book) {
+  const source = asRecord(book);
+  if (!source) return null;
+  return {
+    ...source,
+    latest: asRecord(source.latest) || asRecord(source.quote) || {},
+    ticks: Array.isArray(source.ticks) ? source.ticks : [],
+    history: Array.isArray(source.history) ? source.history : [],
+    orderBook: publicOrderBook(source.orderBook),
+  };
+}
+
+function publicMarket(market) {
+  const source = publicMarketBook(market);
+  if (!source) return null;
+  return {
+    ...source,
+    books: Array.isArray(market.books) ? market.books.map(publicMarketBook).filter(Boolean) : [],
+  };
+}
+
 export function publicTask(task) {
   if (!task) return task;
   const { ownerUserId, ...safeTask } = task;
@@ -45,6 +80,8 @@ export function publicTask(task) {
     delete target.credentialOwnerUserId;
     delete target.browserSessionId;
   }
+  const decision = asRecord(task.decision) || {};
+  const metrics = asRecord(task.metrics) || {};
   return {
     ...safeTask,
     automationAuthorized: false,
@@ -55,6 +92,23 @@ export function publicTask(task) {
     monitorAllBoards: task.monitorAllBoards === true,
     pendingAction: task.pendingAction || null,
     target,
+    workflow: Array.isArray(task.workflow) ? task.workflow : [],
+    rules: Array.isArray(task.rules) ? task.rules : [],
+    metrics: {
+      equity: Number(metrics.equity || 0),
+      dayPnl: Number(metrics.dayPnl || 0),
+      dayPnlPct: Number(metrics.dayPnlPct || 0),
+      exposurePct: Number(metrics.exposurePct || 0),
+      riskBudgetPct: Number(metrics.riskBudgetPct ?? 100),
+    },
+    decision: {
+      ...decision,
+      action: decision.action === "BUY" || decision.action === "SELL" ? decision.action : "HOLD",
+      riskFlags: Array.isArray(decision.riskFlags) ? decision.riskFlags : [],
+      evidenceIds: Array.isArray(decision.evidenceIds) ? decision.evidenceIds : [],
+      reasonCodes: Array.isArray(decision.reasonCodes) ? decision.reasonCodes : [],
+    },
+    market: publicMarket(task.market),
   };
 }
 

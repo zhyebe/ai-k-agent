@@ -1141,7 +1141,7 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
   const timeframeKeys = Object.keys(timeframes).length ? Object.keys(timeframes) : [task.timeframe];
   const selected: MarketTimeframe | null = timeframes[selectedTimeframe] || timeframes[task.timeframe] || null;
   const candles = selected?.history || selectedBook?.history || market?.history || [];
-  const price = selectedBook?.latest?.price ?? market?.latest.price;
+  const price = selectedBook?.latest?.price ?? market?.latest?.price;
   const change = selectedBook?.changePct ?? market?.changePct;
   const indicators = selected?.indicators || selectedBook?.indicators || market?.indicators;
   const indicatorNumber = (key: string) => typeof indicators?.[key as keyof typeof indicators] === "number" ? indicators[key as keyof typeof indicators] as number : null;
@@ -1178,7 +1178,7 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
       <div className="chart-summary">
         <span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span>
         <span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span>
-        <span>分时 {selectedBook?.ticks?.length || market?.ticks.length || 0} 条</span>
+        <span>分时 {selectedBook?.ticks?.length || market?.ticks?.length || 0} 条</span>
         <span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span>
       </div>
       <div className="indicator-row">
@@ -1194,7 +1194,7 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
 
 function OrderBookPanel({ market }: { market: MarketSnapshot | null | undefined }) {
   const book = market?.orderBook;
-  const rows = Array.from({ length: Math.max(5, book?.asks.length || 0, book?.bids.length || 0) }, (_, index) => ({ bid: book?.bids[index], ask: book?.asks[index] }));
+  const rows = Array.from({ length: Math.max(5, book?.asks?.length || 0, book?.bids?.length || 0) }, (_, index) => ({ bid: book?.bids?.[index], ask: book?.asks?.[index] }));
   return <div className="order-book-panel">
     <div className="order-book-heading"><strong>买卖盘口</strong><span>{book?.observedAt ? formatTime(book.observedAt) : "尚未采集"}</span></div>
     {!book || book.status === "MISSING" ? <div className="order-book-empty">暂无可用买卖档位</div> : <>
