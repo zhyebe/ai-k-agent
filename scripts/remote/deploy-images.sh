@@ -10,6 +10,11 @@ IMAGE_VERSION="$(git rev-parse HEAD)"
 export AXIOM_API_IMAGE="axiom-agent-api:${IMAGE_VERSION}"
 export AXIOM_ADMIN_IMAGE="axiom-agent-nginx:${IMAGE_VERSION}"
 
+if ! docker info >/dev/null 2>&1; then
+  systemctl start docker >/dev/null 2>&1 || true
+fi
+docker info >/dev/null
+
 # Recover data services first. `--no-deps` below keeps image deployment isolated,
 # but a previously stopped MySQL/Mongo would otherwise leave the API in a crash loop.
 docker compose up -d --no-build mysql mongo
