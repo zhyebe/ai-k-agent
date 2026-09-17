@@ -158,8 +158,12 @@ function connect(app, session) {
     if (activeCalls.has(message.id)) return;
     if (activeCalls.size >= 8) { reply(next, channel, message.id, false, undefined, "DESKTOP_BUSY"); return; }
     const controller = new AbortController();
-    const deadlineAt = Math.min(Number(message.deadlineAt) || Date.now() + 120000, Date.now() + 128000);
-    const timer = setTimeout(() => controller.abort(new Error("DESKTOP_CALL_EXPIRED")), Math.max(0, deadlineAt - Date.now()));
+    const parsedDeadline = Number(message.deadlineAt);
+    const hasDeadline = Number.isFinite(parsedDeadline) && parsedDeadline > 0;
+    const deadlineAt = hasDeadline ? parsedDeadline : 0;
+    const timer = hasDeadline
+      ? setTimeout(() => controller.abort(new Error("DESKTOP_CALL_EXPIRED")), Math.max(0, deadlineAt - Date.now()))
+      : null;
     activeCalls.set(message.id, { controller, socket: next });
     try {
       await cleanupPromise;

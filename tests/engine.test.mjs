@@ -180,6 +180,8 @@ test("最终决策上下文包含当前页面、账户、时间戳和全部盘�
   assert.equal(context.market.nextCandle.periodMs, 60000);
   assert.equal(context.market.nextCandle.printSecond, 50);
   assert.equal(context.strategy.kline.printSecond, 50);
+  assert.equal(context.strategy.analysis.waitForResult, true);
+  assert.equal(context.strategy.analysis.onComplete, "CONTINUE_NEXT_ROUND");
   assert.deepEqual(context.strategy.loop.aiCompletes, ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"]);
   assert.deepEqual(context.approvedSkills, []);
 });
@@ -989,7 +991,47 @@ test("分析超过时限则放弃本轮并立刻继续监控", async () => {
     const result = await runMonitoringCycle(taskId, { runtime });
     assert.equal(result.reason, "ANALYSIS_TIMEOUT");
     assert.equal(task.lastAnalysisSucceeded, false);
-    assert.match(task.nextTrigger, /50秒/);
+    assert.match(task.nextTrigger, /超时/);
+    assert.ok(new Date(task.nextPollAt).getTime() <= Date.now() + 200);
+  } finally {
+    if (previous === undefined) delete process.env.ANALYSIS_TIMEOUT_MS;
+    else process.env.ANALYSIS_TIMEOUT_MS = previous;
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("默认等待分析返回后立即进入下一轮", async () => {
+  const previous = process.env.ANALYSIS_TIMEOUT_MS;
+  delete process.env.ANALYSIS_TIMEOUT_MS;
+  const taskId = `task_wait_analysis_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => testMarketSnapshot("wait-feed", 200),
+    requestDecision: async (_provider, context) => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return {
+        action: "HOLD",
+        confidence: 0.2,
+        profitProbability: 0.2,
+        bullishProfitProbability: 0.2,
+        bearishProfitProbability: 0.2,
+        evidenceIds: [context.evidenceIds[0]],
+        riskFlags: [],
+        decisionTtlSec: 300,
+      };
+    },
+  };
+  try {
+    const result = await runMonitoringCycle(taskId, { runtime });
+    assert.notEqual(result.reason, "ANALYSIS_TIMEOUT");
+    assert.equal(result.analysisTriggered, true);
+    assert.equal(task.lastAnalysisSucceeded, true);
+    assert.equal(task.decision.action, "HOLD");
     assert.ok(new Date(task.nextPollAt).getTime() <= Date.now() + 200);
   } finally {
     if (previous === undefined) delete process.env.ANALYSIS_TIMEOUT_MS;

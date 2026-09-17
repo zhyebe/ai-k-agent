@@ -1418,7 +1418,10 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
         }
         assertCurrent();
         try {
-          review = await runtime.requestSegmentReview(provider, segment, segmentContext, { timeoutMs: analysisTimeoutMs(), signal });
+          review = await runtime.requestSegmentReview(provider, segment, segmentContext, {
+            ...(analysisTimeoutMs() > 0 ? { timeoutMs: analysisTimeoutMs() } : {}),
+            signal,
+          });
           assertCurrent();
           if (review?.ok && String(review.segmentId) === String(segment.segmentId) && String(review.contentHash) === String(segment.contentHash) && Number(review.rowCount) === Number(segment.rowCount)) break;
           lastFailure = review || { ok: false, code: "INVALID_SEGMENT_REVIEW" };
@@ -1473,7 +1476,7 @@ export function enforceDecisionLimits(decision) {
 function abandonTimedOutAnalysis(task, run, market) {
   task.lastAnalysisSucceeded = false;
   task.status = monitoringIntent(task) ? "MONITORING" : "MANUAL_CONTROL";
-  task.nextTrigger = "分析超过50秒未返回，刷新页面数据后继续监控";
+  task.nextTrigger = "分析超时未返回，刷新页面数据后继续监控";
   completeWorkflow(task, "analyze", "分析超时，放弃本轮结果");
   completeWorkflow(task, "rules", "本轮未形成有效决策");
   completeWorkflow(task, "action", "刷新页面数据继续监控");
@@ -1482,11 +1485,11 @@ function abandonTimedOutAnalysis(task, run, market) {
     runId: run.id,
     stage: "analyze",
     level: "error",
-    message: "分析超过50秒未返回，已放弃本轮结果；刷新页面数据并继续监控",
+    message: "分析超时未返回，已放弃本轮结果；刷新页面数据并继续监控",
   });
   finishAgentRun(run.id, { status: "timeout", action: "HOLD", route: "ANALYSIS_TIMEOUT", code: "ANALYSIS_TIMEOUT" });
   setNextPoll(task, 0);
-  task.nextTrigger = "分析超过50秒未返回，刷新页面数据后继续监控";
+  task.nextTrigger = "分析超时未返回，刷新页面数据后继续监控";
   persistTask(task);
   return { task, market, run, skipped: true, reason: "ANALYSIS_TIMEOUT", analysisTriggered: false, route: "ANALYSIS_TIMEOUT" };
 }
@@ -1632,9 +1635,13 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     let segmentReviews = [];
     const analysisDeadlineMs = analysisTimeoutMs();
     const analysisAbort = new AbortController();
-    const analysisTimer = setTimeout(() => analysisAbort.abort(analysisTimeoutError()), analysisDeadlineMs);
-    analysisTimer.unref?.();
-    const analysisOptions = { timeoutMs: analysisDeadlineMs, signal: analysisAbort.signal };
+    const analysisTimer = analysisDeadlineMs > 0
+      ? setTimeout(() => analysisAbort.abort(analysisTimeoutError()), analysisDeadlineMs)
+      : null;
+    analysisTimer?.unref?.();
+    const analysisOptions = analysisDeadlineMs > 0
+      ? { timeoutMs: analysisDeadlineMs, signal: analysisAbort.signal }
+      : { signal: analysisAbort.signal };
     try {
       assertCurrent();
       if (clientAnalysis) {

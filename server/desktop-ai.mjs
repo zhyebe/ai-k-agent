@@ -155,28 +155,32 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
     ? (hasDesktopAi(userId) ? "DESKTOP_BROWSER_UPDATE_REQUIRED" : "DESKTOP_BROWSER_OFFLINE")
     : "DESKTOP_AI_OFFLINE");
   const id = `ai_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  const requestedTimeout = Math.min(120000, Math.max(1000, Number(payload.options?.timeoutMs) || 45000));
-  const timeoutMs = channel === "browser" ? requestedTimeout + 8000 : requestedTimeout;
+  const requested = Number(payload.options?.timeoutMs);
+  const hasTimeout = Number.isFinite(requested) && requested > 0;
+  const timeoutMs = channel === "browser"
+    ? Math.min(180000, (hasTimeout ? requested : 45000) + 8000)
+    : (hasTimeout ? requested : 0);
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
       payload.signal?.removeEventListener("abort", onAbort);
+      if (timer) clearTimeout(timer);
       callback(value);
     };
     const onAbort = () => {
       if (!pendingCalls.has(id)) return;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       pendingCalls.delete(id);
       try { socket.send(JSON.stringify({ type: `${channel}.cancel`, id })); } catch {}
       finish(reject, payload.signal?.reason instanceof Error ? payload.signal.reason : new Error("DESKTOP_AI_CANCELLED"));
     };
-    const timer = setTimeout(() => {
+    const timer = timeoutMs > 0 ? setTimeout(() => {
       pendingCalls.delete(id);
       try { socket.send(JSON.stringify({ type: `${channel}.cancel`, id })); } catch {}
       finish(reject, new Error(channel === "browser" ? "DESKTOP_BROWSER_TIMEOUT" : "DESKTOP_AI_TIMEOUT"));
-    }, timeoutMs);
+    }, timeoutMs) : null;
     pendingCalls.set(id, {
       resolve: (value) => finish(resolve, value),
       reject: (error) => finish(reject, error),
@@ -196,7 +200,7 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
         id,
         method,
         userId: String(userId),
-        deadlineAt: Date.now() + timeoutMs - 2000,
+        deadlineAt: timeoutMs > 0 ? Date.now() + timeoutMs - 2000 : undefined,
         input: payload.input,
         credential: payload.credential,
         provider: desktopProviderPayload(payload.provider),

@@ -155,7 +155,6 @@ function historyForTimeframe(market, timeframe) {
 export const LIVE_KLINE_PERIOD_MS = MINUTE_MS;
 export const LIVE_KLINE_PRINT_OFFSET_MS = 50 * 1000;
 export const LIVE_KLINE_PRINT_SECOND = 50;
-export const DEFAULT_ANALYSIS_TIMEOUT_MS = 50 * 1000;
 
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
@@ -180,9 +179,9 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     liveQuotesMayUpdateEverySecond: true,
   },
   analysis: {
-    summary: "分析结果不能延迟。单轮分析最多50秒；超时主机放弃本轮结果，刷新页面数据并继续监控。",
-    maxMs: DEFAULT_ANALYSIS_TIMEOUT_MS,
-    onTimeout: "REFRESH_PAGE_AND_CONTINUE_MONITORING",
+    summary: "等待本轮 AI 返回完整结果，不要因每分钟第50秒出K而中断分析。分析结束后按常规进入下一轮监控。",
+    waitForResult: true,
+    onComplete: "CONTINUE_NEXT_ROUND",
   },
   counterparty: {
     summary: "对盘可能由AI控盘。必须从盘口、出K时点、补量、重复手数和每分钟第50秒附近的同步行为寻找对策，禁止把猜测写成事实。",
@@ -193,10 +192,8 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
 
 export function analysisTimeoutMs() {
   const configured = Number(process.env.ANALYSIS_TIMEOUT_MS || 0);
-  if (Number.isFinite(configured) && configured > 0) {
-    return Math.min(DEFAULT_ANALYSIS_TIMEOUT_MS, Math.max(20, Math.round(configured)));
-  }
-  return DEFAULT_ANALYSIS_TIMEOUT_MS;
+  if (Number.isFinite(configured) && configured > 0) return Math.max(20, Math.round(configured));
+  return 0;
 }
 
 export function analysisNow(market = {}, nowMs = null) {
