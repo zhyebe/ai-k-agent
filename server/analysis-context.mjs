@@ -152,6 +152,130 @@ function historyForTimeframe(market, timeframe) {
   return [];
 }
 
+export const LIVE_KLINE_PERIOD_MS = MINUTE_MS;
+export const LIVE_KLINE_PRINT_OFFSET_MS = 50 * 1000;
+export const LIVE_KLINE_PRINT_SECOND = 50;
+export const DEFAULT_ANALYSIS_TIMEOUT_MS = 50 * 1000;
+
+export const LIVE_BOARD_STRATEGY = Object.freeze({
+  id: "haohan-live-k50",
+  kline: {
+    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，判断必须针对下一根将在第50秒打印的K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
+    printSecond: LIVE_KLINE_PRINT_SECOND,
+    periodMs: LIVE_KLINE_PERIOD_MS,
+    printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,
+    normalPrintWindowSec: [45, 50],
+    closedBarsAreEvidenceOnly: true,
+    forecastTarget: "NEXT_CANDLE",
+    doNotWaitForMinuteCloseAt00: true,
+    liveQuotesMayUpdateEverySecond: true,
+  },
+  analysis: {
+    summary: "分析结果不能延迟。单轮分析最多50秒；超时主机放弃本轮结果，刷新页面数据并继续监控。",
+    maxMs: DEFAULT_ANALYSIS_TIMEOUT_MS,
+    onTimeout: "REFRESH_PAGE_AND_CONTINUE_MONITORING",
+  },
+  counterparty: {
+    summary: "对盘可能由AI控盘。必须从盘口、出K时点、补量、重复手数和每分钟第50秒附近的同步行为寻找对策，禁止把猜测写成事实。",
+    mayBeAiControlled: true,
+    requireCountermeasures: true,
+  },
+});
+
+export function analysisTimeoutMs() {
+  const configured = Number(process.env.ANALYSIS_TIMEOUT_MS || 0);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(DEFAULT_ANALYSIS_TIMEOUT_MS, Math.max(20, Math.round(configured)));
+  }
+  return DEFAULT_ANALYSIS_TIMEOUT_MS;
+}
+
+export function analysisNow(market = {}, nowMs = null) {
+  return finiteNumber(nowMs)
+    || finiteNumber(new Date(market.observedAt || "").getTime())
+    || Date.now();
+}
+
+export function lastKlinePrintTime(nowMs) {
+  const now = Number(nowMs);
+  const minuteStart = Math.floor(now / LIVE_KLINE_PERIOD_MS) * LIVE_KLINE_PERIOD_MS;
+  const thisPrint = minuteStart + LIVE_KLINE_PRINT_OFFSET_MS;
+  return now >= thisPrint ? thisPrint : thisPrint - LIVE_KLINE_PERIOD_MS;
+}
+
+export function nextKlinePrintTime(nowMs) {
+  return lastKlinePrintTime(nowMs) + LIVE_KLINE_PERIOD_MS;
+}
+
+export function liveBarPeriodMs(_market = {}) {
+  return LIVE_KLINE_PERIOD_MS;
+}
+
+function alignPeriod(ms, periodMs) {
+  const period = Math.max(1000, Number(periodMs) || 1000);
+  return Math.floor(Number(ms) / period) * period;
+}
+
+export function closedCandlesForAnalysis(history, nowMs, periodMs = MINUTE_MS) {
+  const openTime = alignPeriod(nowMs, periodMs);
+  return (Array.isArray(history) ? history : []).filter((candle) => {
+    const timestamp = finiteNumber(candle?.timestamp);
+    return timestamp !== null && alignPeriod(timestamp, periodMs) < openTime;
+  });
+}
+
+function recentLiveTicks(ticks, nowMs, windowMs = MINUTE_MS) {
+  return (Array.isArray(ticks) ? ticks : []).filter((tick) => {
+    const timestamp = finiteNumber(tick?.timestamp);
+    return timestamp !== null && timestamp >= nowMs - windowMs && timestamp <= nowMs;
+  }).slice(-120);
+}
+
+export function nextCandleTarget(market = {}, nowMs = null) {
+  const now = analysisNow(market, nowMs);
+  const periodMs = LIVE_KLINE_PERIOD_MS;
+  const lastPrint = lastKlinePrintTime(now);
+  const nextPrint = lastPrint + periodMs;
+  const minuteHistory = historyForTimeframe(market, "1m");
+  const closedMinutes = (Array.isArray(minuteHistory) ? minuteHistory : []).filter((candle) => {
+    const timestamp = finiteNumber(candle?.timestamp);
+    return timestamp !== null && timestamp <= lastPrint;
+  });
+  const lastClosed = closedMinutes.at(-1) || null;
+  const liveTicks = recentLiveTicks(market.ticks, now);
+  const formingTicks = ticksAsCandles(liveTicks).filter((candle) => {
+    const timestamp = finiteNumber(candle?.timestamp);
+    return timestamp !== null && timestamp >= lastPrint && timestamp < nextPrint;
+  });
+  const forming = formingTicks.reduce((current, candle) => mergeCandle(current, candle, lastPrint), null);
+  const latestTickPrice = finiteNumber(liveTicks.at(-1)?.price);
+  const livePrice = finiteNumber(market?.quote?.price ?? market?.latest?.price ?? latestTickPrice ?? forming?.close ?? lastClosed?.close);
+  const open = finiteNumber(forming?.open ?? market?.quote?.open) ?? livePrice;
+  const high = maxNum(maxNum(forming?.high, market?.quote?.high), livePrice);
+  const low = minNum(minNum(forming?.low, market?.quote?.low), livePrice);
+  return {
+    timeframe: "1m",
+    periodMs,
+    printSecond: LIVE_KLINE_PRINT_SECOND,
+    printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,
+    kind: "NEXT_CANDLE",
+    openTime: lastPrint,
+    closeTime: nextPrint,
+    lastClosedTime: lastClosed?.timestamp || lastPrint,
+    lastClosedClose: lastClosed?.close ?? null,
+    livePrice,
+    open,
+    high,
+    low,
+    close: livePrice,
+    volume: finiteNumber(forming?.volume ?? market?.quote?.volume),
+    elapsedMs: Math.max(0, now - lastPrint),
+    remainingMs: Math.max(0, nextPrint - now),
+    partial: true,
+    standardPrint: "each minute at second 50",
+  };
+}
+
 function sliceCandles(history, start, end, includeEnd = false) {
   return (Array.isArray(history) ? history : []).filter((candle) => {
     const timestamp = finiteNumber(candle?.timestamp);
@@ -220,10 +344,7 @@ export function analysisLayerWindows(nowMs = Date.now()) {
 }
 
 export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
-  const now = finiteNumber(nowMs)
-    || finiteNumber(new Date(market.dataAt || "").getTime())
-    || finiteNumber(new Date(market.observedAt || "").getTime())
-    || Date.now();
+  const now = analysisNow(market, nowMs);
   const windows = analysisLayerWindows(now);
   const timeframes = {};
   const layers = windows.layers.map((layer) => {
@@ -248,6 +369,12 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   });
   const primary = ["1m", "1h", "1d", "1mo"].find((timeframe) => timeframes[timeframe]?.historyCount) || "1m";
   const history = timeframes[primary]?.history || [];
+  const nextCandle = nextCandleTarget({
+    ...market,
+    quote: market.quote,
+    latest: market.latest || market.quote,
+  }, now);
+  const liveTicks = recentLiveTicks(market.ticks, now);
   const raw = market.raw && typeof market.raw === "object" && !Array.isArray(market.raw)
     ? Object.fromEntries(Object.entries(market.raw).filter(([key]) => key !== "timeline"))
     : market.raw;
@@ -259,14 +386,17 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
       return buildLayeredAnalysisMarket(rest, now);
     }).filter(Boolean)
     : [];
+  if (timeframes["1m"]) timeframes["1m"].nextCandle = nextCandle;
   return {
     ...market,
     timeframe: primary,
     history,
     historyCount: history.length,
     completeHistoryCount: timeframes[primary]?.completeHistoryCount || 0,
-    ticks: [],
-    timeline: { kind: "layered", ticks: [], tickCount: 0 },
+    nextCandle,
+    strategy: LIVE_BOARD_STRATEGY,
+    ticks: liveTicks,
+    timeline: { kind: "live", ticks: liveTicks, tickCount: liveTicks.length },
     timeframes,
     availableTimeframes: ["1m", "1h", "1d", "1mo"],
     analysisLayers: { timezone: windows.timezone, now, layers },
@@ -306,6 +436,8 @@ export function buildRecentMonitoringMarket(market = {}, nowMs = null) {
     timeframes: { "1m": recent },
     availableTimeframes: ["1m"],
     analysisLayers: layered.analysisLayers ? { ...layered.analysisLayers, layers: layered.analysisLayers.layers?.slice(0, 1) || [] } : null,
+    nextCandle: layered.nextCandle || nextCandleTarget(layered, nowMs),
+    strategy: layered.strategy || LIVE_BOARD_STRATEGY,
     books,
     bookCount: books.length,
   };
@@ -624,6 +756,7 @@ function operatorContext(market = {}) {
     limitations: [
       "仅凭公开盘口、K 线和逐笔数据不能确认操盘者身份",
       "缺少撤单、改单、订单来源和跨账户关联数据",
+      "对盘可能AI控盘，第50秒出K附近的同步行为只是对策线索，不是身份证明",
     ],
   };
 }
@@ -669,6 +802,8 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     completeHistoryCount: market.completeHistoryCount || 0,
     timeframes,
     analysisLayers: market.analysisLayers || null,
+    nextCandle: market.nextCandle || null,
+    strategy: market.strategy || LIVE_BOARD_STRATEGY,
     bookCount: Array.isArray(market.books) ? market.books.length : 0,
     expectedBookCount: Number(market.expectedBookCount || market.boardCoverage?.expected || market.books?.length || 0),
     boardCoverage: market.boardCoverage || null,
@@ -695,7 +830,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
         recentHistory: recentRows(snapshot.history, recentRowsPerTimeframe, compactMarketCandle),
       }])),
     })),
-    liveTicks: [],
+    liveTicks: Array.isArray(market.ticks) ? market.ticks.slice(-120) : [],
     page: market.page ? {
       url: market.page.url || "",
       title: market.page.title || "",

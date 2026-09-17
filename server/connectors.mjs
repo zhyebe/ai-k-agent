@@ -50,7 +50,7 @@ registerConnectorAdapter({
     buyQtyLabel: "买量",
     sellPriceLabel: "卖价",
     sellQtyLabel: "卖量",
-    forbiddenSubmit: ["买入订立", "卖出转让", "确认买入", "确认卖出"],
+    forbiddenSubmit: ["买入订立", "卖出订立", "买入转让", "卖出转让", "确认买入", "确认卖出"],
   },
 });
 

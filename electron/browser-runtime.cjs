@@ -90,8 +90,9 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
         const key = `${sessionId}:${input.confirmationId}`;
         if (confirmations.has(key)) throw new Error("TRADE_CONFIRMATION_ALREADY_USED");
         if (confirmations.size >= 10000) throw new Error("TRADE_CONFIRMATION_LIMIT");
-        confirmations.add(key);
-        return await tools.submitSuggestionForm(input);
+        const result = await tools.submitSuggestionForm(input);
+        if (result?.ok && result?.submitted) confirmations.add(key);
+        return result;
       }
       throw new Error("BROWSER_METHOD_UNKNOWN");
     } finally {

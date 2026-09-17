@@ -155,7 +155,8 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
     ? (hasDesktopAi(userId) ? "DESKTOP_BROWSER_UPDATE_REQUIRED" : "DESKTOP_BROWSER_OFFLINE")
     : "DESKTOP_AI_OFFLINE");
   const id = `ai_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-  const timeoutMs = Math.min(120000, Math.max(1000, Number(payload.options?.timeoutMs) || 45000)) + 8000;
+  const requestedTimeout = Math.min(120000, Math.max(1000, Number(payload.options?.timeoutMs) || 45000));
+  const timeoutMs = channel === "browser" ? requestedTimeout + 8000 : requestedTimeout;
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = (callback, value) => {

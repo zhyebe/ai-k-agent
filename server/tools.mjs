@@ -304,16 +304,35 @@ export const toolDefinitions = [
   },
 ];
 
-export const FORBIDDEN_TRADE_CONTROL = /买入订立|卖出转让|确认买入|确认卖出|立即下单|提交委托|下单/;
+export const FORBIDDEN_TRADE_CONTROL = /买入订立|卖出订立|买入转让|卖出转让|确认买入|确认卖出|立即下单|提交委托|下单/;
 
 export function isForbiddenTradeControl(text) {
   return FORBIDDEN_TRADE_CONTROL.test(String(text || "").replace(/\s+/g, ""));
 }
 
-export function suggestionFormLabels(action) {
+export function suggestionFormLabels(action, { exitType } = {}) {
+  if (exitType) {
+    return action === "BUY"
+      ? { price: "买价", quantity: "买量", extras: ["转让价", "转让量", "订立价", "订立量", "价格", "数量"] }
+      : { price: "卖价", quantity: "卖量", extras: ["转让价", "转让量", "订立价", "订立量", "价格", "数量"] };
+  }
   return action === "SELL"
-    ? { price: "卖价", quantity: "卖量" }
-    : { price: "买价", quantity: "买量" };
+    ? { price: "卖价", quantity: "卖量", extras: ["订立价", "订立量", "价格", "数量"] }
+    : { price: "买价", quantity: "买量", extras: ["订立价", "订立量", "价格", "数量"] };
+}
+
+export function tradePaneLabel({ exitType } = {}) {
+  return exitType ? "转让" : "订立";
+}
+
+export function tradeSubmitLabels({ action, exitType } = {}) {
+  if (exitType) return action === "BUY" ? ["买入转让", "买转让"] : ["卖出转让", "卖转让"];
+  return action === "SELL" ? ["卖出订立", "卖订立"] : ["买入订立", "买订立"];
+}
+
+export function isTradeWriteResponse(url, method) {
+  if (String(method || "GET").toUpperCase() === "GET") return false;
+  return /intraday-trade|position|holding|warehouse|trade|order|entrust|bargain|deal|transfer|inventory|submit|委托|转让|订立/i.test(String(url || ""));
 }
 
 async function selectPositionForSell(page, { symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [], activate = true } = {}) {
@@ -376,9 +395,26 @@ async function clickPositionExitControl(page, { symbol = "", symbolName = "", in
   }
 }
 
-async function clickTradeSubmitButton(page, action) {
-  const submitLabel = action === "SELL" ? "卖出转让" : "买入订立";
-  return page.evaluate(({ buttonLabel }) => {
+async function activateTradePane(page, pane) {
+  return page.evaluate((label) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, "");
+    const target = normalize(label);
+    const nodes = Array.from(document.querySelectorAll("button, [role='tab'], .el-tabs__item, .el-radio-button, .el-radio-button__inner, span, a"));
+    const match = nodes.find((node) => {
+      const text = normalize(node.textContent);
+      if (/买入订立|卖出订立|买入转让|卖出转让/.test(text)) return false;
+      return text === target || (node.matches("[role='tab'], .el-tabs__item, .el-radio-button, .el-radio-button__inner") && text.includes(target));
+    });
+    if (!match || typeof match.click !== "function") return { ok: false, pane: label };
+    match.click();
+    return { ok: true, pane: label };
+  }, pane);
+}
+
+async function clickTradeSubmitButton(page, { action, exitType } = {}) {
+  await activateTradePane(page, tradePaneLabel({ exitType }));
+  const submitLabels = tradeSubmitLabels({ action, exitType });
+  return page.evaluate(async ({ buttonLabels }) => {
     const normalize = (value) => String(value || "").replace(/\s+/g, "");
     function acceptAgreement() {
       const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
@@ -396,14 +432,20 @@ async function clickTradeSubmitButton(page, action) {
       return true;
     }
     acceptAgreement();
-    const button = Array.from(document.querySelectorAll("button, [role='button'], a")).find((node) => {
-      const text = normalize(node.textContent);
-      return text.includes(normalize(buttonLabel)) && !node.disabled;
-    });
-    if (!button) return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND" };
-    button.click();
-    return { clicked: true, label: normalize(button.textContent) };
-  }, { buttonLabel: submitLabel });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const buttons = Array.from(document.querySelectorAll("button, [role='button'], a"));
+    for (const buttonLabel of buttonLabels) {
+      const wanted = normalize(buttonLabel);
+      const button = buttons.find((node) => {
+        const text = normalize(node.textContent);
+        return text.includes(wanted) && !node.disabled;
+      });
+      if (!button) continue;
+      button.click();
+      return { clicked: true, label: normalize(button.textContent) };
+    }
+    return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND", tried: buttonLabels };
+  }, { buttonLabels: submitLabels });
 }
 
 export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false } = {}) {
@@ -418,11 +460,12 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false, fields: [] };
   }
   const positionSelection = exitType && !formAlreadyFilled ? await selectPositionForSell(page, { ...targetInstrument, targetPositionIds, activate: true }) : null;
-  const labels = suggestionFormLabels(action);
+  await activateTradePane(page, tradePaneLabel({ exitType }));
+  const labels = suggestionFormLabels(action, { exitType });
   try {
     const result = await page.evaluate(({ labels: fieldLabels, priceValue, quantityValue }) => {
       const normalize = (value) => String(value || "").replace(/\s+/g, "");
-      const forbidden = /买入订立|卖出转让|确认买入|确认卖出|立即下单|提交委托/;
+      const forbidden = /买入订立|卖出订立|买入转让|卖出转让|确认买入|确认卖出|立即下单|提交委托/;
       function findInput(labelText) {
         const nodes = Array.from(document.querySelectorAll("label, span, div, p, th, td, strong, b"));
         const match = nodes.find((node) => {
@@ -441,9 +484,17 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
         input.dispatchEvent(new Event("change", { bubbles: true }));
         return true;
       }
+      function fillNamed(names, value) {
+        for (const name of names) {
+          if (assignValue(findInput(name), value)) return name;
+        }
+        return null;
+      }
       const filled = [];
-      if (assignValue(findInput(fieldLabels.price), priceValue)) filled.push(fieldLabels.price);
-      if (assignValue(findInput(fieldLabels.quantity), quantityValue)) filled.push(fieldLabels.quantity);
+      const priceName = fillNamed([fieldLabels.price, ...(fieldLabels.extras || []).filter((item) => /价/.test(item))], priceValue);
+      const quantityName = fillNamed([fieldLabels.quantity, ...(fieldLabels.extras || []).filter((item) => /量/.test(item))], quantityValue);
+      if (priceName) filled.push(priceName);
+      if (quantityName) filled.push(quantityName);
       const forbiddenButtons = Array.from(document.querySelectorAll("button, [role='button'], a")).
         filter((node) => forbidden.test(normalize(node.textContent))).
         map((node) => normalize(node.textContent));
@@ -471,7 +522,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
   const filled = formAlreadyFilled
-    ? { ok: true, filled: true, submitted: false, fields: [suggestionFormLabels(action).price, suggestionFormLabels(action).quantity], positionSelection: { ok: true, code: "FORM_ALREADY_FILLED" } }
+    ? { ok: true, filled: true, submitted: false, fields: [suggestionFormLabels(action, { exitType }).price, suggestionFormLabels(action, { exitType }).quantity], positionSelection: { ok: true, code: "FORM_ALREADY_FILLED" } }
     : await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, orderType, targetPositionIds });
   if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
@@ -479,26 +530,23 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   try {
     const writeWait = page.waitForResponse((response) => {
       try {
-        return response.request?.().method?.() !== "GET" && /intraday-trade|position|holding|warehouse|trade/.test(response.url());
+        return isTradeWriteResponse(response.url(), response.request?.().method?.());
       } catch {
         return false;
       }
-    }, { timeout: 12000 }).catch(() => null);
-    const exitUsesForm = Boolean(exitType && (orderType === "LIMIT" || filled.fields?.length));
-    let clicked = exitType && !exitUsesForm
-      ? await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType })
-      : await clickTradeSubmitButton(page, action);
-    if (exitType && !exitUsesForm && !clicked.ok && !clicked.clicked) {
-      clicked = await clickTradeSubmitButton(page, action);
+    }, { timeout: 8000 }).catch(() => null);
+    let clicked = await clickTradeSubmitButton(page, { action, exitType });
+    if (exitType && !clicked.clicked) {
+      clicked = await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType });
     }
     const clickedOk = Boolean(clicked?.ok || clicked?.clicked);
     if (exitType && !clickedOk) {
       const fallback = await selectPositionForSell(page, { symbol, symbolName, instrumentId, targetPositionIds, activate: true });
       if (!fallback.ok) return { ok: false, code: fallback.code, message: "目标页未找到可操作持仓", filled: true, submitted: false };
-      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到止盈/止损或卖出离场按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
+      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到转让离场或止盈/止损按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
     }
     if (!exitType && !clicked.clicked) {
-      return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: "目标页未找到下单按钮", filled: true, submitted: false };
+      return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: action === "SELL" ? "目标页未找到卖出订立按钮" : "目标页未找到买入订立按钮", filled: true, submitted: false };
     }
     const response = await writeWait;
     let responseOk = null;
@@ -513,9 +561,6 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (responseOk === false || /失败|不足|错误|拒绝/.test(pageHint)) {
       return { ok: false, code: "TRADE_REJECTED", message: pageHint || "交易所拒绝下单", filled: true, submitted: true, responseOk };
     }
-    if (!response && !/成功|提交|受理|已委托|已下单/.test(pageHint)) {
-      return { ok: false, code: "TRADE_RESPONSE_TIMEOUT", message: "已点击下单按钮，但未收到交易接口响应，请核对订单状态后重试", filled: true, submitted: false, responseOk: null };
-    }
     return {
       ok: true,
       code: response ? "TRADE_SUBMITTED" : "TRADE_CLICKED",
@@ -523,6 +568,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       filled: true,
       submitted: true,
       responseOk,
+      submitLabel: clicked?.label || null,
     };
   } catch (error) {
     return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, filled: true, submitted: false };

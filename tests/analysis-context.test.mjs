@@ -82,7 +82,7 @@ test("超过直接上下文阈值时启用分段分析", () => {
   }
 });
 
-test("分析行情按上海时区近密远疏分层，不含秒级逐笔", () => {
+test("分析行情分层保留走完的 K 线，并用实时逐笔预测下一根", () => {
   const now = Date.parse("2026-09-10T03:32:00.000Z");
   const windows = analysisLayerWindows(now);
   assert.equal(windows.timezone, "Asia/Shanghai");
@@ -118,8 +118,15 @@ test("分析行情按上海时区近密远疏分层，不含秒级逐笔", () =>
     raw: { quote: { price: 112 }, timeline: { data: [[now, 112]] } },
   }, now);
 
-  assert.equal(layered.ticks.length, 0);
-  assert.equal(layered.timeline.tickCount, 0);
+  assert.equal(layered.ticks.length, 2);
+  assert.equal(layered.timeline.tickCount, 2);
+  assert.equal(layered.nextCandle.timeframe, "1m");
+  assert.equal(layered.nextCandle.periodMs, 60000);
+  assert.equal(layered.nextCandle.printSecond, 50);
+  assert.equal(layered.nextCandle.openTime, Date.parse("2026-09-10T03:31:50.000Z"));
+  assert.equal(layered.nextCandle.closeTime, Date.parse("2026-09-10T03:32:50.000Z"));
+  assert.equal(layered.strategy.kline.printSecond, 50);
+  assert.equal(layered.nextCandle.livePrice, 112);
   assert.deepEqual(layered.availableTimeframes, ["1m", "1h", "1d", "1mo"]);
   assert.equal(layered.timeframes["5m"], undefined);
   assert.equal(layered.timeframes["15m"], undefined);
@@ -130,7 +137,8 @@ test("分析行情按上海时区近密远疏分层，不含秒级逐笔", () =>
   assert.deepEqual(layered.timeframes["1d"].history.map((item) => item.timestamp), [dayInWindow.timestamp]);
   assert.deepEqual(layered.timeframes["1mo"].history.map((item) => item.timestamp), [monthOlder.timestamp]);
   assert.match(describeAnalysisLayers(layered), /近1小时·分钟 1 根/);
-  assert.equal(summarizeMarketForDecision(layered).liveTicks.length, 0);
+  assert.equal(summarizeMarketForDecision(layered).liveTicks.length, 2);
+  assert.equal(summarizeMarketForDecision(layered).nextCandle.kind, "NEXT_CANDLE");
 
   const aggregatedHour = buildLayeredAnalysisMarket({
     timeframes: { "1m": { timeframe: "1m", history: [minuteOlder] } },
@@ -146,10 +154,46 @@ test("分析行情按上海时区近密远疏分层，不含秒级逐笔", () =>
       { timestamp: now - 70_000, price: 109, volume: 3 },
     ],
   }, now);
-  assert.equal(fromTicks.ticks.length, 0);
+  assert.equal(fromTicks.ticks.length, 2);
+  assert.equal(fromTicks.nextCandle.periodMs, 60000);
+  assert.equal(fromTicks.nextCandle.printSecond, 50);
   assert.equal(fromTicks.timeframes["1m"].history.length, 2);
   assert.ok(fromTicks.timeframes["1m"].history.every((item) => item.timestamp % 60000 === 0));
   assert.ok(!fromTicks.timeframes["1m"].history.some((item) => item.timestamp === now - 20_000));
+});
+
+test("下一根K按每分钟第50秒打印预测，不等待整分收盘", () => {
+  const now = Date.parse("2026-09-10T03:32:40.400Z");
+  const lastClosedMinute = Date.parse("2026-09-10T03:30:00.000Z");
+  const layered = buildLayeredAnalysisMarket({
+    observedAt: new Date(now).toISOString(),
+    quote: { price: 120.5 },
+    latest: { price: 120.5 },
+    ticks: [
+      { timestamp: now - 2000, price: 120.1, volume: 1 },
+      { timestamp: now - 1000, price: 120.3, volume: 1 },
+      { timestamp: now - 100, price: 120.5, volume: 1 },
+    ],
+    timeframes: {
+      "1m": { timeframe: "1m", history: [{ timestamp: lastClosedMinute, open: 118, high: 119, low: 117, close: 118.5, volume: 10, partial: false }] },
+    },
+  }, now);
+  assert.equal(layered.timeframes["1m"].history.at(-1).timestamp, lastClosedMinute);
+  assert.equal(layered.nextCandle.kind, "NEXT_CANDLE");
+  assert.equal(layered.nextCandle.timeframe, "1m");
+  assert.equal(layered.nextCandle.periodMs, 60000);
+  assert.equal(layered.nextCandle.printSecond, 50);
+  assert.equal(layered.nextCandle.livePrice, 120.5);
+  assert.equal(layered.nextCandle.openTime, Date.parse("2026-09-10T03:31:50.000Z"));
+  assert.equal(layered.nextCandle.closeTime, Date.parse("2026-09-10T03:32:50.000Z"));
+  assert.notEqual(layered.nextCandle.openTime, lastClosedMinute);
+
+  const afterPrint = buildLayeredAnalysisMarket({
+    quote: { price: 121 },
+    timeframes: { "1m": { timeframe: "1m", history: [{ timestamp: Date.parse("2026-09-10T03:32:50.000Z"), close: 120.8, partial: false }] } },
+  }, Date.parse("2026-09-10T03:32:55.000Z"));
+  assert.equal(afterPrint.nextCandle.openTime, Date.parse("2026-09-10T03:32:50.000Z"));
+  assert.equal(afterPrint.nextCandle.closeTime, Date.parse("2026-09-10T03:33:50.000Z"));
 });
 
 test("监控上下文只保留最近1小时分钟数据", () => {

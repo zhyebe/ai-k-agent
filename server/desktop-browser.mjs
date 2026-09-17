@@ -34,6 +34,6 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
     input: browserInput,
     credential: credential ? { username: credential.username, password: credential.password, target: credential.target } : undefined,
     signal,
-    options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : method === "submitSuggestionForm" ? 15000 : 45000, ...callOptions },
+    options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : 45000, ...callOptions },
   });
 }

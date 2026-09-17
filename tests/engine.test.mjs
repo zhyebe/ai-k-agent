@@ -176,6 +176,11 @@ test("最终决策上下文包含当前页面、账户、时间戳和全部盘�
   assert.equal(context.market.observedAt, market.observedAt);
   assert.equal(context.account.availableFunds, 8888);
   assert.equal(context.account.equity, 9999);
+  assert.equal(context.market.nextCandle.kind, "NEXT_CANDLE");
+  assert.equal(context.market.nextCandle.periodMs, 60000);
+  assert.equal(context.market.nextCandle.printSecond, 50);
+  assert.equal(context.strategy.kline.printSecond, 50);
+  assert.deepEqual(context.approvedSkills, []);
 });
 
 test("多盘口方向性决策必须绑定一个受监控盘口", () => {
@@ -524,7 +529,8 @@ test("成功监控轮次持续运行，未变行情不请求模型，任何变�
   assert.equal(task.metrics.equity, 1000);
   assert.equal(requests[0].account.availableFunds, 1000);
   assert.equal(requests[0].account.equity, 1000);
-  assert.equal(requests[0].market.ticks.length, 0);
+  assert.ok(requests[0].market.ticks.length >= 1);
+  assert.equal(requests[0].market.nextCandle.kind, "NEXT_CANDLE");
   assert.deepEqual(requests[0].market.availableTimeframes, ["1m"]);
   assert.equal(requests[0].market.timeframes["1h"], undefined);
   assert.ok(requests[0].market.timeframes["1m"].historyCount >= 20);
@@ -778,7 +784,7 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     assert.equal(segmentCalls, result.task.analysisCoverage.totalSegments);
     assert.equal(finalContext.analysisMode, "hierarchical_full_coverage");
     assert.equal(finalContext.segmentReviews.length, segmentCalls);
-    assert.equal(finalContext.market.liveTicks.length, 0);
+    assert.equal(finalContext.market.liveTicks.length, 40);
     assert.ok(!finalContext.market.timeframes["15m"]);
     assert.ok(finalContext.market.timeframes["1m"].historyCount > 0);
     assert.ok(finalContext.market.timeframes["1h"].historyCount > 0);
@@ -914,6 +920,79 @@ test("等待确认时不拆掉监控循环，确认后立即继续", async () =>
     assert.ok(cycles >= 2, `expected monitoring to resume after confirm, got ${cycles}`);
   } finally {
     stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("最终决策上下文包含已审核 Skill 和每分钟第50秒出K策略", async () => {
+  const taskId = `task_skills_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.ownerUserId = "skill-owner";
+  const skill = {
+    id: `skill_${Date.now()}`,
+    title: "回撤经验",
+    status: "APPROVED",
+    ownerUserId: "skill-owner",
+    version: "v1",
+    kind: "expert",
+    tags: ["回撤"],
+    content: "放量突破后观察回撤再决定方向。",
+  };
+  state.skills.unshift(skill);
+  let captured;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => testMarketSnapshot("skill-feed", 200),
+    requestDecision: async (_provider, context) => {
+      captured = context;
+      return { action: "HOLD", confidence: 0.2, profitProbability: 0.2, bullishProfitProbability: 0.2, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300 };
+    },
+  };
+  try {
+    await runAnalysis(taskId, "", { trigger: "manual", runtime });
+    assert.equal(captured.strategy.kline.printSecond, 50);
+    assert.equal(captured.approvedSkills[0].title, "回撤经验");
+    assert.match(captured.approvedSkills[0].content, /放量突破/);
+    assert.match(captured.experiencePrompt, /自己录入并审核通过的 Skill/);
+    assert.match(captured.experiencePrompt, /回撤经验/);
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+    state.skills = state.skills.filter((item) => item.id !== skill.id);
+  }
+});
+
+test("分析超过时限则放弃本轮并立刻继续监控", async () => {
+  const previous = process.env.ANALYSIS_TIMEOUT_MS;
+  process.env.ANALYSIS_TIMEOUT_MS = "40";
+  const taskId = `task_timeout_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => testMarketSnapshot("timeout-feed", 200),
+    requestDecision: async (_provider, _context, options) => new Promise((_, reject) => {
+      const fail = setTimeout(() => reject(new Error("should have aborted")), 2000);
+      options?.signal?.addEventListener("abort", () => {
+        clearTimeout(fail);
+        const error = new Error("ANALYSIS_TIMEOUT");
+        error.code = "ANALYSIS_TIMEOUT";
+        reject(error);
+      }, { once: true });
+    }),
+  };
+  try {
+    const result = await runMonitoringCycle(taskId, { runtime });
+    assert.equal(result.reason, "ANALYSIS_TIMEOUT");
+    assert.equal(task.lastAnalysisSucceeded, false);
+    assert.match(task.nextTrigger, /50秒/);
+    assert.ok(new Date(task.nextPollAt).getTime() <= Date.now() + 200);
+  } finally {
+    if (previous === undefined) delete process.env.ANALYSIS_TIMEOUT_MS;
+    else process.env.ANALYSIS_TIMEOUT_MS = previous;
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
   }
 });

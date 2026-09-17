@@ -1,5 +1,6 @@
-import { buildLayeredAnalysisMarket, buildRecentMonitoringMarket, compactCollectedMarket, estimateMarketContextBytes } from "./analysis-context.mjs";
+import { buildLayeredAnalysisMarket, buildRecentMonitoringMarket, compactCollectedMarket, estimateMarketContextBytes, LIVE_BOARD_STRATEGY } from "./analysis-context.mjs";
 import { requestDecision } from "./provider.mjs";
+import { approvedSkillsForContext } from "./rag.mjs";
 
 // Runs inside the desktop runtime. No database, RAG index or server engine dependency.
 export async function analyzeCollectedMarket(provider, market, context, options = {}) {
@@ -7,7 +8,13 @@ export async function analyzeCollectedMarket(provider, market, context, options 
     ? buildRecentMonitoringMarket(compactCollectedMarket(market))
     : buildLayeredAnalysisMarket(compactCollectedMarket(market));
   const { marketRef, ...decisionContext } = context;
-  const input = { ...decisionContext, market: layered, analysisMode: "direct_client" };
+  const input = {
+    ...decisionContext,
+    market: layered,
+    analysisMode: "direct_client",
+    strategy: decisionContext.strategy || LIVE_BOARD_STRATEGY,
+    approvedSkills: decisionContext.approvedSkills || approvedSkillsForContext(context.evidence),
+  };
   const contextBytes = estimateMarketContextBytes(input);
   if (contextBytes > 1024 * 1024) throw new Error("AI_CONTEXT_TOO_LARGE");
   const books = layered.books?.length ? layered.books : [layered];

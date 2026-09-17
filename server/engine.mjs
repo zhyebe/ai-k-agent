@@ -1,7 +1,7 @@
 import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-ai.mjs";
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
-import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
-import { approvedKnowledgeForAnalysis, buildApprovedExperiencePrompt } from "./rag.mjs";
+import { analysisTimeoutMs, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, nextCandleTarget, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
+import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedExperiencePrompt } from "./rag.mjs";
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
@@ -19,7 +19,7 @@ const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
 const MIN_PROFIT_PROBABILITY = 0.45;
-const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 24000;
+const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 96000;
 
 class CycleAbortError extends Error {
   constructor(code) {
@@ -27,6 +27,23 @@ class CycleAbortError extends Error {
     this.name = "CycleAbortError";
     this.code = code;
   }
+}
+
+function analysisTimeoutError(cause) {
+  const error = new Error("ANALYSIS_TIMEOUT");
+  error.code = "ANALYSIS_TIMEOUT";
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function isAnalysisTimeout(error) {
+  const message = String(error?.message || error || "");
+  return error?.code === "ANALYSIS_TIMEOUT"
+    || message === "ANALYSIS_TIMEOUT"
+    || message === "DESKTOP_AI_TIMEOUT"
+    || message === "DESKTOP_CALL_EXPIRED"
+    || error?.name === "TimeoutError"
+    || /aborted|AbortError/i.test(message);
 }
 
 function taskGeneration(task) {
@@ -1249,7 +1266,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       latest: task.market.latest,
       historyCount: layered.historyCount,
       history: layered.history,
-      ticks: [],
+      ticks: Array.isArray(layered.ticks) && layered.ticks.length ? layered.ticks : Array.isArray(market.ticks) ? market.ticks.slice(-120) : [],
       timeline: layered.timeline,
       timeframes: layered.timeframes,
       availableTimeframes: layered.availableTimeframes,
@@ -1262,6 +1279,8 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       sourceKind: market.sourceKind,
       dataAt: market.dataAt,
       observedAt: market.observedAt,
+      nextCandle: layered.nextCandle || nextCandleTarget({ ...layered, quote: market.quote, latest: task.market?.latest || market.latest || market.quote }, Date.now()),
+      strategy: layered.strategy || LIVE_BOARD_STRATEGY,
       books: layered.books || [],
       bookCount: Number(layered.bookCount || layered.books?.length || 0),
       expectedBookCount: Number(layered.expectedBookCount || layered.boardCoverage?.expected || layered.books?.length || 0),
@@ -1277,6 +1296,8 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       ...(market.account || {}),
     },
     rules: task.rules,
+    strategy: LIVE_BOARD_STRATEGY,
+    approvedSkills: approvedSkillsForContext(evidence),
     experiencePrompt: buildApprovedExperiencePrompt(evidence),
     evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash })),
     evidenceIds: evidence.map((item) => item.evidenceId).filter(Boolean),
@@ -1331,7 +1352,7 @@ function directAnalysisCoverage(market) {
   };
 }
 
-async function reviewAllMarketSegments({ task, run, provider, runtime, market, evidence, assertCurrent = () => {} }) {
+async function reviewAllMarketSegments({ task, run, provider, runtime, market, evidence, assertCurrent = () => {}, signal } = {}) {
   assertCurrent();
   const plan = buildMarketAnalysisSegments(market);
   const reviews = new Array(plan.segments.length);
@@ -1347,9 +1368,10 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
     evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags })),
     coverage: plan.coverage,
   };
-  appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `分层行情已拆分为 ${plan.segments.length} 个 AI 分析片段，覆盖 ${plan.coverage.totalKlineRows} 根 K 线（分钟/小时/日/月，不含秒级逐笔）`, data: { coverage: plan.coverage } });
+  appendAgentOutput({ taskId: task.id, runId: run.id, stage: "analyze", kind: "coverage", message: `分层行情已拆分为 ${plan.segments.length} 个 AI 分析片段：走完的 K 作历史，预测下一根将在每分钟第50秒打印的K`, data: { coverage: plan.coverage } });
   const worker = async () => {
     while (true) {
+      if (signal?.aborted) throw analysisTimeoutError(signal.reason);
       if (task.stopLocked) {
         stopped = true;
         return;
@@ -1368,12 +1390,13 @@ async function reviewAllMarketSegments({ task, run, provider, runtime, market, e
         }
         assertCurrent();
         try {
-          review = await runtime.requestSegmentReview(provider, segment, segmentContext, { timeoutMs: 45000 });
+          review = await runtime.requestSegmentReview(provider, segment, segmentContext, { timeoutMs: analysisTimeoutMs(), signal });
           assertCurrent();
           if (review?.ok && String(review.segmentId) === String(segment.segmentId) && String(review.contentHash) === String(segment.contentHash) && Number(review.rowCount) === Number(segment.rowCount)) break;
           lastFailure = review || { ok: false, code: "INVALID_SEGMENT_REVIEW" };
         } catch (error) {
           if (error instanceof CycleAbortError) throw error;
+          if (isAnalysisTimeout(error) || signal?.aborted) throw analysisTimeoutError(error);
           lastFailure = { ok: false, code: error?.message || "SEGMENT_REVIEW_FAILED" };
         }
       }
@@ -1417,6 +1440,27 @@ export function enforceDecisionLimits(decision) {
     };
   }
   return { ...decision, targetPositionPct, maxOrderValuePct };
+}
+
+function abandonTimedOutAnalysis(task, run, market) {
+  task.lastAnalysisSucceeded = false;
+  task.status = monitoringIntent(task) ? "MONITORING" : "MANUAL_CONTROL";
+  task.nextTrigger = "分析超过50秒未返回，刷新页面数据后继续监控";
+  completeWorkflow(task, "analyze", "分析超时，放弃本轮结果");
+  completeWorkflow(task, "rules", "本轮未形成有效决策");
+  completeWorkflow(task, "action", "刷新页面数据继续监控");
+  appendAgentOutput({
+    taskId: task.id,
+    runId: run.id,
+    stage: "analyze",
+    level: "error",
+    message: "分析超过50秒未返回，已放弃本轮结果；刷新页面数据并继续监控",
+  });
+  finishAgentRun(run.id, { status: "timeout", action: "HOLD", route: "ANALYSIS_TIMEOUT", code: "ANALYSIS_TIMEOUT" });
+  setNextPoll(task, 0);
+  task.nextTrigger = "分析超过50秒未返回，刷新页面数据后继续监控";
+  persistTask(task);
+  return { task, market, run, skipped: true, reason: "ANALYSIS_TIMEOUT", analysisTriggered: false, route: "ANALYSIS_TIMEOUT" };
 }
 
 export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, monitorRecentOnly = false, runtime: runtimeOverrides = {} } = {}) {
@@ -1514,18 +1558,19 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
     const clientAnalysis = desktopBrowserRequired();
     const recentOnly = shouldUseRecentMonitoring(monitorRecentOnly, market);
+    const analysisNowMs = Date.now();
     let analysisMarket = clientAnalysis ? null : (recentOnly
-      ? buildRecentMonitoringMarket(compactCollectedMarket(task.market))
-      : buildLayeredAnalysisMarket(compactCollectedMarket(task.market)));
+      ? buildRecentMonitoringMarket(compactCollectedMarket(task.market), analysisNowMs)
+      : buildLayeredAnalysisMarket(compactCollectedMarket(task.market), analysisNowMs));
     if (analysisMarket) appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
       kind: "coverage",
       message: recentOnly
-        ? `空仓监控只送近1小时分钟线：${describeAnalysisLayers(analysisMarket)}`
-        : `持仓或完整分析使用分层 K 线判断时点（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
-      data: analysisMarket.analysisLayers,
+        ? `空仓：走完的K作历史，预测下一根将在每分钟第50秒打印的K（45–50秒窗口）`
+        : `持仓：分层K作历史，预测下一根将在每分钟第50秒打印的K（45–50秒窗口）`,
+      data: { analysisLayers: analysisMarket.analysisLayers, nextCandle: analysisMarket.nextCandle || null },
     });
     const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
     const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
@@ -1539,8 +1584,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       runId: run.id,
       stage: "analyze",
       message: knowledge.length
-        ? `直接发送当前账号已审核的 ${knowledge.length} 条完整经验，与 K 线、各盘买卖档位一起分析`
-        : "当前账号没有已发布经验，本轮仅基于实时实盘数据分析",
+        ? `本轮喂入当前账号已审核的 ${knowledge.length} 条 Skill，与出K策略、K 线、各盘买卖档位一起分析`
+        : "当前账号没有已发布 Skill，本轮仅基于实时实盘数据和出K策略分析",
     });
     const resolvedProviderId = resolveDefaultProviderId(resolvedUserId, providerId || task.providerId);
     const provider = findProviderForUser(resolvedProviderId, resolvedUserId);
@@ -1557,29 +1602,36 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     let providerSucceeded = true;
     let analysisCoverage = clientAnalysis ? { mode: "direct_client", complete: false, totalSegments: 1, reviewedSegments: 0, failedSegments: [] } : directAnalysisCoverage(analysisMarket);
     let segmentReviews = [];
+    const analysisDeadlineMs = analysisTimeoutMs();
+    const analysisAbort = new AbortController();
+    const analysisTimer = setTimeout(() => analysisAbort.abort(analysisTimeoutError()), analysisDeadlineMs);
+    analysisTimer.unref?.();
+    const analysisOptions = { timeoutMs: analysisDeadlineMs, signal: analysisAbort.signal };
     try {
       assertCurrent();
       if (clientAnalysis) {
-        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位和完整经验交给 AI 分析" });
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位、出K策略和已审核 Skill 交给 AI 分析" });
         const result = await runtime.requestMarketAnalysis(provider, {
           marketRef: { sessionId: task.target.browserSessionId || `task:${task.id}`, fingerprint: task.market.fingerprint },
           account: { ...task.metrics, ...(market.account || {}) },
-      rules: task.rules,
+          rules: task.rules,
+          strategy: LIVE_BOARD_STRATEGY,
+          approvedSkills: approvedSkillsForContext(knowledge),
           evidence,
           experiencePrompt,
-      evidenceIds: evidence.map((item) => item.evidenceId),
+          evidenceIds: evidence.map((item) => item.evidenceId),
           previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
           conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },
           monitoringWindow: recentOnly ? "last_1h" : "layered",
-        }, { timeoutMs: 120000 });
+        }, analysisOptions);
         assertCurrent();
         decision = result.decision;
         analysisMarket = result.market;
         analysisCoverage = result.coverage;
         task.analysisCoverage = analysisCoverage;
-        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: `客户端分析完成：${analysisCoverage.bookCount} 个盘、${analysisCoverage.totalKlineRows} 根 K 线、${knowledge.length} 条经验`, data: analysisCoverage });
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: `客户端分析完成：${analysisCoverage.bookCount} 个盘、${analysisCoverage.totalKlineRows} 根 K 线、${knowledge.length} 条 Skill`, data: analysisCoverage });
       } else if (provider?.encryptedKey && shouldUseSegmentedAnalysis(analysisMarket)) {
-        const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: analysisMarket, evidence, assertCurrent });
+        const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: analysisMarket, evidence, assertCurrent, signal: analysisAbort.signal });
         assertCurrent();
         analysisCoverage = segmented.coverage;
         task.analysisCoverage = analysisCoverage;
@@ -1620,18 +1672,20 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
             market: summarizeMarketForDecision(analysisMarket, analysisCoverage),
             coverage: analysisCoverage,
             segmentReviews,
-          }, { timeoutMs: 45000 });
+          }, analysisOptions);
           assertCurrent();
         }
       } else {
         task.analysisCoverage = analysisCoverage;
-        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: `直接分析 ${analysisMarket.books?.length || 1} 个盘的 K 线、盘口和已审核经验`, data: { contextBytes: estimateMarketContextBytes(analysisMarket), knowledgeCount: knowledge.length } });
-        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger, analysisMarket), { timeoutMs: 120000 });
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: `直接分析 ${analysisMarket.books?.length || 1} 个盘的 K 线、盘口、出K策略和已审核 Skill`, data: { contextBytes: estimateMarketContextBytes(analysisMarket), knowledgeCount: knowledge.length } });
+        decision = await runtime.requestDecision(provider, buildDecisionContext(task, market, evidence, trigger, analysisMarket), analysisOptions);
         assertCurrent();
       }
+      if (analysisAbort.signal.aborted) throw analysisTimeoutError();
       providerSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].some((code) => (decision.riskFlags || []).includes(code));
     } catch (error) {
       if (error instanceof CycleAbortError) throw error;
+      if (isAnalysisTimeout(error) || analysisAbort.signal.aborted) return abandonTimedOutAnalysis(task, run, market);
       providerSucceeded = false;
       decision = {
         action: "HOLD",
@@ -1646,6 +1700,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         decisionTtlSec: 300,
       };
       appendAgentOutput({ taskId, runId: run.id, stage: "analyze", level: "error", message: `模型请求失败：${provider?.name || "Provider"} ${error.message}` });
+    } finally {
+      clearTimeout(analysisTimer);
     }
     assertCurrent();
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
@@ -1842,6 +1898,10 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
     if (monitoringIntent(task)) setNextPoll(task, monitoringPollIntervalMs(task));
       persistTask(task);
     return { ...result, market: result.market || task.market || null, route: "CYCLE_IN_PROGRESS", analysisTriggered: false };
+  }
+  if (result.reason === "ANALYSIS_TIMEOUT") {
+    persistTask(task);
+    return result;
   }
   const failed = result.market?.ok !== true || result.task.lastAnalysisSucceeded === false || ["REAUTH_REQUIRED", "CONNECT_FAILED", "COLLECT_FAILED"].includes(result.route);
   task.monitorFailureCount = failed ? Math.max(1, Number(task.monitorFailureCount || 0)) : 0;

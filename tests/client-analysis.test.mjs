@@ -36,7 +36,9 @@ test("direct analysis sends full approved owner experience and both order books 
   const experiencePrompt = buildApprovedExperiencePrompt(evidence);
   assert.match(experiencePrompt, /标题：经验/);
   assert.match(experiencePrompt, /原文：/);
-  assert.throws(() => approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content }], "owner", 10), /EXPERIENCE_CONTEXT_TOO_LARGE/);
+  assert.equal(evidence[0].excerpt, content);
+  assert.doesNotMatch(JSON.stringify(approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content: "too-small-budget" }], "owner", 10)), /too-small-budget/);
+  assert.equal(approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content: "too-small-budget" }], "owner", 10).length, 0);
   const now = Date.now();
   const makeBook = (symbol, price) => ({ symbol, timeframe: "1m", dataAt: new Date(now).toISOString(), history: [{ timestamp: now - 60000, open: price, high: price + 1, low: price - 1, close: price, volume: 10 }], orderBook: summarizeOrderBook({ bids: [{ level: 1, price, volume: 100 }], asks: [{ level: 1, price: price + 1, volume: 40 }] }), raw: { duplicate: "x".repeat(300000) } });
   const market = { ...makeBook("A", 100), books: [makeBook("A", 100), makeBook("B", 200)], fingerprint: "snapshot" };
@@ -48,6 +50,9 @@ test("direct analysis sends full approved owner experience and both order books 
     const context = input.context || input;
     assert.equal(context.evidence[0].excerpt, content);
     assert.equal(context.experiencePrompt, experiencePrompt);
+    assert.equal(context.approvedSkills[0].title, "经验");
+    assert.match(context.approvedSkills[0].content, /成交量与趋势/);
+    assert.equal(context.strategy.kline.printSecond, 50);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);
