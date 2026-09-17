@@ -5,7 +5,7 @@ import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persisten
 test("compactTaskRuntime does not persist market snapshots", () => {
   const runtime = compactTaskRuntime({
     workflow: ["monitor"],
-    decision: { action: "BUY", evidenceIds: ["e1", "e2"], analysisSummary: "x".repeat(800), boardAssessments: [{ symbol: "DGJJ", history: [1, 2, 3], summary: "ok" }] },
+    decision: { action: "BUY", evidenceIds: ["e1", "e2"], analysisSummary: "x".repeat(800), bullishProfitProbability: 0.52, bearishProfitProbability: 0.31, boardAssessments: [{ symbol: "DGJJ", history: [1, 2, 3], summary: "ok", bullishProfitProbability: 0.52 }] },
     market: {
       symbol: "DGJJ",
       history: Array.from({ length: 200 }, (_, i) => ({ t: i, c: i })),
@@ -16,6 +16,9 @@ test("compactTaskRuntime does not persist market snapshots", () => {
   assert.deepEqual(runtime.decision.evidenceIds, []);
   assert.equal(runtime.decision.analysisSummary.length, 400);
   assert.equal(runtime.decision.boardAssessments[0].history, undefined);
+  assert.equal(runtime.decision.bullishProfitProbability, 0.52);
+  assert.equal(runtime.decision.bearishProfitProbability, 0.31);
+  assert.equal(runtime.decision.boardAssessments[0].bullishProfitProbability, 0.52);
 });
 
 test("only login and account events persist to audit logs", () => {

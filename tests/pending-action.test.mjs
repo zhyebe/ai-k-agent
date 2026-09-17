@@ -62,12 +62,12 @@ test("pending buy waits for confirm, paper confirm does not create an order", as
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
 
-test("auto decision countdown confirms suggestion without submitting a trade", async () => {
+test("auto takeover confirms suggestion without a countdown prompt", async () => {
   const task = insertTask(`task_auto_${Date.now()}`);
   setAutoDecision(task.id, { enabled: true, countdownSec: 5 });
-  task.pendingAction = buildPendingAction(task, task.decision, { now: Date.now() - 6000 });
+  task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.status, "WAITING");
-  assert.ok(task.pendingAction.deadlineAt);
+  assert.equal(task.pendingAction.deadlineAt, null);
   const confirmed = await confirmPendingAction(task.id, { source: "auto_timeout" });
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
   assert.equal(confirmed.pendingAction.source, "auto_timeout");
@@ -91,7 +91,7 @@ test("live suggestion with automation enabled is eligible for auto-submit", () =
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(task.pendingAction.deadlineAt, null);
-  assert.match(task.pendingAction.message, /自动化已开启/);
+  assert.match(task.pendingAction.message, /全自动接管/);
 });
 
 test("live confirm submits only after the user confirms", async () => {
@@ -137,7 +137,7 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   });
   assert.equal(submittedInput.action, "SELL");
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
-  assert.match(confirmed.pendingAction.message, /提交卖出订单/);
+  assert.match(confirmed.pendingAction.message, /提交买空（跌）订单/);
   const order = state.orders.find((item) => item.taskId === task.id);
   assert.equal(order.action, "SELL");
   assert.equal(order.status, "submitted");

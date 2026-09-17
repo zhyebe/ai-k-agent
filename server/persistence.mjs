@@ -73,7 +73,11 @@ function compactPersistedDecision(decision) {
   return {
     action: decision.action || "HOLD",
     confidence: Number(decision.confidence || 0),
-    profitProbability: Number(decision.profitProbability ?? decision.confidence ?? 0),
+    profitProbability: Number(decision.profitProbability || 0),
+    bullishProfitProbability: Number(decision.bullishProfitProbability || 0),
+    bearishProfitProbability: Number(decision.bearishProfitProbability || 0),
+    signalTier: decision.signalTier || null,
+    exitType: decision.exitType || null,
     targetSymbol: decision.targetSymbol || "",
     targetSymbolName: decision.targetSymbolName || "",
     targetInstrumentId: decision.targetInstrumentId || "",
@@ -93,7 +97,9 @@ function compactPersistedDecision(decision) {
         instrumentId: item.instrumentId || "",
         action: item.action || "HOLD",
         confidence: Number(item.confidence || 0),
-        profitProbability: Number(item.profitProbability ?? item.confidence ?? 0),
+        profitProbability: Number(item.profitProbability || 0),
+        bullishProfitProbability: Number(item.bullishProfitProbability || 0),
+        bearishProfitProbability: Number(item.bearishProfitProbability || 0),
         summary: String(item.summary || "").slice(0, 160),
       }))
       : [],

@@ -99,8 +99,9 @@ export function executeDecision(task, decision, connector) {
   if (decision.action === "HOLD") return { ok: true, skipped: true, reason: "HOLD", route: "HOLD", executionEnabled: false, orderCreated: false };
   const preview = suggestOrderPreview(task, decision);
   const live = isLiveTask(task) && isTradingSwitchOn();
+  const auto = task.autoDecisionEnabled === true;
   addEvent("suggestion_ready", live
-    ? "买卖建议已生成，等待弹窗确认后才会下单"
+    ? (auto ? "分析通过，全自动接管将直接下单或离场" : "买卖建议已生成，等待确认后才会下单或离场")
     : "买卖建议已生成，等待确认；当前模式不会提交实盘", {
     taskId: task.id,
     action: decision.action,
@@ -116,7 +117,9 @@ export function executeDecision(task, decision, connector) {
     skipped: true,
     reason: "PENDING_CONFIRM",
     code: "SUGGESTION_PENDING",
-    message: live ? "建议已生成，等待弹窗确认后下单" : "建议已生成，等待确认；观察模式不会下单",
+    message: live
+      ? (auto ? "分析通过，全自动接管将直接执行" : "建议已生成，等待确认后下单或离场")
+      : "建议已生成，等待确认；观察模式不会下单",
     route: "SUGGESTION_PENDING",
     executionEnabled: false,
     orderCreated: false,

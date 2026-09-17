@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, entryConditionReached, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -21,14 +21,60 @@ test("风险上限只阻断执行路由，不把真实 BUY 意图改成 HOLD", (
   assert.ok(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"));
 });
 
-test("获利概率分档：超过 45% 即允许方向性提示", () => {
-  assert.equal(profitSignalTier(0.45), "HOLD");
+test("获利概率分档：大于等于 45% 允许方向性提示", () => {
+  assert.equal(profitSignalTier(0.449), "HOLD");
+  assert.equal(profitSignalTier(0.45), "EXPLORATORY");
   assert.equal(profitSignalTier(0.4501), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6001), "CAUTIOUS");
   assert.equal(profitSignalTier(0.7001), "STANDARD");
   assert.equal(profitSignalTier(0.8001), "STRONG");
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
+});
+
+test("模型结论原样保留，主机只判断入场边界", () => {
+  const kept = enforceProfitProbability({
+    action: "BUY",
+    profitProbability: "45%",
+    bullishProfitProbability: 45,
+    bearishProfitProbability: "0.22",
+    riskFlags: [],
+  });
+  assert.equal(kept.action, "BUY");
+  assert.equal(kept.profitProbability, 0.45);
+  assert.equal(kept.bullishProfitProbability, 0.45);
+  assert.equal(kept.bearishProfitProbability, 0.22);
+  assert.equal(kept.signalTier, "EXPLORATORY");
+  assert.equal(meetsOrderBoundary(kept), true);
+
+  const below = enforceProfitProbability({
+    action: "SELL",
+    profitProbability: 0.4,
+    bullishProfitProbability: 0.2,
+    bearishProfitProbability: 0.4,
+    riskFlags: [],
+  });
+  assert.equal(below.action, "SELL");
+  assert.equal(meetsOrderBoundary(below), false);
+  assert.ok(below.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
+
+  const hold = enforceProfitProbability({
+    action: "HOLD",
+    profitProbability: 0.8,
+    bullishProfitProbability: 0.8,
+    bearishProfitProbability: 0.3,
+  });
+  assert.equal(hold.action, "HOLD");
+  assert.equal(meetsOrderBoundary(hold), false);
+
+  const exit = enforceProfitProbability({
+    action: "SELL",
+    exitType: "TAKE_PROFIT",
+    profitProbability: 0.2,
+    bearishProfitProbability: 0.2,
+  });
+  assert.equal(exit.action, "SELL");
+  assert.equal(meetsOrderBoundary(exit), true);
 });
 
 test("自动化流程限制数量为 20，人工确认流程保留建议数量", () => {
@@ -414,6 +460,32 @@ test("成功监控轮次持续运行，未变行情不请求模型，任何变�
   const refreshed = await runMonitoringCycle(taskId, { runtime });
   assert.equal(refreshed.analysisTriggered, true);
   assert.equal(requests.length, 3);
+});
+
+test("持仓未平时即使行情指纹不变也继续交给模型判断离场", async () => {
+  const taskId = `task_monitor_positions_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  const snapshot = testMarketSnapshot("fingerprint-hold", 100);
+  snapshot.account = { ...(snapshot.account || {}), positions: [{ symbol: "BTC/USDT", quantity: 2, positionOrderId: "P-1" }] };
+  const requests = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => snapshot,
+    requestDecision: async (_provider, context) => {
+      requests.push(context);
+      return { action: "HOLD", confidence: 0.5, profitProbability: 0.5, bullishProfitProbability: 0.4, bearishProfitProbability: 0.3, riskFlags: [], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", decisionTtlSec: 300 };
+    },
+  };
+  const first = await runMonitoringCycle(taskId, { runtime });
+  assert.equal(first.analysisTriggered, true);
+  assert.equal(requests.length, 1);
+  const second = await runMonitoringCycle(taskId, { runtime });
+  assert.equal(second.analysisTriggered, true);
+  assert.equal(requests.length, 2);
 });
 
 test("成功轮次按 nextPollAt 递归调度，显式停止后不再运行", async () => {

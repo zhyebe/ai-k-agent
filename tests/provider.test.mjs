@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, listProviderModels, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -149,7 +149,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.equal(seen[0].headers["anthropic-version"], "2023-06-01");
     assert.equal(seen[0].body.model, "claude-custom");
     assert.ok(seen[0].body.system);
-    assert.match(seen[0].body.system, /above 0\.45/);
+    assert.match(seen[0].body.system, />= 0\.45/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
     assert.ok(seen[1].body.systemInstruction);
@@ -213,6 +213,14 @@ test("provider decision sends approved experience as a separate analysis prompt"
   }
 });
 
+test("normalizeUnitProbability accepts 0.45, 45 and 45%", () => {
+  assert.equal(normalizeUnitProbability(0.45), 0.45);
+  assert.equal(normalizeUnitProbability(45), 0.45);
+  assert.equal(normalizeUnitProbability("45%"), 0.45);
+  assert.equal(normalizeUnitProbability("45％"), 0.45);
+  assert.equal(normalizeUnitProbability("0.52"), 0.52);
+});
+
 test("provider decision never derives profit probability from confidence", async () => {
   const server = http.createServer(async (_request, response) => {
     response.setHeader("content-type", "application/json");
@@ -237,9 +245,9 @@ test("provider decision preserves target board identity and per-board assessment
       target_symbol_name: "丹桂康砖（二期）",
       target_instrument_id: "537",
       confidence: 0.75,
-      profit_probability: 0.88,
-      bullish_profit_probability: 0.88,
-      bearish_profit_probability: 0.41,
+      profit_probability: "52%",
+      bullish_profit_probability: 52,
+      bearish_profit_probability: "0.41",
       board_assessments: [
         { symbol: "DGJJ", symbol_name: "丹桂金尖（二期）", instrument_id: "536", action: "HOLD", confidence: 0.4, summary: "等待" },
         { symbol: "DGKZ", symbol_name: "丹桂康砖（二期）", instrument_id: "537", action: "BUY", confidence: 0.75, summary: "满足条件" },
@@ -252,8 +260,8 @@ test("provider decision preserves target board identity and per-board assessment
     const result = await requestDecision(provider, { market: { books: [] }, evidenceIds: [] });
     assert.equal(result.targetSymbol, "DGKZ");
     assert.equal(result.targetInstrumentId, "537");
-    assert.equal(result.profitProbability, 0.88);
-    assert.equal(result.bullishProfitProbability, 0.88);
+    assert.equal(result.profitProbability, 0.52);
+    assert.equal(result.bullishProfitProbability, 0.52);
     assert.equal(result.bearishProfitProbability, 0.41);
     assert.equal(result.boardAssessments.length, 2);
     assert.equal(result.boardAssessments[0].action, "HOLD");
