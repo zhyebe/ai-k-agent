@@ -718,7 +718,7 @@ function App() {
     try {
       const next = await setTaskMarketSelection(task.id, selection);
       replaceTask(next);
-      notify(`已切换监测盘口：${selection.symbolName || selection.symbol}`);
+      notify(next.nextTrigger || `已切换监测盘口：${selection.symbolName || selection.symbol}`);
     } catch (error) {
       notify(`切换监测盘口失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import NodeWebSocket from "ws";
 import { orderBookFingerprint, summarizeOrderBook } from "./order-book.mjs";
-import { collectAllPageBoards, listPageBoardInstruments, openBrowserPage, readVisiblePage } from "./browser.mjs";
+import { collectAllPageBoards, listPageBoardInstruments, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
 import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, normalizePageInstrument, parseHaohanPageSnapshot, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const DEFAULT_WS_URL = "wss://smyt.haohandahan.cn/wsfront_tq";
@@ -1206,6 +1206,22 @@ export async function observeMarket(task, connector) {
   }
   if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
   const configuredSymbol = String(task.symbol || "").trim();
+  const monitorAllBoards = task.monitorAllBoards === true;
+  const selectedTarget = {
+    symbol: String(task.target?.selectedSymbol || configuredSymbol || "").trim(),
+    symbolName: String(task.target?.selectedSymbolName || "").trim(),
+    instrumentId: String(task.target?.selectedInstrumentId || "").trim(),
+  };
+  if (!monitorAllBoards && (selectedTarget.symbol || selectedTarget.symbolName || selectedTarget.instrumentId)) {
+    const currentInstrument = extractHaohanPageInstrument(pageSnapshot);
+    if (!samePageInstrument(currentInstrument, selectedTarget)) {
+      const switched = await selectPageBoardInstrument(sessionId, selectedTarget);
+      if (switched) {
+        const switchedSnapshot = await readVisiblePage(sessionId);
+        if (switchedSnapshot?.ok) pageSnapshot = switchedSnapshot;
+      }
+    }
+  }
   const pageInstrument = extractHaohanPageInstrument(pageSnapshot);
   const observedSymbol = resolveObservedHaohanSymbol(pageInstrument, configuredSymbol) || "DGJJ";
   const timeframe = task.timeframe || "15m";
@@ -1216,12 +1232,6 @@ export async function observeMarket(task, connector) {
     pageInstrument,
     ...(await listPageBoardInstruments(sessionId)),
   ]);
-  const monitorAllBoards = task.monitorAllBoards === true;
-  const selectedTarget = {
-    symbol: String(task.target?.selectedSymbol || configuredSymbol || "").trim(),
-    symbolName: String(task.target?.selectedSymbolName || "").trim(),
-    instrumentId: String(task.target?.selectedInstrumentId || "").trim(),
-  };
   const pageInstruments = monitorAllBoards || !selectedTarget.symbol
     ? allPageInstruments
     : allPageInstruments.filter((instrument) => samePageInstrument(instrument, selectedTarget));
@@ -1255,8 +1265,9 @@ export async function observeMarket(task, connector) {
     return parsedPage;
   };
   recordPageSnapshot(pageSnapshot, pageInstrument);
-  if (cycleTargets.length && !samePageInstrument(cycleTargets[0], pageInstrument)) {
-    const collected = await collectAllPageBoards(sessionId, cycleTargets);
+  const needsBoardCollect = cycleTargets.length && !samePageInstrument(cycleTargets[0], pageInstrument);
+  if (needsBoardCollect) {
+    const collected = await collectAllPageBoards(sessionId, monitorAllBoards ? cycleTargets.filter((item) => !samePageInstrument(item, pageInstrument)) : cycleTargets, { restore: monitorAllBoards });
     for (const item of collected) {
       if (!item.selected) continue;
       const recorded = recordPageSnapshot(item.snapshot, item.instrument);

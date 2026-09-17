@@ -349,9 +349,9 @@ export function setTaskMarketSelection(taskId, selection = {}, userId = "") {
   task.lastAnalyzedFingerprint = "";
   task.lastAnalysisSucceeded = false;
   setNextPoll(task, 0);
-  task.nextTrigger = `已切换监测盘口：${task.target.selectedSymbolName || symbol}`;
+  task.nextTrigger = `已切换监测盘口并重新启动监控：${task.target.selectedSymbolName || symbol}`;
   task.updatedAt = new Date().toISOString();
-  addEvent("market_selected", `已切换监测盘口：${task.target.selectedSymbolName || symbol}`, { taskId, symbol, instrumentId: task.target.selectedInstrumentId, userId });
+  addEvent("market_selected", task.nextTrigger, { taskId, symbol, instrumentId: task.target.selectedInstrumentId, userId, restarted: wasMonitoring });
   persistTask(task);
   if (wasMonitoring) startController(task.id, { userId: task.ownerUserId || userId });
   return task;
@@ -1814,15 +1814,13 @@ function scheduleController(taskId, delayMs) {
       }
     } finally {
       entry.running = false;
-      if (controllerLoops.get(taskId) === entry && !entry.stopped) {
-        const current = getTask(taskId);
-        if (current && taskGeneration(current) === entry.generation && monitoringIntent(current) && !pauseForPendingAction(current)) {
-          const nextPollAt = new Date(current.nextPollAt || "").getTime();
-          const fallbackDelay = monitoringPollIntervalMs(current);
-          scheduleController(taskId, Number.isFinite(nextPollAt) ? Math.max(0, nextPollAt - Date.now()) : fallbackDelay);
-        }
-        else stopController(taskId);
-      }
+      if (controllerLoops.get(taskId) !== entry || entry.stopped) return;
+      const current = getTask(taskId);
+      if (current && taskGeneration(current) === entry.generation && monitoringIntent(current) && !pauseForPendingAction(current)) {
+        const nextPollAt = new Date(current.nextPollAt || "").getTime();
+        const fallbackDelay = monitoringPollIntervalMs(current);
+        scheduleController(taskId, Number.isFinite(nextPollAt) ? Math.max(0, nextPollAt - Date.now()) : fallbackDelay);
+      } else stopController(taskId);
     }
   }, Math.max(0, Number(delayMs) || 0));
 }

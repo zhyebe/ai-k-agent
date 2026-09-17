@@ -566,7 +566,7 @@ export async function selectPageBoardInstrument(sessionId, instrument) {
   return false;
 }
 
-export async function collectAllPageBoards(sessionId, instruments = []) {
+export async function collectAllPageBoards(sessionId, instruments = [], { restore = true } = {}) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return [];
   const targets = uniquePageInstruments(instruments);
@@ -581,7 +581,7 @@ export async function collectAllPageBoards(sessionId, instruments = []) {
     const snapshot = await readVisiblePage(sessionId);
     snapshots.push({ instrument, selected, snapshot });
   }
-  if (original.symbol || original.symbolName) await selectPageBoardInstrument(sessionId, original);
+  if (restore && (original.symbol || original.symbolName)) await selectPageBoardInstrument(sessionId, original);
   return snapshots;
 }
 

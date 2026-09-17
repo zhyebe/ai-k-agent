@@ -273,6 +273,44 @@ test("切换监测盘口可用盘名，不必先有代码", () => {
   assert.equal(next.symbol, "丹桂金尖（二期）");
   assert.equal(next.target.selectedSymbol, "丹桂金尖（二期）");
   assert.equal(next.target.selectedSymbolName, "丹桂金尖（二期）");
+  assert.match(next.nextTrigger, /已切换监测盘口并重新启动监控/);
+});
+
+test("切换盘口时旧监控轮次收尾不会停掉新盘监控", async () => {
+  const taskId = `task_switch_restart_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.ownerUserId = "user_1";
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let firstStarted = false;
+  let restarted = 0;
+  startController(taskId, {
+    runCycle: async () => {
+      firstStarted = true;
+      await gate;
+      return { task };
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(firstStarted, true);
+  stopController(taskId);
+  startController(taskId, {
+    runCycle: async () => {
+      restarted += 1;
+      task.nextPollAt = new Date(Date.now() + 50).toISOString();
+      return { task };
+    },
+  });
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  try {
+    assert.ok(restarted >= 1, `expected new board monitoring to keep running, got ${restarted}`);
+  } finally {
+    stopController(taskId);
+  }
 });
 
 async function withDisallowedDemoDomain(run) {
