@@ -483,9 +483,44 @@ test("持仓未平时即使行情指纹不变也继续交给模型判断离场",
   const first = await runMonitoringCycle(taskId, { runtime });
   assert.equal(first.analysisTriggered, true);
   assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0].market.availableTimeframes, ["1m", "1h", "1d", "1mo"]);
+  assert.ok(requests[0].market.timeframes["1h"]);
+  assert.ok(requests[0].market.timeframes["1d"]);
+  assert.ok(requests[0].market.timeframes["1mo"]);
+  assert.equal(requests[0].market.analysisLayers.layers.length, 4);
   const second = await runMonitoringCycle(taskId, { runtime });
   assert.equal(second.analysisTriggered, true);
   assert.equal(requests.length, 2);
+});
+
+test("持仓监控在客户端分析时改用分层 K 线窗口", async () => {
+  const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+  process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+  const taskId = `task_hold_layered_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  const market = testMarketSnapshot("hold-layered", 100);
+  market.account = { ...(market.account || {}), positions: [{ symbol: "BTC/USDT", quantity: 2, positionOrderId: "P-2" }] };
+  let window;
+  try {
+    const result = await runMonitoringCycle(taskId, { runtime: {
+      openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
+      browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => market,
+      requestDecision: async () => { throw new Error("SERVER_ANALYSIS_FORBIDDEN"); },
+      requestMarketAnalysis: async (_provider, context) => {
+        window = context.monitoringWindow;
+        return { market, decision: { action: "HOLD", confidence: 0.5, profitProbability: 0.5, riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } };
+      },
+    } });
+    assert.equal(result.analysisTriggered, true);
+    assert.equal(window, "layered");
+  } finally {
+    if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+    else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous;
+  }
 });
 
 test("成功轮次按 nextPollAt 递归调度，显式停止后不再运行", async () => {

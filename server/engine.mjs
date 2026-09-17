@@ -90,6 +90,10 @@ function openPositionCount(market) {
   return positions.filter((item) => Number(item?.quantity) > 0).length;
 }
 
+function shouldUseRecentMonitoring(monitorRecentOnly, market) {
+  return monitorRecentOnly === true && openPositionCount(market) === 0;
+}
+
 export function profitSignalTier(value) {
   const probability = Number(value || 0);
   if (probability > 0.9) return "VERY_STRONG";
@@ -1443,7 +1447,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
 
     logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
     const clientAnalysis = desktopBrowserRequired();
-    let analysisMarket = clientAnalysis ? null : (monitorRecentOnly
+    const recentOnly = shouldUseRecentMonitoring(monitorRecentOnly, market);
+    let analysisMarket = clientAnalysis ? null : (recentOnly
       ? buildRecentMonitoringMarket(compactCollectedMarket(task.market))
       : buildLayeredAnalysisMarket(compactCollectedMarket(task.market)));
     if (analysisMarket) appendAgentOutput({
@@ -1451,7 +1456,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       runId: run.id,
       stage: "analyze",
       kind: "coverage",
-      message: `分析粒度已分层（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
+      message: recentOnly
+        ? `空仓监控只送近1小时分钟线：${describeAnalysisLayers(analysisMarket)}`
+        : `持仓或完整分析使用分层 K 线判断时点（不含秒级逐笔）：${describeAnalysisLayers(analysisMarket)}`,
       data: analysisMarket.analysisLayers,
     });
     const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
@@ -1497,7 +1504,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       evidenceIds: evidence.map((item) => item.evidenceId),
           previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
           conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },
-          monitoringWindow: monitorRecentOnly ? "last_1h" : "layered",
+          monitoringWindow: recentOnly ? "last_1h" : "layered",
         }, { timeoutMs: 120000 });
         assertCurrent();
         decision = result.decision;

@@ -277,7 +277,7 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   };
 }
 
-// Controller polling uses only the latest minute window; manual analysis keeps full layered history.
+// Empty-position controller polls use the latest minute window; open positions keep full layered K-lines for exit timing.
 export function buildRecentMonitoringMarket(market = {}, nowMs = null) {
   const layered = market?.analysisLayers ? market : buildLayeredAnalysisMarket(market, nowMs);
   const recent = layered.timeframes?.["1m"] || {
