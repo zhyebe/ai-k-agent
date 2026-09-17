@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -157,6 +157,8 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /both sides are < 0\.45/);
     assert.match(seen[0].body.system, /treats BUY\/SELL while holding as an exit/);
     assert.match(seen[0].body.system, /can profit/);
+    assert.match(seen[0].body.system, /BROWSER_PLAN/);
+    assert.match(seen[0].body.system, /built-in browser/);
     assert.doesNotMatch(seen[0].body.system, /Do not wait for maximum profit/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
@@ -216,6 +218,26 @@ test("provider decision sends approved experience as a separate analysis prompt"
     const promptMessage = received.messages.find((message) => message.content.includes("标题：盘口回撤经验"));
     assert.ok(promptMessage);
     assert.match(promptMessage.content, /审核通过的 Skill/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("provider browser control returns visible click actions", async () => {
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.match(payload.messages[0].content, /built-in browser/);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ goal: "ENTRY_BUY_UP", actions: [{ type: "click", label: "买入订立" }] }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+    const result = await requestBrowserActions(provider, { goal: "ENTRY_BUY_UP", controls: { buttons: [{ label: "买入订立" }] } });
+    assert.equal(result.ok, true);
+    assert.equal(result.actions[0].label, "买入订立");
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

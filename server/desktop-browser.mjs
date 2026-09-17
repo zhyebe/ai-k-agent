@@ -1,6 +1,6 @@
 import { invokeDesktopAi } from "./desktop-ai.mjs";
 import { openMarketBrowser, observeMarket } from "./market.mjs";
-import { browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm } from "./tools.mjs";
+import { browserLogin, browserLoginStatus, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "./tools.mjs";
 import { closeBrowserSession } from "./browser.mjs";
 import { getCredential } from "./vault.mjs";
 
@@ -8,7 +8,7 @@ export function desktopBrowserRequired() {
   return process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1";
 }
 
-const methods = { openMarketBrowser, observeMarket, browserLogin, browserLoginStatus, fillSuggestionForm, submitSuggestionForm, closeBrowserSession };
+const methods = { openMarketBrowser, observeMarket, browserLogin, browserLoginStatus, fillSuggestionForm, readTradeControls, submitSuggestionForm, closeBrowserSession };
 
 export async function callBrowserMethod(method, userId, input = {}, options = {}) {
   if (!Object.hasOwn(methods, method)) throw new Error("BROWSER_METHOD_UNKNOWN");

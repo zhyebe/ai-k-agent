@@ -180,6 +180,7 @@ test("最终决策上下文包含当前页面、账户、时间戳和全部盘�
   assert.equal(context.market.nextCandle.periodMs, 60000);
   assert.equal(context.market.nextCandle.printSecond, 50);
   assert.equal(context.strategy.kline.printSecond, 50);
+  assert.deepEqual(context.strategy.loop.aiCompletes, ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"]);
   assert.deepEqual(context.approvedSkills, []);
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
 import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, stopController, takeoverPendingAction } from "../server/engine.mjs";
-import { isForbiddenTradeControl, isPositionListExitControlText, isTradeWriteResponse, positionListExitLabels, suggestionFormLabels, tradePaneLabel, tradeSubmitLabels } from "../server/tools.mjs";
+import { isForbiddenTradeControl, isPositionListExitControlText, isTradeWriteResponse, normalizeBrowserPlan, positionListExitLabels, suggestionFormLabels, tradePaneLabel, tradeSubmitLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
 
 afterEach(() => {
@@ -66,6 +66,14 @@ test("forbidden trade controls stay blocked for submit labels", () => {
   assert.equal(isPositionListExitControlText("转让", "转让"), true);
   assert.equal(isPositionListExitControlText("止盈 | 止损", "止盈"), true);
   assert.equal(isPositionListExitControlText("止盈价", "止盈"), false);
+  const plan = normalizeBrowserPlan({
+    actions: [
+      { type: "click", label: "买入订立" },
+      { type: "click", label: "关闭窗口" },
+      { type: "fill", label: "买量", value: "2" },
+    ],
+  }, { buttons: [{ label: "买入订立" }], fields: [{ label: "买量" }], rowActions: [{ label: "转让" }] });
+  assert.deepEqual(plan.actions, [{ type: "click", label: "买入订立" }, { type: "fill", label: "买量", value: "2" }]);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/qtfront_tq/intraday-trade", "POST"), true);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/client/#/transcc", "GET"), false);
 });
@@ -137,6 +145,24 @@ test("live confirm submits only after the user confirms", async () => {
   assert.equal(orders[0].action, "BUY");
 });
 
+test("live confirm lets AI plan visible browser clicks", async () => {
+  const task = insertTask(`task_ai_browser_${Date.now()}`, { mode: "LIVE" });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let submittedInput;
+  await confirmPendingAction(task.id, {
+    source: "manual_confirm",
+    runtime: {
+      readTradeControls: async () => ({ ok: true, buttons: [{ label: "买入订立" }], fields: [{ label: "买量" }], rowActions: [] }),
+      requestBrowserActions: async () => ({ actions: [{ type: "click", label: "买入订立" }, { type: "click", label: "关闭窗口" }] }),
+      submitSuggestionForm: async (input) => {
+        submittedInput = input;
+        return { ok: true, submitted: true, code: "AI_BROWSER_CLICKED", message: "AI 已点买入订立" };
+      },
+    },
+  });
+  assert.deepEqual(submittedInput.browserPlan.actions, [{ type: "click", label: "买入订立" }]);
+});
+
 test("live sell suggestion submits SELL action only after confirmation", async () => {
   const task = insertTask(`task_live_sell_${Date.now()}`, {
     mode: "LIVE",
@@ -158,7 +184,7 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   assert.equal(submittedInput.action, "SELL");
   assert.equal(submittedInput.exitType || null, null);
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
-  assert.match(confirmed.pendingAction.message, /提交买空（跌）订单/);
+  assert.match(confirmed.pendingAction.message, /提交买跌订单/);
   const order = state.orders.find((item) => item.taskId === task.id);
   assert.equal(order.action, "SELL");
   assert.equal(order.status, "submitted");
@@ -206,7 +232,7 @@ test("live exit submits 转让 with position ids", async () => {
   assert.equal(submittedInput.exitType, "TAKE_PROFIT");
   assert.deepEqual(submittedInput.targetPositionIds, ["P-9"]);
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
-  assert.match(confirmed.pendingAction.message, /已确认并提交止盈卖出订单/);
+  assert.match(confirmed.pendingAction.message, /已确认并提交转让卖出订单/);
 });
 
 test("multi-board pending action uses and submits the selected board price and identity", async () => {

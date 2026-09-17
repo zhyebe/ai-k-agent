@@ -350,6 +350,91 @@ export function isTradeWriteResponse(url, method) {
   return /intraday-trade|position|holding|warehouse|trade|order|entrust|bargain|deal|transfer|inventory|submit|委托|转让|订立/i.test(String(url || ""));
 }
 
+function compactControlLabel(value) {
+  return String(value || "").replace(/\s+/g, "").slice(0, 40);
+}
+
+export function tradeControlLabels(controls = {}) {
+  const labels = [];
+  for (const item of [...(controls.buttons || []), ...(controls.fields || []), ...(controls.rowActions || [])]) {
+    const label = compactControlLabel(item?.label || item);
+    if (label && !labels.includes(label)) labels.push(label);
+  }
+  return labels;
+}
+
+export function normalizeBrowserPlan(plan, controls = {}) {
+  const allowed = tradeControlLabels(controls);
+  const actions = [];
+  for (const item of Array.isArray(plan?.actions) ? plan.actions : []) {
+    if (actions.length >= 8) break;
+    const type = String(item?.type || "").toLowerCase();
+    if (type === "accept_agreement") {
+      actions.push({ type: "accept_agreement" });
+      continue;
+    }
+    const label = compactControlLabel(item?.label);
+    if (!label || !allowed.some((item) => item === label || item.includes(label) || label.includes(item))) continue;
+    if (type === "click") actions.push({ type: "click", label });
+    if (type === "fill") {
+      const value = item.value == null ? "" : String(item.value).slice(0, 32);
+      if (value) actions.push({ type: "fill", label, value });
+    }
+  }
+  return { ok: actions.length > 0, goal: String(plan?.goal || ""), actions };
+}
+
+export async function readTradeControls({ sessionId = "default", symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [] } = {}) {
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", buttons: [], fields: [], rowActions: [] };
+  if (symbol || symbolName || instrumentId) {
+    const selected = await selectPageBoardInstrument(sessionId, { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") });
+    if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", buttons: [], fields: [], rowActions: [] };
+  }
+  const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+  try {
+    const snapshot = await page.evaluate(({ targetIds }) => {
+      const compact = (value) => String(value || "").replace(/\s+/g, "").slice(0, 40);
+      const visible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const buttons = Array.from(document.querySelectorAll("button, [role='button'], [role='tab'], a, .el-tabs__item, .el-radio-button__inner"))
+        .filter(visible)
+        .map((node) => compact(node.textContent))
+        .filter((label) => label.length >= 2 && label.length <= 16)
+        .filter((label, index, list) => list.indexOf(label) === index)
+        .slice(0, 40)
+        .map((label) => ({ label }));
+      const fields = Array.from(document.querySelectorAll("label, .el-form-item__label, th, span"))
+        .filter(visible)
+        .map((node) => compact(node.textContent))
+        .filter((label) => /价|量|数量/.test(label) && label.length <= 8)
+        .filter((label, index, list) => list.indexOf(label) === index)
+        .slice(0, 20)
+        .map((label) => ({ label }));
+      const rowKey = (value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      const rows = Array.from(document.querySelectorAll("tr, [role='row'], .el-table__row")).filter(visible);
+      const rowActions = [];
+      for (const row of rows) {
+        const text = rowKey(row.textContent);
+        if (targetIds.length && !targetIds.some((value) => text.includes(value))) continue;
+        const actions = Array.from(row.querySelectorAll("button, [role='button'], a, span"))
+          .filter(visible)
+          .map((node) => compact(node.textContent))
+          .filter((label) => label === "转让" || label === "止盈" || label === "止损" || compact(label).replace(/[|/]/g, "") === "止盈止损")
+          .filter((label, index, list) => list.indexOf(label) === index);
+        if (actions.length) rowActions.push(...actions.map((label) => ({ label })));
+      }
+      return { buttons, fields, rowActions: rowActions.slice(0, 12) };
+    }, { targetIds: ids });
+    return { ok: true, ...snapshot };
+  } catch (error) {
+    return { ok: false, code: "TRADE_CONTROLS_READ_FAILED", message: error.message, buttons: [], fields: [], rowActions: [] };
+  }
+}
+
 async function selectPositionForSell(page, { symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [], activate = true } = {}) {
   const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
   const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
@@ -575,7 +660,66 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
   }
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false } = {}) {
+async function applyBrowserPlan(page, plan) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  let last = { clicked: false, filled: [] };
+  for (const action of actions) {
+    if (action.type === "accept_agreement") {
+      await page.evaluate(() => {
+        const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
+        const match = nodes.find((node) => /订单商品销售协议|我已同意签署/.test(node.textContent || ""));
+        if (!match) return;
+        const root = match.closest("label") || match.closest(".el-checkbox") || match;
+        const input = root.querySelector?.("input[type='checkbox']") || root.parentElement?.querySelector?.("input[type='checkbox']");
+        if (input && !input.checked) input.click();
+        else if (typeof root.click === "function") root.click();
+      });
+      continue;
+    }
+    const result = await page.evaluate(({ type, label, value }) => {
+      const compact = (text) => String(text || "").replace(/\s+/g, "");
+      const wanted = compact(label);
+      const visible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      if (type === "fill") {
+        const nodes = Array.from(document.querySelectorAll("label, span, div, p, th, td, strong, b"));
+        const match = nodes.find((node) => {
+          const text = compact(node.textContent);
+          return text === wanted || text.startsWith(wanted);
+        });
+        const input = match && (match.closest(".el-form-item, .el-input, li, tr, label, .form-item") || match.parentElement)?.querySelector("input:not([type='checkbox']):not([type='radio']):not([type='hidden'])");
+        if (!input) return { ok: false };
+        const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+        descriptor?.set?.call(input, String(value));
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        return { ok: true, filled: true, label };
+      }
+      const nodes = Array.from(document.querySelectorAll("button, [role='button'], [role='tab'], a, span, div"));
+      const button = nodes.find((node) => {
+        if (!visible(node) || node.disabled) return false;
+        const text = compact(node.textContent);
+        if (!(text === wanted || text.includes(wanted))) return false;
+        return node.matches("button, [role='button'], a, [data-action]") || node.children.length === 0;
+      });
+      if (!button || typeof button.click !== "function") return { ok: false };
+      button.click();
+      return { ok: true, clicked: true, label };
+    }, action);
+    if (result?.filled) last.filled.push(action.label);
+    if (result?.clicked) last = { ...last, clicked: true, ok: true, label: action.label, code: "AI_BROWSER_CLICKED" };
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+  if (last.clicked) {
+    await confirmVisibleTradeDialog(page);
+  }
+  return last;
+}
+
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false, browserPlan = null } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   }
@@ -598,7 +742,11 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     }, { timeout: 8000 }).catch(() => null);
     let filled = { ok: true, filled: Boolean(exitType), submitted: false, fields: [] };
     let clicked = { clicked: false };
-    if (exitType) {
+    if (browserPlan?.actions?.length) {
+      clicked = await applyBrowserPlan(page, browserPlan);
+      if (clicked?.clicked) filled = { ok: true, filled: true, submitted: false, fields: clicked.filled || [] };
+    }
+    if (!clicked?.ok && !clicked?.clicked && exitType) {
       clicked = await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType });
     }
     if (!clicked?.ok && !clicked?.clicked) {
@@ -634,8 +782,8 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     }
     return {
       ok: true,
-      code: response ? "TRADE_SUBMITTED" : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? "POSITION_LIST_EXIT_CLICKED" : "TRADE_CLICKED",
-      message: pageHint || (clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? `已点击持仓列表${clicked.label}` : response ? "已提交交易请求" : "已点击下单按钮"),
+      code: response ? "TRADE_SUBMITTED" : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? "POSITION_LIST_EXIT_CLICKED" : clicked?.code === "AI_BROWSER_CLICKED" ? "AI_BROWSER_CLICKED" : "TRADE_CLICKED",
+      message: pageHint || (clicked?.code === "AI_BROWSER_CLICKED" ? `AI 已点${clicked.label}` : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? `已点击持仓列表${clicked.label}` : response ? "已提交交易请求" : "已点击下单按钮"),
       filled: true,
       submitted: true,
       responseOk,

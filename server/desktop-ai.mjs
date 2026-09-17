@@ -1,4 +1,4 @@
-import { listProviderModels, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider, providerApiKey } from "./provider.mjs";
+import { listProviderModels, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider, providerApiKey } from "./provider.mjs";
 
 const socketsByUser = new Map();
 const pendingCalls = new Map();
@@ -215,6 +215,7 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
 export async function callProviderMethod(method, userId, payload = {}) {
   if (desktopAiRequired() || method === "requestMarketAnalysis") return invokeDesktopAi(userId, method, { ...payload, channel: "ai", requiredCapability: method === "requestMarketAnalysis" ? "browser-v1" : "" });
   if (method === "requestDecision") return requestDecision(payload.provider, payload.context, payload.options);
+  if (method === "requestBrowserActions") return requestBrowserActions(payload.provider, payload.context, payload.options);
   if (method === "requestSegmentReview") return requestSegmentReview(payload.provider, payload.segment, payload.context, payload.options);
   if (method === "verifyProvider") return verifyProvider(payload.provider, payload.options);
   if (method === "listProviderModels") return listProviderModels(payload.provider, payload.options);

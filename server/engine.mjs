@@ -5,6 +5,7 @@ import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedEx
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
+import { normalizeBrowserPlan } from "./tools.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
@@ -73,7 +74,9 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
     fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
+    readTradeControls: use("readTradeControls", (input) => callBrowserMethod("readTradeControls", userId, input)),
     submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, input, options)),
+    requestBrowserActions: use("requestBrowserActions", (provider, context, options) => callProviderMethod("requestBrowserActions", userId, { provider, context, options })),
   };
 }
 
@@ -93,10 +96,9 @@ function pendingTargetLabel(pending) {
 }
 
 function pendingActionLabel(pending) {
-  if (pending?.exitType === "TAKE_PROFIT") return pending?.action === "BUY" ? "止盈回补" : "止盈卖出";
-  if (pending?.exitType === "STOP_LOSS") return pending?.action === "BUY" ? "止损回补" : "止损卖出";
-  if (pending?.action === "BUY") return "买多（涨）";
-  if (pending?.action === "SELL") return "买空（跌）";
+  if (pending?.exitType === "TAKE_PROFIT" || pending?.exitType === "STOP_LOSS") return pending?.action === "BUY" ? "转让回补" : "转让卖出";
+  if (pending?.action === "BUY") return "买涨";
+  if (pending?.action === "SELL") return "买跌";
   return "观望";
 }
 
@@ -520,6 +522,31 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       pendingSubmissionCancels.set(taskId, () => submissionAbort.abort(new Error("TRADE_SUBMIT_CANCELLED")));
       let submitted;
       try {
+        let browserPlan = null;
+        try {
+          const controls = await tools.readTradeControls({
+            sessionId,
+            symbol: task.pendingAction.targetSymbol,
+            symbolName: task.pendingAction.targetSymbolName,
+            instrumentId: task.pendingAction.targetInstrumentId,
+            targetPositionIds: task.pendingAction.targetPositionIds,
+          });
+          if (controls?.ok) {
+            const provider = findProviderForUser(task.providerId, task.ownerUserId);
+            const raw = await tools.requestBrowserActions(provider, {
+              goal: task.pendingAction.exitType ? "EXIT_TRANSFER" : task.pendingAction.action === "SELL" ? "ENTRY_BUY_DOWN" : "ENTRY_BUY_UP",
+              action: task.pendingAction.action,
+              exitType: task.pendingAction.exitType || null,
+              price: task.pendingAction.suggestedPrice,
+              quantity: task.pendingAction.suggestedQty,
+              targetPositionIds: task.pendingAction.targetPositionIds || [],
+              controls,
+              strategy: LIVE_BOARD_STRATEGY,
+            }, { timeoutMs: 20000, signal: submissionAbort.signal });
+            const planned = normalizeBrowserPlan(raw, controls);
+            if (planned.ok) browserPlan = planned;
+          }
+        } catch {}
         submitted = await tools.submitSuggestionForm({
           sessionId,
           confirmationId: task.pendingAction.id,
@@ -533,6 +560,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           orderType: task.pendingAction.orderType,
           targetPositionIds: task.pendingAction.targetPositionIds,
           targetPrice: task.pendingAction.targetPrice,
+          browserPlan,
         }, { signal: submissionAbort.signal });
       } catch (error) {
         if (task.pendingAction?.status === "SUBMITTING") {

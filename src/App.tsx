@@ -117,8 +117,8 @@ const statusMetaLabels: Record<string, string> = Object.fromEntries(Object.entri
 
 const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买多", SELL: "买空", HOLD: "观望" };
-const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买多（涨）", SELL: "建议买空（跌）", HOLD: "保持观望" };
+const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买涨", SELL: "买跌", HOLD: "观望" };
+const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买涨", SELL: "建议买跌", HOLD: "保持观望" };
 const profitSignalLabels: Record<string, string> = { EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
 const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（确认后下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
@@ -199,7 +199,7 @@ const displayLabel = (value: string | null | undefined, labels: Record<string, s
 };
 const displayAction = (value: string | null | undefined) => actionLabels[value as keyof typeof actionLabels] || "待确认";
 const displaySuggestion = (value: string | null | undefined) => actionSuggestionLabels[value as keyof typeof actionSuggestionLabels] || "待确认";
-const exitActionLabel = (action: string, exitType?: string | null) => exitType === "TAKE_PROFIT" ? (action === "BUY" ? "止盈回补" : "止盈卖出") : exitType === "STOP_LOSS" ? (action === "BUY" ? "止损回补" : "止损卖出") : action === "BUY" ? "买多（涨）" : action === "SELL" ? "买空（跌）" : "观望";
+const exitActionLabel = (action: string, exitType?: string | null) => exitType === "TAKE_PROFIT" || exitType === "STOP_LOSS" ? (action === "BUY" ? "转让回补" : "转让卖出") : action === "BUY" ? "买涨" : action === "SELL" ? "买跌" : "观望";
 const operatorLikelihoodLabels: Record<string, string> = { UNKNOWN: "无法判断", LOW: "疑似较低", MEDIUM: "疑似中等", HIGH: "疑似较高" };
 const operatorImpactLabels: Record<string, string> = { LOW: "影响较低", MEDIUM: "需关注", HIGH: "影响较高" };
 const decisionTargetLabel = (value: Pick<Decision, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | Pick<PendingAction, "targetSymbol" | "targetSymbolName" | "targetInstrumentId"> | null | undefined) => value?.targetSymbolName || value?.targetSymbol || value?.targetInstrumentId || "";

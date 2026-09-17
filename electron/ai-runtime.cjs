@@ -59,6 +59,9 @@ async function executeCall(app, message, signal, apiBaseUrl) {
   if (message.method === "requestDecision") {
     return providerApi.requestDecision(provider, message.context || {}, options);
   }
+  if (message.method === "requestBrowserActions") {
+    return providerApi.requestBrowserActions(provider, message.context || {}, options);
+  }
   throw new Error("AI_METHOD_UNKNOWN");
 }
 

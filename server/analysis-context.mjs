@@ -159,6 +159,15 @@ export const DEFAULT_ANALYSIS_TIMEOUT_MS = 50 * 1000;
 
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
+  loop: {
+    summary: "观察→分析数据→给出结果→空仓入场买涨/买跌→继续观察分析→持仓离场转让/卖出。分析、两侧结果、是否入场、是否离场、以及内置浏览器上要点哪些可见控件，都由 AI 完成；主机只采集页面、喂上下文、卡 45% 是否执行，并只点击 AI 点名且当前页可见的按钮。",
+    stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
+    aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
+    hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "GATE_45", "EXECUTE_VISIBLE_CLICKS"],
+    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立" },
+    exit: { whileHolding: true, positionList: ["转让", "止盈", "止损"], formFallback: ["卖出转让", "买入转让"] },
+    noSecondEntryWhileHolding: true,
+  },
   kline: {
     summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，判断必须针对下一根将在第50秒打印的K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
