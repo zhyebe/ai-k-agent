@@ -150,6 +150,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.equal(seen[0].body.model, "claude-custom");
     assert.ok(seen[0].body.system);
     assert.match(seen[0].body.system, />= 0\.45/);
+    assert.match(seen[0].body.system, /MUST be BUY/);
+    assert.match(seen[0].body.system, /both sides are < 0\.45/);
+    assert.match(seen[0].body.system, /treats BUY\/SELL while holding as an exit/);
     assert.match(seen[0].body.system, /can profit/);
     assert.doesNotMatch(seen[0].body.system, /Do not wait for maximum profit/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");

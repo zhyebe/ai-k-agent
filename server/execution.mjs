@@ -63,10 +63,13 @@ export function suggestOrderPreview(task, decision, { enforceAutomationQuantity 
   let suggestedQty = null;
   const positions = Array.isArray(task?.market?.account?.positions) ? task.market.account.positions : [];
   const targetIds = new Set(Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds.map(String) : []);
-  const targetPosition = decision?.exitType && positions.find((position) => {
-    if (targetIds.size && targetIds.has(String(position?.positionOrderId || ""))) return true;
-    return [position?.symbol, position?.symbolName, position?.positionOrderId].some((value) => String(value || "") && normalizedTargetValues(decision).includes(String(value).trim().toLocaleLowerCase()));
-  });
+  const openPositions = positions.filter((position) => Number(position?.quantity) > 0);
+  const targetPosition = decision?.exitType && (
+    openPositions.find((position) => {
+      if (targetIds.size && targetIds.has(String(position?.positionOrderId || ""))) return true;
+      return [position?.symbol, position?.symbolName, position?.positionOrderId].some((value) => String(value || "") && normalizedTargetValues(decision).includes(String(value).trim().toLocaleLowerCase()));
+    }) || openPositions[0]
+  );
   if (decision?.exitType && Number(targetPosition?.quantity) > 0) {
     suggestedQty = Number(targetPosition.quantity);
   } else if (hasPrice && Number.isFinite(equity) && equity > 0 && pct > 0) {

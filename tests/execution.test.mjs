@@ -65,3 +65,22 @@ test("离场预览使用持仓数量并保留止盈类型", () => {
   assert.equal(preview.suggestedQty, 1);
   assert.equal(preview.exitType, "TAKE_PROFIT");
 });
+
+test("离场预览在未精确匹配单号时仍使用持仓数量", () => {
+  const preview = suggestOrderPreview({
+    symbol: "DGKZ",
+    mode: "LIVE",
+    metrics: { equity: 5000 },
+    market: {
+      latest: { price: 1165 },
+      account: { positions: [{ symbol: "DGKZ", quantity: 4 }] },
+    },
+  }, {
+    action: "SELL",
+    exitType: "TAKE_PROFIT",
+    targetSymbol: "DGKZ",
+    profitProbability: 0.8,
+  });
+  assert.equal(preview.suggestedQty, 4);
+  assert.equal(preview.exitType, "TAKE_PROFIT");
+});

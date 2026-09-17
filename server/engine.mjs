@@ -83,11 +83,48 @@ function pendingActionLabel(pending) {
   return "观望";
 }
 
-function openPositionCount(market) {
+function openPositionsFromMarket(market) {
   const positions = Array.isArray(market?.account?.positions)
     ? market.account.positions
     : Array.isArray(market?.positions) ? market.positions : [];
-  return positions.filter((item) => Number(item?.quantity) > 0).length;
+  return positions.filter((item) => Number(item?.quantity) > 0);
+}
+
+function openPositionCount(market) {
+  return openPositionsFromMarket(market).length;
+}
+
+function closingActionForPositions(positions) {
+  const side = String(positions[0]?.side || "");
+  if (/卖|空|short/i.test(side)) return "BUY";
+  return "SELL";
+}
+
+export function attachPositionExit(decision, market = {}) {
+  const positions = openPositionsFromMarket(market);
+  if (!positions.length) return decision;
+  const requestedIds = (Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : []).map(String).filter(Boolean);
+  const targetPositionIds = requestedIds.length
+    ? requestedIds
+    : positions.map((item) => String(item.positionOrderId || "")).filter(Boolean);
+  const primary = positions[0] || {};
+  const targeted = {
+    ...decision,
+    targetPositionIds,
+    targetSymbol: decision?.targetSymbol || primary.symbol || "",
+    targetSymbolName: decision?.targetSymbolName || primary.symbolName || "",
+    targetInstrumentId: decision?.targetInstrumentId || primary.instrumentId || "",
+  };
+  if (targeted.exitType === "TAKE_PROFIT" || targeted.exitType === "STOP_LOSS") {
+    if (targeted.action !== "BUY" && targeted.action !== "SELL") targeted.action = closingActionForPositions(positions);
+    return targeted;
+  }
+  if (targeted.action !== "BUY" && targeted.action !== "SELL") return targeted;
+  return {
+    ...targeted,
+    action: closingActionForPositions(positions),
+    exitType: "TAKE_PROFIT",
+  };
 }
 
 function shouldUseRecentMonitoring(monitorRecentOnly, market) {
@@ -128,9 +165,34 @@ function chosenSideProbability(decision) {
 }
 
 export function meetsOrderBoundary(decision) {
-  if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
+  if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
   return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
+}
+
+function directionalEntryAction(decision) {
+  const bullish = Number(decision?.bullishProfitProbability || 0);
+  const bearish = Number(decision?.bearishProfitProbability || 0);
+  if (bullish < MIN_PROFIT_PROBABILITY && bearish < MIN_PROFIT_PROBABILITY) return "";
+  if (bullish === bearish) return "";
+  if (bullish > bearish && bullish >= MIN_PROFIT_PROBABILITY) return "BUY";
+  if (bearish > bullish && bearish >= MIN_PROFIT_PROBABILITY) return "SELL";
+  return "";
+}
+
+export function applyEntryBoundary(decision, market = {}) {
+  const next = { ...decision };
+  if (next.exitType === "TAKE_PROFIT" || next.exitType === "STOP_LOSS") return next;
+  if (openPositionCount(market) > 0) return next;
+  if (next.action !== "BUY" && next.action !== "SELL") {
+    const entry = directionalEntryAction(next);
+    if (entry) {
+      next.action = entry;
+      next.profitProbability = entry === "BUY" ? Number(next.bullishProfitProbability || 0) : Number(next.bearishProfitProbability || 0);
+    }
+  }
+  next.signalTier = profitSignalTier(chosenSideProbability(next));
+  return next;
 }
 
 export function enforceProfitProbability(decision) {
@@ -242,7 +304,7 @@ async function openPendingAction(task, { runtime, run } = {}) {
     if (filled?.submitted === true) task.pendingAction.formFilled = false;
     task.pendingAction.message = task.pendingAction.formFilled
       ? `${task.pendingAction.message}；${task.pendingAction.exitType ? "目标页已定位持仓并准备执行" : "目标页已填入建议价格/数量"}`
-      : `${task.pendingAction.message}；目标页未找到可操作持仓，建议仍待确认`;
+      : `${task.pendingAction.message}；${task.pendingAction.exitType ? "目标页未找到可操作持仓" : "目标页未找到可填写的下单表单"}，建议仍待确认`;
     if (run) {
       appendAgentOutput({
         taskId: task.id,
@@ -701,6 +763,10 @@ function resumeMonitoringAfterAction(task) {
   if (!monitoringIntent(task) || pauseForPendingAction(task)) return;
   setNextPoll(task, 0);
   persistTask(task);
+  if (!controllerLoops.has(task.id)) {
+    startController(task.id, { userId: task.ownerUserId || "" });
+    return;
+  }
   scheduleController(task.id, 0);
 }
 
@@ -1584,7 +1650,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     assertCurrent();
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
-    decision = bindDecisionToMarket(enforceDecisionLimits(enforceProfitProbability(decision)), market);
+    decision = bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(applyEntryBoundary(enforceProfitProbability(decision), market), market)), market);
     const targetBook = decisionTargetBook(decision, market);
     if (targetBook) qualityIssues = marketQualityIssues(targetBook);
     if (market.boardCoverage?.complete === false) qualityIssues = [...new Set([...qualityIssues, "BOARD_COVERAGE_INCOMPLETE"])];
@@ -1816,11 +1882,14 @@ function scheduleController(taskId, delayMs) {
       entry.running = false;
       if (controllerLoops.get(taskId) !== entry || entry.stopped) return;
       const current = getTask(taskId);
-      if (current && taskGeneration(current) === entry.generation && monitoringIntent(current) && !pauseForPendingAction(current)) {
-        const nextPollAt = new Date(current.nextPollAt || "").getTime();
-        const fallbackDelay = monitoringPollIntervalMs(current);
-        scheduleController(taskId, Number.isFinite(nextPollAt) ? Math.max(0, nextPollAt - Date.now()) : fallbackDelay);
-      } else stopController(taskId);
+      if (!current || taskGeneration(current) !== entry.generation || !monitoringIntent(current)) {
+        stopController(taskId);
+        return;
+      }
+      if (pauseForPendingAction(current)) return;
+      const nextPollAt = new Date(current.nextPollAt || "").getTime();
+      const fallbackDelay = monitoringPollIntervalMs(current);
+      scheduleController(taskId, Number.isFinite(nextPollAt) ? Math.max(0, nextPollAt - Date.now()) : fallbackDelay);
     }
   }, Math.max(0, Number(delayMs) || 0));
 }

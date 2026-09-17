@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
-import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, takeoverPendingAction } from "../server/engine.mjs";
+import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, stopController, takeoverPendingAction } from "../server/engine.mjs";
 import { isForbiddenTradeControl, suggestionFormLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
+
+afterEach(() => {
+  for (const task of state.tasks) stopController(task.id);
+});
 
 function insertTask(id, extras = {}) {
   const task = {
@@ -18,7 +22,7 @@ function insertTask(id, extras = {}) {
     autoDecisionCountdownSec: 8,
     pendingAction: null,
     stopLocked: false,
-    monitoringEnabled: true,
+    monitoringEnabled: false,
     target: { type: "website", name: "浩瀚数贸", url: "https://smyw.haohandahan.cn/client/#/transcc", connectorId: "connector_haohan_readonly", browserSessionId: `task:${id}` },
     workflow: [],
     rules: [],

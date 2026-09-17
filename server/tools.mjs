@@ -376,6 +376,36 @@ async function clickPositionExitControl(page, { symbol = "", symbolName = "", in
   }
 }
 
+async function clickTradeSubmitButton(page, action) {
+  const submitLabel = action === "SELL" ? "卖出转让" : "买入订立";
+  return page.evaluate(({ buttonLabel }) => {
+    const normalize = (value) => String(value || "").replace(/\s+/g, "");
+    function acceptAgreement() {
+      const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
+      const match = nodes.find((node) => /订单商品销售协议|我已同意签署/.test(node.textContent || ""));
+      if (!match) return false;
+      const root = match.closest("label") || match.closest(".el-checkbox") || match;
+      const input = root.querySelector?.("input[type='checkbox']") || root.parentElement?.querySelector?.("input[type='checkbox']");
+      if (input && !input.checked) {
+        input.click();
+        if (typeof root.click === "function") root.click();
+        return true;
+      }
+      if (input?.checked) return true;
+      if (typeof root.click === "function") root.click();
+      return true;
+    }
+    acceptAgreement();
+    const button = Array.from(document.querySelectorAll("button, [role='button'], a")).find((node) => {
+      const text = normalize(node.textContent);
+      return text.includes(normalize(buttonLabel)) && !node.disabled;
+    });
+    if (!button) return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND" };
+    button.click();
+    return { clicked: true, label: normalize(button.textContent) };
+  }, { buttonLabel: submitLabel });
+}
+
 export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false } = {}) {
   if (action !== "BUY" && action !== "SELL") {
     return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
@@ -446,7 +476,6 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };
-  const submitLabel = action === "SELL" ? "卖出转让" : "买入订立";
   try {
     const writeWait = page.waitForResponse((response) => {
       try {
@@ -456,38 +485,17 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       }
     }, { timeout: 12000 }).catch(() => null);
     const exitUsesForm = Boolean(exitType && (orderType === "LIMIT" || filled.fields?.length));
-    const clicked = exitType && !exitUsesForm
+    let clicked = exitType && !exitUsesForm
       ? await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType })
-      : await page.evaluate(({ buttonLabel }) => {
-      const normalize = (value) => String(value || "").replace(/\s+/g, "");
-      function acceptAgreement() {
-        const nodes = Array.from(document.querySelectorAll("label, span, div, p"));
-        const match = nodes.find((node) => /订单商品销售协议|我已同意签署/.test(node.textContent || ""));
-        if (!match) return false;
-        const root = match.closest("label") || match.closest(".el-checkbox") || match;
-        const input = root.querySelector?.("input[type='checkbox']") || root.parentElement?.querySelector?.("input[type='checkbox']");
-        if (input && !input.checked) {
-          input.click();
-          if (typeof root.click === "function") root.click();
-          return true;
-        }
-        if (input?.checked) return true;
-        if (typeof root.click === "function") root.click();
-        return true;
-      }
-      acceptAgreement();
-      const button = Array.from(document.querySelectorAll("button, [role='button'], a")).find((node) => {
-        const text = normalize(node.textContent);
-        return text.includes(normalize(buttonLabel)) && !node.disabled;
-      });
-      if (!button) return { clicked: false, reason: "SUBMIT_BUTTON_NOT_FOUND" };
-      button.click();
-      return { clicked: true, label: normalize(button.textContent) };
-      }, { buttonLabel: submitLabel });
-    if (exitType && !clicked.ok) {
+      : await clickTradeSubmitButton(page, action);
+    if (exitType && !exitUsesForm && !clicked.ok && !clicked.clicked) {
+      clicked = await clickTradeSubmitButton(page, action);
+    }
+    const clickedOk = Boolean(clicked?.ok || clicked?.clicked);
+    if (exitType && !clickedOk) {
       const fallback = await selectPositionForSell(page, { symbol, symbolName, instrumentId, targetPositionIds, activate: true });
       if (!fallback.ok) return { ok: false, code: fallback.code, message: "目标页未找到可操作持仓", filled: true, submitted: false };
-      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到止盈/止损按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
+      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到止盈/止损或卖出离场按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
     }
     if (!exitType && !clicked.clicked) {
       return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: "目标页未找到下单按钮", filled: true, submitted: false };

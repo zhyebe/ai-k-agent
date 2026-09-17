@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -58,14 +58,59 @@ test("模型结论原样保留，主机只判断入场边界", () => {
   assert.equal(meetsOrderBoundary(below), false);
   assert.ok(below.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
 
-  const hold = enforceProfitProbability({
+  const hold = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
     profitProbability: 0.8,
     bullishProfitProbability: 0.8,
     bearishProfitProbability: 0.3,
+  }));
+  assert.equal(hold.action, "BUY");
+  assert.equal(meetsOrderBoundary(hold), true);
+
+  const shortHold = applyEntryBoundary(enforceProfitProbability({
+    action: "HOLD",
+    profitProbability: 0.52,
+    bullishProfitProbability: 0.43,
+    bearishProfitProbability: 0.52,
+  }));
+  assert.equal(shortHold.action, "SELL");
+  assert.equal(meetsOrderBoundary(shortHold), true);
+
+  const noSides = applyEntryBoundary(enforceProfitProbability({
+    action: "HOLD",
+    profitProbability: 0.8,
+  }));
+  assert.equal(noSides.action, "HOLD");
+  assert.equal(meetsOrderBoundary(noSides), false);
+
+  const whileHolding = applyEntryBoundary(enforceProfitProbability({
+    action: "HOLD",
+    profitProbability: 0.52,
+    bullishProfitProbability: 0.43,
+    bearishProfitProbability: 0.52,
+  }), { account: { positions: [{ quantity: 2 }] } });
+  assert.equal(whileHolding.action, "HOLD");
+
+  const closeLong = attachPositionExit({ action: "SELL", profitProbability: 0.6 }, {
+    account: { positions: [{ quantity: 2, positionOrderId: "P-9", symbol: "DGKZ", symbolName: "丹桂康砖（二期）", side: "买" }] },
   });
-  assert.equal(hold.action, "HOLD");
-  assert.equal(meetsOrderBoundary(hold), false);
+  assert.equal(closeLong.action, "SELL");
+  assert.equal(closeLong.exitType, "TAKE_PROFIT");
+  assert.deepEqual(closeLong.targetPositionIds, ["P-9"]);
+  assert.equal(closeLong.targetSymbol, "DGKZ");
+  assert.equal(meetsOrderBoundary(closeLong), true);
+
+  const coverShort = attachPositionExit({ action: "SELL", profitProbability: 0.6 }, {
+    account: { positions: [{ quantity: 1, positionOrderId: "P-8", side: "卖" }] },
+  });
+  assert.equal(coverShort.action, "BUY");
+  assert.equal(coverShort.exitType, "TAKE_PROFIT");
+
+  const stay = attachPositionExit({ action: "HOLD", profitProbability: 0.52, bullishProfitProbability: 0.43, bearishProfitProbability: 0.52 }, {
+    account: { positions: [{ quantity: 2, positionOrderId: "P-9", side: "买" }] },
+  });
+  assert.equal(stay.action, "HOLD");
+  assert.equal(stay.exitType || null, null);
 
   const exit = enforceProfitProbability({
     action: "SELL",
@@ -746,5 +791,129 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     state.providers = state.providers.filter((item) => item.id !== providerId);
     if (previousThreshold === undefined) delete process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES;
     else process.env.ANALYSIS_DIRECT_CONTEXT_MAX_BYTES = previousThreshold;
+  }
+});
+
+test("空仓方向概率达到45%会提示进场，确认后继续监控，持仓买卖按离场处理", async () => {
+  const taskId = `task_entry_exit_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  task.mode = "PAPER";
+  const empty = testMarketSnapshot("entry-loop", 100);
+  empty.account = { ...(empty.account || {}), positions: [] };
+  const holding = testMarketSnapshot("exit-loop", 101);
+  holding.account = {
+    ...(holding.account || {}),
+    positions: [{ symbol: "BTC/USDT", symbolName: "测试品种", quantity: 2, positionOrderId: "P-9", side: "买" }],
+  };
+  let round = 0;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false, fields: ["卖价", "卖量"] }),
+    observeMarket: async () => (round === 0 ? empty : holding),
+    requestDecision: async (_provider, context) => {
+      if (round === 0) {
+        return {
+          action: "HOLD",
+          confidence: 0.52,
+          profitProbability: 0.52,
+          bullishProfitProbability: 0.43,
+          bearishProfitProbability: 0.52,
+          targetPositionPct: 10,
+          maxOrderValuePct: 4,
+          evidenceIds: [context.evidenceIds[0]],
+          riskFlags: [],
+          decisionTtlSec: 300,
+        };
+      }
+      return {
+        action: "SELL",
+        confidence: 0.6,
+        profitProbability: 0.6,
+        bullishProfitProbability: 0.3,
+        bearishProfitProbability: 0.6,
+        evidenceIds: [context.evidenceIds[0]],
+        riskFlags: [],
+        decisionTtlSec: 300,
+      };
+    },
+  };
+  try {
+    const entry = await runMonitoringCycle(taskId, { runtime });
+    assert.equal(entry.analysisTriggered, true);
+    assert.equal(task.decision.action, "SELL");
+    assert.equal(task.decision.exitType || null, null);
+    assert.equal(task.pendingAction?.status, "WAITING");
+    assert.equal(task.pendingAction?.action, "SELL");
+    assert.equal(task.pendingAction?.exitType || null, null);
+
+    startController(taskId, {
+      runCycle: async () => {
+        task.nextPollAt = new Date(Date.now() + 60_000).toISOString();
+        return { task };
+      },
+    });
+    const confirmed = await confirmPendingAction(taskId);
+    assert.equal(confirmed.pendingAction.status, "CONFIRMED");
+    stopController(taskId);
+
+    round = 1;
+    const exit = await runMonitoringCycle(taskId, { runtime });
+    assert.equal(exit.analysisTriggered, true);
+    assert.equal(task.decision.action, "SELL");
+    assert.equal(task.decision.exitType, "TAKE_PROFIT");
+    assert.deepEqual(task.decision.targetPositionIds, ["P-9"]);
+    assert.equal(task.pendingAction?.status, "WAITING");
+    assert.equal(task.pendingAction?.exitType, "TAKE_PROFIT");
+    assert.equal(task.pendingAction?.suggestedQty, 2);
+  } finally {
+    stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("等待确认时不拆掉监控循环，确认后立即继续", async () => {
+  const taskId = `task_resume_after_confirm_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.stopLocked = false;
+  task.mode = "PAPER";
+  task.decision = {
+    action: "BUY",
+    confidence: 0.8,
+    profitProbability: 0.8,
+    bullishProfitProbability: 0.8,
+    bearishProfitProbability: 0.2,
+    targetPositionPct: 10,
+    maxOrderValuePct: 4,
+    reasonCodes: [],
+    evidenceIds: [],
+    riskFlags: [],
+    createdAt: new Date().toISOString(),
+    ttlSec: 300,
+  };
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let cycles = 0;
+  try {
+    startController(taskId, {
+      runCycle: async () => {
+        cycles += 1;
+        task.nextPollAt = new Date(Date.now() + 20).toISOString();
+        return { task };
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(cycles, 1);
+    const confirmed = await confirmPendingAction(taskId);
+    assert.equal(confirmed.pendingAction.status, "CONFIRMED");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(cycles >= 2, `expected monitoring to resume after confirm, got ${cycles}`);
+  } finally {
+    stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
   }
 });
