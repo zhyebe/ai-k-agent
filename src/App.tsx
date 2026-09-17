@@ -711,7 +711,9 @@ function App() {
   }
 
   async function handleSelectMarket(selection: { symbol: string; symbolName?: string; instrumentId?: string }) {
-    if (!task || !selection.symbol || (selection.symbol === (task.target.selectedSymbol || task.symbol) && String(selection.instrumentId || "") === String(task.target.selectedInstrumentId || ""))) return;
+    const nextSymbol = String(selection.symbol || selection.instrumentId || selection.symbolName || "").trim();
+    if (!task || !nextSymbol) return;
+    if (nextSymbol === (task.target.selectedSymbol || task.symbol) && String(selection.instrumentId || "") === String(task.target.selectedInstrumentId || "") && String(selection.symbolName || "") === String(task.target.selectedSymbolName || "")) return;
     setBusyAction("market-selection");
     try {
       const next = await setTaskMarketSelection(task.id, selection);
@@ -1108,6 +1110,22 @@ const profitProbabilityLabel = (value: number) => {
   return label.endsWith(".0") ? label.slice(0, -2) : label;
 };
 
+type BoardIdentity = { instrumentId?: string | null; symbol?: string; symbolName?: string };
+
+function boardTokens(book: BoardIdentity | null | undefined) {
+  return [book?.instrumentId, book?.symbol, book?.symbolName].map((value) => String(value || "").trim().toLowerCase().replace(/[\s_./\\-]+/g, "")).filter(Boolean);
+}
+
+function sameBoard(left: BoardIdentity | null | undefined, right: BoardIdentity | null | undefined) {
+  const leftTokens = boardTokens(left);
+  const rightTokens = boardTokens(right);
+  return Boolean(leftTokens.length && rightTokens.length && leftTokens.some((token) => rightTokens.includes(token)));
+}
+
+function boardLabel(book: BoardIdentity | null | undefined, fallback = "") {
+  return String(book?.symbolName || book?.symbol || book?.instrumentId || fallback);
+}
+
 function CandleChart({ candles }: { candles: MarketCandle[] }) {
   const complete = candles.filter((candle) => [candle.open, candle.high, candle.low, candle.close].every((value) => typeof value === "number" && Number.isFinite(value) && value > 0));
   const visible = complete.slice(-120);
@@ -1150,26 +1168,24 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
   const books = market?.books?.length ? market.books : market ? [market] : [];
   const boardOptions = market?.availableBoards?.length ? market.availableBoards : books;
   const missingBoards = market?.boardCoverage?.missing || [];
-  const boardKey = (book: { instrumentId?: string | null; symbol?: string; symbolName?: string } | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
-  const matchesBook = (book: { instrumentId?: string | null; symbol?: string; symbolName?: string } | null | undefined, selected: string) => {
-    if (!book || !selected) return false;
-    return [boardKey(book), book.symbol, book.instrumentId, book.symbolName].some((value) => String(value || "") === selected);
-  };
-  const [selectedSymbol, setSelectedSymbol] = useState(task.target.selectedSymbol || boardKey(market) || task.symbol);
+  const boardKey = (book: BoardIdentity | null | undefined) => book ? `${book.instrumentId || ""}|${book.symbol || ""}|${book.symbolName || ""}` : "";
+  const taskSelection: BoardIdentity = { symbol: task.target.selectedSymbol || task.symbol, symbolName: task.target.selectedSymbolName, instrumentId: task.target.selectedInstrumentId };
+  const [selectedBoard, setSelectedBoard] = useState<BoardIdentity>(taskSelection);
   const [selectedTimeframe, setSelectedTimeframe] = useState(task.timeframe);
-  useEffect(() => setSelectedSymbol(task.target.selectedSymbol || task.symbol), [task.target.selectedSymbol, task.symbol]);
+  useEffect(() => setSelectedBoard({ symbol: task.target.selectedSymbol || task.symbol, symbolName: task.target.selectedSymbolName, instrumentId: task.target.selectedInstrumentId }), [task.target.selectedSymbol, task.target.selectedSymbolName, task.target.selectedInstrumentId, task.symbol]);
   useEffect(() => setSelectedTimeframe(task.timeframe), [task.timeframe]);
-  const selectedBook = books.find((book) => matchesBook(book, selectedSymbol)) || books[0] || market;
-  const timeframes = selectedBook?.timeframes || market?.timeframes || {};
+  const selectedOption = boardOptions.find((book) => sameBoard(book, selectedBoard)) || books.find((book) => sameBoard(book, selectedBoard)) || selectedBoard;
+  const selectedBook = books.find((book) => sameBoard(book, selectedOption)) || (sameBoard(market, selectedOption) ? market : undefined);
+  const timeframes = selectedBook?.timeframes || {};
   const timeframeKeys = Object.keys(timeframes).length ? Object.keys(timeframes) : [task.timeframe];
   const selected: MarketTimeframe | null = timeframes[selectedTimeframe] || timeframes[task.timeframe] || null;
-  const candles = selected?.history || selectedBook?.history || market?.history || [];
-  const price = selectedBook?.latest?.price ?? market?.latest?.price;
-  const change = selectedBook?.changePct ?? market?.changePct;
-  const indicators = selected?.indicators || selectedBook?.indicators || market?.indicators;
+  const candles = selected?.history || selectedBook?.history || [];
+  const price = selectedBook?.latest?.price;
+  const change = selectedBook?.changePct;
+  const indicators = selected?.indicators || selectedBook?.indicators;
   const indicatorNumber = (key: string) => typeof indicators?.[key as keyof typeof indicators] === "number" ? indicators[key as keyof typeof indicators] as number : null;
-  const quality = selectedBook?.dataQuality || market?.dataQuality || "未知";
-  const title = selectedBook?.symbolName || selectedBook?.symbol || task.symbol;
+  const quality = selectedBook?.dataQuality || "未知";
+  const title = boardLabel(selectedOption, task.symbol);
   return (
     <section className="panel market-panel">
       <div className="panel-header">
@@ -1189,7 +1205,7 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
       </div>
       {boardOptions.length + missingBoards.length > 1 ? (
         <div className="market-timeframe-tabs" role="tablist" aria-label="监测盘口">
-          {boardOptions.map((book) => <button type="button" role="tab" aria-selected={matchesBook(book, selectedSymbol)} className={matchesBook(book, selectedSymbol) ? "active" : ""} key={boardKey(book)} disabled={busyAction !== null} onClick={() => { setSelectedSymbol(boardKey(book)); setSelectedTimeframe(task.timeframe); onSelectMarket({ symbol: book.symbol || book.instrumentId || "", symbolName: book.symbolName, instrumentId: book.instrumentId || "" }); }}>{book.symbolName || book.symbol || book.instrumentId}</button>)}
+          {boardOptions.map((book) => <button type="button" role="tab" aria-selected={sameBoard(book, selectedOption)} className={sameBoard(book, selectedOption) ? "active" : ""} key={boardKey(book)} disabled={busyAction !== null} onClick={() => { const collected = books.find((item) => sameBoard(item, book)) || book; const next = { symbol: collected.symbol || book.symbol || collected.instrumentId || book.instrumentId || collected.symbolName || book.symbolName || "", symbolName: collected.symbolName || book.symbolName, instrumentId: collected.instrumentId || book.instrumentId || "" }; setSelectedBoard(next); setSelectedTimeframe(task.timeframe); onSelectMarket(next); }}>{boardLabel(book)}</button>)}
           {missingBoards.map((book) => <button type="button" disabled className="missing-board" key={`missing-${book.instrumentId || book.symbol || book.symbolName}`}>{book.symbolName || book.symbol || book.instrumentId} · 未采集</button>)}
         </div>
       ) : null}
@@ -1199,10 +1215,10 @@ function MarketPanel({ task, onSelectMarket, busyAction }: { task: Task; onSelec
       <CandleChart candles={candles} />
       {browserError && <p role="alert" className="browser-error">{browserError}</p>}
       <div className="chart-summary">
-        <span>{selected?.historyCount || selectedBook?.historyCount || market?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span>
-        <span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || market?.completeHistoryCount || 0}</span>
-        <span>分时 {selectedBook?.ticks?.length || market?.ticks?.length || 0} 条</span>
-        <span>趋势 {displayLabel(selected?.trend || selectedBook?.trend || market?.trend, trendLabels, "未知")}</span>
+        <span>{selected?.historyCount || selectedBook?.historyCount || 0} 根 {selected?.label || timeframeLabels[selectedTimeframe] || selectedTimeframe} K 线</span>
+        <span>完整 OHLC {selected?.completeHistoryCount || selectedBook?.completeHistoryCount || 0}</span>
+        <span>分时 {selectedBook?.ticks?.length || 0} 条</span>
+        <span>趋势 {displayLabel(selected?.trend || selectedBook?.trend, trendLabels, "未知")}</span>
       </div>
       <div className="indicator-row">
         <Indicator label="EMA 20" value={marketNumber(indicatorNumber("ema20"))} tone="blue" />

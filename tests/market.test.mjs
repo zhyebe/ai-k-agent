@@ -391,6 +391,7 @@ test("页面下拉的多个盘口会匹配只读合约并全部纳入监测", ()
   assert.equal(boards[0].instrumentId, "536");
   assert.equal(boards[1].symbol, "DGKZ");
   assert.equal(pickPrimaryBoard(boards.map((board) => ({ symbol: board.symbol, symbolName: board.symbolName })), { pageSymbol: "DGKZ" }).symbol, "DGKZ");
+  assert.equal(pickPrimaryBoard(boards.map((board) => ({ symbol: board.symbol, symbolName: board.symbolName })), { configuredSymbol: "DGJJ", pageSymbol: "DGKZ" }).symbol, "DGJJ");
 });
 
 test("单盘口模式只解析选中盘口，避免为未选盘口请求历史数据", () => {

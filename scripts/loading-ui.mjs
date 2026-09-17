@@ -204,6 +204,58 @@ test("admin failure offers retry without false zero counts", async (t) => {
   await page.getByRole("button", { name: "创建用户", exact: true }).waitFor();
 });
 
+test("switching board tabs updates the market title immediately", async (t) => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  const task = sample.tasks[0];
+  const kang = {
+    symbol: "DGKZ",
+    symbolName: "丹桂康砖（二期）",
+    instrumentId: "537",
+    latest: { price: 1181 },
+    changePct: -0.08,
+    history: [],
+    ticks: [],
+    timeframes: {},
+    indicators: {},
+    dataQuality: "VERIFIED",
+    source: "haohan",
+    timeframe: "1m",
+    historyCount: 0,
+    completeHistoryCount: 0,
+    trend: "unknown",
+    anomaly: false,
+    freshnessSec: 0,
+    evidenceId: "m-kz",
+    observedAt: "2026-09-17T03:00:00.000Z",
+  };
+  task.symbol = "DGKZ";
+  task.target.selectedSymbol = "DGKZ";
+  task.target.selectedSymbolName = "丹桂康砖（二期）";
+  task.market = {
+    ...kang,
+    books: [kang],
+    availableBoards: [
+      { symbolName: "丹桂金尖（二期）" },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537" },
+    ],
+    expectedBookCount: 2,
+  };
+  await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+  await page.route("**/api/tasks/*/market-selection", async (route) => {
+    const body = route.request().postDataJSON();
+    task.symbol = body.symbol || body.instrumentId || body.symbolName;
+    task.target.selectedSymbol = task.symbol;
+    task.target.selectedSymbolName = body.symbolName || "";
+    task.target.selectedInstrumentId = body.instrumentId || "";
+    await route.fulfill({ json: { task } });
+  });
+  await navigate();
+  await page.getByRole("heading", { name: "丹桂康砖（二期）", exact: true }).waitFor();
+  await page.getByRole("tab", { name: "丹桂金尖（二期）" }).click();
+  await page.getByRole("heading", { name: "丹桂金尖（二期）", exact: true }).waitFor();
+});
+
 test("Agent output shows loading, scoped failure and successful empty state", async (t) => {
   const { page, navigate } = await openPage(t);
   let gate = deferred();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { bindDecisionToMarket, buildDecisionContext, buildPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -261,6 +261,19 @@ function insertNorthstarTask(id) {
   state.tasks.unshift(task);
   return task;
 }
+
+test("切换监测盘口可用盘名，不必先有代码", () => {
+  const taskId = `task_board_name_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.ownerUserId = "user_1";
+  task.symbol = "DGKZ";
+  task.target.selectedSymbol = "DGKZ";
+  task.target.selectedSymbolName = "丹桂康砖（二期）";
+  const next = setTaskMarketSelection(taskId, { symbolName: "丹桂金尖（二期）" }, "user_1");
+  assert.equal(next.symbol, "丹桂金尖（二期）");
+  assert.equal(next.target.selectedSymbol, "丹桂金尖（二期）");
+  assert.equal(next.target.selectedSymbolName, "丹桂金尖（二期）");
+});
 
 async function withDisallowedDemoDomain(run) {
   const previous = process.env.BROWSER_ALLOWED_DOMAINS;

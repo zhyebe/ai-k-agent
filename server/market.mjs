@@ -679,14 +679,22 @@ export function resolveBoardInstruments({ pageInstruments = [], marketDetails = 
     result = fallback.symbol || fallback.symbolName || fallback.instrumentId ? [fallback] : [];
   }
   if (!selectedOnly) return result;
-  const target = pageList[0] || normalizePageInstrument(current) || { symbol: configuredSymbol };
+  const selected = { symbol: configuredSymbol, symbolName: "", instrumentId: "" };
+  const matched = configuredSymbol ? result.filter((item) => samePageInstrument(item, selected)) : [];
+  if (matched.length) return matched;
+  const target = pageList[0] || normalizePageInstrument(current) || selected;
   return result.filter((item) => samePageInstrument(item, target));
 }
 
 export function pickPrimaryBoard(books = [], { configuredSymbol = "", pageSymbol = "" } = {}) {
   if (!Array.isArray(books) || !books.length) return null;
-  const prefer = [pageSymbol, configuredSymbol].map((value) => normalize(value)).filter(Boolean);
-  return books.find((book) => prefer.includes(normalize(book.symbol)) || prefer.includes(normalize(book.symbolName))) || books[0];
+  const prefer = [configuredSymbol, pageSymbol].map((value) => normalize(value)).filter(Boolean);
+  const matches = (book, token) => [book?.symbol, book?.symbolName, book?.instrumentId].some((value) => normalize(value) === token);
+  for (const token of prefer) {
+    const found = books.find((book) => matches(book, token));
+    if (found) return found;
+  }
+  return books[0];
 }
 
 export function boardCoverageForTargets(targets = [], books = []) {
@@ -1287,7 +1295,10 @@ export async function observeMarket(task, connector) {
   if (!mergedBooks.length && parsed.ok) {
     mergedBooks.push(enrichReadOnlyMarket({ ...parsed, page, raw: { page }, books: [] }));
   }
-  const primary = pickPrimaryBoard(mergedBooks, { configuredSymbol, pageSymbol: pageInstrument.symbol || parsed.symbol }) || mergedBooks[0];
+  const primary = pickPrimaryBoard(mergedBooks, {
+    configuredSymbol: selectedTarget.symbol || selectedTarget.symbolName || selectedTarget.instrumentId || configuredSymbol,
+    pageSymbol: pageInstrument.symbol || pageInstrument.symbolName || parsed.symbol,
+  }) || mergedBooks[0];
   if (!primary) {
     return { ok: false, code: apiBoard.code || parsed.code || "MARKET_UNAVAILABLE", message: apiBoard.message || parsed.message || "无法读取目标只读行情" };
   }

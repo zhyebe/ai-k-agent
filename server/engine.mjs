@@ -336,7 +336,7 @@ export function setTaskMarketSelection(taskId, selection = {}, userId = "") {
   if (!task) throw new Error("TASK_NOT_FOUND");
   const ownerUserId = String(task.ownerUserId || userId || "");
   if (!ownerUserId || (userId && String(userId) !== ownerUserId)) throw new Error("TASK_ACCESS_DENIED");
-  const symbol = String(selection.symbol || selection.instrumentId || "").trim().slice(0, 64);
+  const symbol = String(selection.symbol || selection.instrumentId || selection.symbolName || "").trim().slice(0, 64);
   if (!symbol) throw new Error("MARKET_SYMBOL_REQUIRED");
   const wasMonitoring = monitoringIntent(task);
   if (wasMonitoring) stopController(task.id);
