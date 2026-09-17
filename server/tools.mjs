@@ -330,6 +330,21 @@ export function tradeSubmitLabels({ action, exitType } = {}) {
   return action === "SELL" ? ["卖出订立", "卖订立"] : ["买入订立", "买订立"];
 }
 
+export function positionListExitLabels({ exitType } = {}) {
+  if (exitType === "STOP_LOSS") return ["止损", "转让"];
+  if (exitType === "TAKE_PROFIT") return ["止盈", "转让"];
+  return ["转让"];
+}
+
+export function isPositionListExitControlText(text, label) {
+  const compact = String(text || "").replace(/\s+/g, "");
+  const wanted = String(label || "").replace(/\s+/g, "");
+  if (!compact || !wanted) return false;
+  if (compact === wanted) return true;
+  if ((wanted === "止盈" || wanted === "止损") && compact.replace(/[|/]/g, "") === "止盈止损") return true;
+  return false;
+}
+
 export function isTradeWriteResponse(url, method) {
   if (String(method || "GET").toUpperCase() === "GET") return false;
   return /intraday-trade|position|holding|warehouse|trade|order|entrust|bargain|deal|transfer|inventory|submit|委托|转让|订立/i.test(String(url || ""));
@@ -363,14 +378,50 @@ async function selectPositionForSell(page, { symbol = "", symbolName = "", instr
   }
 }
 
+async function confirmVisibleTradeDialog(page) {
+  try {
+    return await page.evaluate(() => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, "");
+      const visible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const boxes = Array.from(document.querySelectorAll(".el-message-box, .el-dialog, .el-overlay-dialog, [role='dialog']")).filter(visible);
+      for (const box of boxes) {
+        if (!/转让|止盈|止损|确认|下单|平仓/.test(normalize(box.textContent))) continue;
+        const button = Array.from(box.querySelectorAll("button, [role='button']")).find((node) => {
+          const label = normalize(node.textContent);
+          return visible(node) && /确定|确认|是的|转让/.test(label) && !/取消/.test(label) && !node.disabled;
+        });
+        if (button) {
+          button.click();
+          return { ok: true, label: normalize(button.textContent) };
+        }
+      }
+      return { ok: false };
+    });
+  } catch {
+    return { ok: false };
+  }
+}
+
 async function clickPositionExitControl(page, { symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [], exitType = "" } = {}) {
   const values = [symbol, symbolName, instrumentId].map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
   const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
-  const controlText = exitType === "STOP_LOSS" ? "止损" : exitType === "TAKE_PROFIT" ? "止盈" : "";
-  if (!controlText || (!values.length && !ids.length)) return { ok: false, code: "EXIT_TARGET_MISSING" };
+  const labels = positionListExitLabels({ exitType });
+  if ((!values.length && !ids.length) || !labels.length) return { ok: false, clicked: false, code: "EXIT_TARGET_MISSING" };
   try {
-    return await page.evaluate(({ targetValues, targetIds, label }) => {
-      const normalize = (value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+    const result = await page.evaluate(({ targetValues, targetIds, buttonLabels }) => {
+      const compactText = (value) => String(value || "").replace(/\s+/g, "");
+      const rowKey = (value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      function matchesLabel(text, label) {
+        const compact = compactText(text);
+        const wanted = compactText(label);
+        if (!compact || !wanted) return false;
+        if (compact === wanted) return true;
+        return (wanted === "止盈" || wanted === "止损") && compact.replace(/[|/]/g, "") === "止盈止损";
+      }
       const visible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -378,20 +429,30 @@ async function clickPositionExitControl(page, { symbol = "", symbolName = "", in
       };
       const rows = Array.from(document.querySelectorAll("tr, [role='row'], .el-table__row, li, .position-row")).filter(visible);
       const matches = rows.filter((row) => {
-        const text = normalize(row.textContent);
+        const text = rowKey(row.textContent);
         return text && (targetIds.some((value) => text.includes(value)) || targetValues.some((value) => text.includes(value)));
       }).filter((row, _, list) => !list.some((other) => other !== row && other.contains(row)));
-      let clicked = 0;
+      if (!matches.length) return { ok: false, clicked: false, code: "SELL_POSITION_NOT_FOUND", selectedCount: 0 };
       for (const row of matches) {
-        const controls = Array.from(row.querySelectorAll("button, [role='button'], a, [data-action], span, div"));
-        const control = controls.find((node) => visible(node) && normalize(node.textContent).includes(label)
-          && (node.matches("button, [role='button'], a, [data-action]") || node.children.length === 0));
-        if (control && typeof control.click === "function") { control.click(); clicked += 1; }
+        const nodes = Array.from(row.querySelectorAll("button, [role='button'], a, [data-action], span, div"));
+        for (const label of buttonLabels) {
+          const control = nodes.find((node) => visible(node) && !node.disabled && matchesLabel(node.textContent, label)
+            && (node.matches("button, [role='button'], a, [data-action]") || node.children.length === 0));
+          if (control && typeof control.click === "function") {
+            control.click();
+            return { ok: true, clicked: true, label, code: "POSITION_LIST_EXIT_CLICKED", selectedCount: matches.length };
+          }
+        }
       }
-      return { ok: clicked > 0, code: clicked > 0 ? "EXIT_CONTROL_CLICKED" : "EXIT_CONTROL_NOT_FOUND", selectedCount: matches.length, clickedCount: clicked };
-    }, { targetValues: values, targetIds: ids, label: controlText });
+      return { ok: false, clicked: false, code: "POSITION_LIST_EXIT_NOT_FOUND", selectedCount: matches.length, tried: buttonLabels };
+    }, { targetValues: values, targetIds: ids, buttonLabels: labels });
+    if (result.ok) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await confirmVisibleTradeDialog(page);
+    }
+    return result;
   } catch (error) {
-    return { ok: false, code: "EXIT_CONTROL_CLICK_FAILED", message: error.message };
+    return { ok: false, clicked: false, code: "EXIT_CONTROL_CLICK_FAILED", message: error.message };
   }
 }
 
@@ -521,12 +582,12 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
-  const filled = formAlreadyFilled
-    ? { ok: true, filled: true, submitted: false, fields: [suggestionFormLabels(action, { exitType }).price, suggestionFormLabels(action, { exitType }).quantity], positionSelection: { ok: true, code: "FORM_ALREADY_FILLED" } }
-    : await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, orderType, targetPositionIds });
-  if (!filled.ok) return { ...filled, submitted: false };
   const page = await getBrowserPage(sessionId);
-  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: filled.filled, submitted: false };
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false };
+  if (symbol || symbolName || instrumentId) {
+    const selected = await selectPageBoardInstrument(sessionId, { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") });
+    if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false };
+  }
   try {
     const writeWait = page.waitForResponse((response) => {
       try {
@@ -535,15 +596,25 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
         return false;
       }
     }, { timeout: 8000 }).catch(() => null);
-    let clicked = await clickTradeSubmitButton(page, { action, exitType });
-    if (exitType && !clicked.clicked) {
+    let filled = { ok: true, filled: Boolean(exitType), submitted: false, fields: [] };
+    let clicked = { clicked: false };
+    if (exitType) {
       clicked = await clickPositionExitControl(page, { symbol, symbolName, instrumentId, targetPositionIds, exitType });
+    }
+    if (!clicked?.ok && !clicked?.clicked) {
+      filled = formAlreadyFilled
+        ? { ok: true, filled: true, submitted: false, fields: [suggestionFormLabels(action, { exitType }).price, suggestionFormLabels(action, { exitType }).quantity], positionSelection: { ok: true, code: "FORM_ALREADY_FILLED" } }
+        : await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, exitType, orderType, targetPositionIds });
+      if (!filled.ok) return { ...filled, submitted: false };
+      clicked = await clickTradeSubmitButton(page, { action, exitType });
+      if (clicked?.clicked) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await confirmVisibleTradeDialog(page);
+      }
     }
     const clickedOk = Boolean(clicked?.ok || clicked?.clicked);
     if (exitType && !clickedOk) {
-      const fallback = await selectPositionForSell(page, { symbol, symbolName, instrumentId, targetPositionIds, activate: true });
-      if (!fallback.ok) return { ok: false, code: fallback.code, message: "目标页未找到可操作持仓", filled: true, submitted: false };
-      return { ok: false, code: "EXIT_CONTROL_NOT_FOUND", message: "已定位持仓，但目标页未找到转让离场或止盈/止损按钮", filled: true, submitted: false, selectedCount: fallback.selectedCount };
+      return { ok: false, code: clicked?.code || "EXIT_CONTROL_NOT_FOUND", message: "持仓列表未找到转让/止盈/止损，转让区也未找到卖出转让或买入转让", filled: filled.filled, submitted: false };
     }
     if (!exitType && !clicked.clicked) {
       return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: action === "SELL" ? "目标页未找到卖出订立按钮" : "目标页未找到买入订立按钮", filled: true, submitted: false };
@@ -563,8 +634,8 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     }
     return {
       ok: true,
-      code: response ? "TRADE_SUBMITTED" : "TRADE_CLICKED",
-      message: pageHint || (response ? "已提交交易请求" : "已点击下单按钮"),
+      code: response ? "TRADE_SUBMITTED" : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? "POSITION_LIST_EXIT_CLICKED" : "TRADE_CLICKED",
+      message: pageHint || (clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? `已点击持仓列表${clicked.label}` : response ? "已提交交易请求" : "已点击下单按钮"),
       filled: true,
       submitted: true,
       responseOk,

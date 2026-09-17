@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
 import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, stopController, takeoverPendingAction } from "../server/engine.mjs";
-import { isForbiddenTradeControl, isTradeWriteResponse, suggestionFormLabels, tradePaneLabel, tradeSubmitLabels } from "../server/tools.mjs";
+import { isForbiddenTradeControl, isPositionListExitControlText, isTradeWriteResponse, positionListExitLabels, suggestionFormLabels, tradePaneLabel, tradeSubmitLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
 
 afterEach(() => {
@@ -60,6 +60,12 @@ test("forbidden trade controls stay blocked for submit labels", () => {
   assert.deepEqual(tradeSubmitLabels({ action: "SELL" }), ["卖出订立", "卖订立"]);
   assert.deepEqual(tradeSubmitLabels({ action: "SELL", exitType: "TAKE_PROFIT" }), ["卖出转让", "卖转让"]);
   assert.deepEqual(tradeSubmitLabels({ action: "BUY", exitType: "STOP_LOSS" }), ["买入转让", "买转让"]);
+  assert.deepEqual(positionListExitLabels({ exitType: "TAKE_PROFIT" }), ["止盈", "转让"]);
+  assert.deepEqual(positionListExitLabels({ exitType: "STOP_LOSS" }), ["止损", "转让"]);
+  assert.deepEqual(positionListExitLabels({}), ["转让"]);
+  assert.equal(isPositionListExitControlText("转让", "转让"), true);
+  assert.equal(isPositionListExitControlText("止盈 | 止损", "止盈"), true);
+  assert.equal(isPositionListExitControlText("止盈价", "止盈"), false);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/qtfront_tq/intraday-trade", "POST"), true);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/client/#/transcc", "GET"), false);
 });
@@ -192,7 +198,7 @@ test("live exit submits 转让 with position ids", async () => {
     runtime: {
       submitSuggestionForm: async (input) => {
         submittedInput = input;
-        return { ok: true, submitted: true, code: "TRADE_CLICKED", message: "已点击卖出转让" };
+        return { ok: true, submitted: true, code: "POSITION_LIST_EXIT_CLICKED", message: "已点击持仓列表止盈" };
       },
     },
   });
