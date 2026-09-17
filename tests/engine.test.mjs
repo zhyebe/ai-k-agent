@@ -32,7 +32,7 @@ test("获利概率分档：大于等于 45% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
-test("模型结论原样保留，主机只判断入场边界", () => {
+test("模型概率原样保留，主机按两侧概率统一方向并判断入场边界", () => {
   const kept = enforceProfitProbability({
     action: "BUY",
     profitProbability: "45%",
@@ -75,6 +75,27 @@ test("模型结论原样保留，主机只判断入场边界", () => {
   }));
   assert.equal(shortHold.action, "SELL");
   assert.equal(meetsOrderBoundary(shortHold), true);
+
+  const conflictingAction = applyEntryBoundary(enforceProfitProbability({
+    action: "BUY",
+    profitProbability: 0.41,
+    bullishProfitProbability: 0.41,
+    bearishProfitProbability: 0.53,
+    riskFlags: ["LOW_PROFIT_PROBABILITY"],
+  }));
+  assert.equal(conflictingAction.action, "SELL");
+  assert.equal(conflictingAction.profitProbability, 0.53);
+  assert.equal(meetsOrderBoundary(conflictingAction), true);
+  assert.equal(conflictingAction.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
+
+  const belowBothSides = applyEntryBoundary(enforceProfitProbability({
+    action: "SELL",
+    profitProbability: 0.44,
+    bullishProfitProbability: 0.41,
+    bearishProfitProbability: 0.44,
+  }));
+  assert.equal(belowBothSides.action, "HOLD");
+  assert.equal(meetsOrderBoundary(belowBothSides), false);
 
   const noSides = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
@@ -197,6 +218,19 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   assert.equal(targeted.action, "BUY");
   assert.equal(targeted.targetSymbolName, "丹桂康砖（二期）");
   assert.equal(targeted.targetInstrumentId, "537");
+
+  const probabilityTargeted = bindDecisionToMarket({
+    action: "SELL",
+    bullishProfitProbability: 0.41,
+    bearishProfitProbability: 0.53,
+    riskFlags: [],
+    boardAssessments: [
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", bullishProfitProbability: 0.41, bearishProfitProbability: 0.53 },
+    ],
+  }, market);
+  assert.equal(probabilityTargeted.action, "SELL");
+  assert.equal(probabilityTargeted.targetInstrumentId, "537");
+  assert.equal(probabilityTargeted.boardAssessments[0].action, "SELL");
 
   const inferred = bindDecisionToMarket({
     action: "HOLD",
@@ -776,7 +810,7 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     },
     requestDecision: async (_provider, context) => {
       finalContext = context;
-      return { action: "BUY", confidence: 0.82, profitProbability: 0.82, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: ["FULL_COVERAGE"], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", riskFlags: [], decisionTtlSec: 300 };
+      return { action: "BUY", confidence: 0.82, profitProbability: 0.82, bullishProfitProbability: 0.82, bearishProfitProbability: 0.18, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: ["FULL_COVERAGE"], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", riskFlags: [], decisionTtlSec: 300 };
     },
   };
   try {
@@ -826,11 +860,11 @@ test("空仓方向概率达到45%会提示进场，确认后继续监控，持�
     requestDecision: async (_provider, context) => {
       if (round === 0) {
         return {
-          action: "HOLD",
-          confidence: 0.52,
-          profitProbability: 0.52,
-          bullishProfitProbability: 0.43,
-          bearishProfitProbability: 0.52,
+          action: "BUY",
+          confidence: 0.53,
+          profitProbability: 0.41,
+          bullishProfitProbability: 0.41,
+          bearishProfitProbability: 0.53,
           targetPositionPct: 10,
           maxOrderValuePct: 4,
           evidenceIds: [context.evidenceIds[0]],

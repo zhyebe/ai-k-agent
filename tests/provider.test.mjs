@@ -159,6 +159,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /can profit/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
     assert.match(seen[0].body.system, /built-in browser/);
+    assert.match(seen[0].body.system, /Never swap these meanings/);
+    assert.match(seen[0].body.system, /Price response outranks static displayed depth/);
+    assert.match(seen[0].body.system, /correct persistent directional bias/);
     assert.match(seen[0].body.system, /does not abort at second 50/);
     assert.match(seen[0].body.system, /next round as usual/);
     assert.doesNotMatch(seen[0].body.system, /aborts this round at 50s/);

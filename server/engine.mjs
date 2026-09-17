@@ -203,12 +203,21 @@ export function applyEntryBoundary(decision, market = {}) {
   const next = { ...decision };
   if (next.exitType === "TAKE_PROFIT" || next.exitType === "STOP_LOSS") return next;
   if (openPositionCount(market) > 0) return next;
-  if (next.action !== "BUY" && next.action !== "SELL") {
-    const entry = directionalEntryAction(next);
-    if (entry) {
-      next.action = entry;
-      next.profitProbability = entry === "BUY" ? Number(next.bullishProfitProbability || 0) : Number(next.bearishProfitProbability || 0);
-    }
+  const bullish = Number(next.bullishProfitProbability || 0);
+  const bearish = Number(next.bearishProfitProbability || 0);
+  const entry = directionalEntryAction(next);
+  if (entry) {
+    next.action = entry;
+    next.profitProbability = entry === "BUY" ? bullish : bearish;
+    next.riskFlags = (next.riskFlags || []).filter((flag) => flag !== "LOW_PROFIT_PROBABILITY");
+  } else if (bullish < MIN_PROFIT_PROBABILITY && bearish < MIN_PROFIT_PROBABILITY) {
+    next.action = "HOLD";
+    next.profitProbability = Math.max(bullish, bearish);
+  } else if (bullish === bearish && (next.action === "BUY" || next.action === "SELL")) {
+    next.profitProbability = bullish;
+  } else {
+    next.action = "HOLD";
+    next.profitProbability = Math.max(bullish, bearish);
   }
   next.signalTier = profitSignalTier(chosenSideProbability(next));
   return next;
@@ -1208,7 +1217,8 @@ export function decisionTargetBook(decision, market) {
 
 export function bindDecisionToMarket(decision, market) {
   const books = monitoredBooks(market);
-  const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
+  const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books)
+    .map((assessment) => openPositionCount(market) > 0 ? assessment : applyEntryBoundary(assessment));
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision ? { ...decision, boardAssessments } : decision;
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
@@ -1222,7 +1232,11 @@ export function bindDecisionToMarket(decision, market) {
     : null;
   const primaryValues = normalizedInstrumentValues(market);
   const target = decisionTargetBook(decision, market)
-    || (assessmentTarget ? decisionTargetBook(assessmentTarget, market) : null)
+    || (assessmentTarget ? decisionTargetBook({
+      targetSymbol: assessmentTarget.symbol,
+      targetSymbolName: assessmentTarget.symbolName,
+      targetInstrumentId: assessmentTarget.instrumentId,
+    }, market) : null)
     || (!requestedTarget.length && primaryValues.length ? books.find((book) => normalizedInstrumentValues(book).some((value) => primaryValues.includes(value))) : null)
     || (!requestedTarget.length && books.length === 1 ? books[0] : null);
   if (!target) {
