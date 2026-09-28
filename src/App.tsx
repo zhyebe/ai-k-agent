@@ -1289,9 +1289,13 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const actionText = analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
-  const profitProbability = Number(decision.profitProbability ?? 0);
   const bullishProbability = Number(decision.bullishProfitProbability ?? 0);
   const bearishProbability = Number(decision.bearishProfitProbability ?? 0);
+  const profitProbability = decision.action === "BUY"
+    ? bullishProbability
+    : decision.action === "SELL"
+      ? bearishProbability
+      : Number(decision.profitProbability ?? 0);
   const target = decisionTargetLabel(decision);
   const pending = task.pendingAction;
   return (

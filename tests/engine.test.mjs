@@ -47,6 +47,23 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   assert.equal(kept.signalTier, "EXPLORATORY");
   assert.equal(meetsOrderBoundary(kept), true);
 
+  const longPlan = applyEntryBoundary(enforceProfitProbability({
+    action: "BUY",
+    profitProbability: 0.48,
+    bullishProfitProbability: 0.48,
+    bearishProfitProbability: 0.51,
+    riskFlags: [],
+  }));
+  const shortPlan = applyEntryBoundary(enforceProfitProbability({
+    action: "SELL",
+    profitProbability: 0.51,
+    bullishProfitProbability: 0.48,
+    bearishProfitProbability: 0.51,
+    riskFlags: [],
+  }));
+  assert.equal(meetsOrderBoundary(longPlan), true);
+  assert.equal(meetsOrderBoundary(shortPlan), true);
+
   const below = enforceProfitProbability({
     action: "SELL",
     profitProbability: 0.4,

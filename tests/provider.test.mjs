@@ -155,6 +155,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /approved Skills/);
     assert.match(seen[0].body.system, /MUST be BUY/);
     assert.match(seen[0].body.system, /selected side must be >= 0\.45/);
+    assert.match(seen[0].body.system, /valid short plan can capture 20 -> 19/);
+    assert.match(seen[0].body.system, /If both bullish and bearish probabilities are >= 0\.45, do not return HOLD/);
+    assert.match(seen[0].body.system, /profit_probability is your own estimated chance for your selected action and must equal the selected bullish or bearish probability/);
     assert.match(seen[0].body.system, /do not open a second entry/);
     assert.match(seen[0].body.system, /defined price difference/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
