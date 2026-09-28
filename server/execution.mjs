@@ -47,7 +47,12 @@ export function previewMarketForDecision(task, decision) {
 
 export function suggestOrderPreview(task, decision, { enforceAutomationQuantity = false } = {}) {
   const targetMarket = previewMarketForDecision(task, decision);
-  const requestedPrice = decision?.orderType === "LIMIT" ? Number(decision?.targetPrice) : NaN;
+  const modelPrice = decision?.exitType === "TAKE_PROFIT"
+    ? decision?.takeProfitPrice
+    : decision?.exitType === "STOP_LOSS"
+      ? decision?.stopLossPrice
+      : decision?.targetPrice ?? decision?.entryPrice;
+  const requestedPrice = decision?.orderType === "LIMIT" ? Number(modelPrice) : NaN;
   const price = Number.isFinite(requestedPrice) && requestedPrice > 0
     ? requestedPrice
     : Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);

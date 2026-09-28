@@ -32,7 +32,7 @@ test("获利概率分档：大于等于 45% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
-test("模型概率原样保留，主机按两侧概率统一方向并判断入场边界", () => {
+test("模型动作和概率原样保留，主机只判断 AI 选中方向的入场边界", () => {
   const kept = enforceProfitProbability({
     action: "BUY",
     profitProbability: "45%",
@@ -64,8 +64,8 @@ test("模型概率原样保留，主机按两侧概率统一方向并判断入�
     bullishProfitProbability: 0.8,
     bearishProfitProbability: 0.3,
   }));
-  assert.equal(hold.action, "BUY");
-  assert.equal(meetsOrderBoundary(hold), true);
+  assert.equal(hold.action, "HOLD");
+  assert.equal(meetsOrderBoundary(hold), false);
 
   const shortHold = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
@@ -73,8 +73,8 @@ test("模型概率原样保留，主机按两侧概率统一方向并判断入�
     bullishProfitProbability: 0.43,
     bearishProfitProbability: 0.52,
   }));
-  assert.equal(shortHold.action, "SELL");
-  assert.equal(meetsOrderBoundary(shortHold), true);
+  assert.equal(shortHold.action, "HOLD");
+  assert.equal(meetsOrderBoundary(shortHold), false);
 
   const conflictingAction = applyEntryBoundary(enforceProfitProbability({
     action: "BUY",
@@ -83,10 +83,18 @@ test("模型概率原样保留，主机按两侧概率统一方向并判断入�
     bearishProfitProbability: 0.53,
     riskFlags: ["LOW_PROFIT_PROBABILITY"],
   }));
-  assert.equal(conflictingAction.action, "SELL");
-  assert.equal(conflictingAction.profitProbability, 0.53);
-  assert.equal(meetsOrderBoundary(conflictingAction), true);
-  assert.equal(conflictingAction.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
+  assert.equal(conflictingAction.action, "BUY");
+  assert.equal(conflictingAction.profitProbability, 0.41);
+  assert.equal(meetsOrderBoundary(conflictingAction), false);
+  assert.equal(conflictingAction.riskFlags.includes("LOW_PROFIT_PROBABILITY"), true);
+
+  const missingSelectedSide = enforceProfitProbability({
+    action: "BUY",
+    profitProbability: 0.9,
+    riskFlags: [],
+  });
+  assert.equal(meetsOrderBoundary(missingSelectedSide), false);
+  assert.ok(missingSelectedSide.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
 
   const belowBothSides = applyEntryBoundary(enforceProfitProbability({
     action: "SELL",
@@ -94,7 +102,7 @@ test("模型概率原样保留，主机按两侧概率统一方向并判断入�
     bullishProfitProbability: 0.41,
     bearishProfitProbability: 0.44,
   }));
-  assert.equal(belowBothSides.action, "HOLD");
+  assert.equal(belowBothSides.action, "SELL");
   assert.equal(meetsOrderBoundary(belowBothSides), false);
 
   const noSides = applyEntryBoundary(enforceProfitProbability({
@@ -225,7 +233,7 @@ test("多盘口方向性决策必须绑定一个受监控盘口", () => {
     bearishProfitProbability: 0.53,
     riskFlags: [],
     boardAssessments: [
-      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "HOLD", bullishProfitProbability: 0.41, bearishProfitProbability: 0.53 },
+      { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", action: "SELL", bullishProfitProbability: 0.41, bearishProfitProbability: 0.53 },
     ],
   }, market);
   assert.equal(probabilityTargeted.action, "SELL");
@@ -860,9 +868,9 @@ test("空仓方向概率达到45%会提示进场，确认后继续监控，持�
     requestDecision: async (_provider, context) => {
       if (round === 0) {
         return {
-          action: "BUY",
+          action: "SELL",
           confidence: 0.53,
-          profitProbability: 0.41,
+          profitProbability: 0.53,
           bullishProfitProbability: 0.41,
           bearishProfitProbability: 0.53,
           targetPositionPct: 10,

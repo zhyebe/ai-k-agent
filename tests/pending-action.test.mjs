@@ -26,7 +26,7 @@ function insertTask(id, extras = {}) {
     target: { type: "website", name: "浩瀚数贸", url: "https://smyw.haohandahan.cn/client/#/transcc", connectorId: "connector_haohan_readonly", browserSessionId: `task:${id}` },
     workflow: [],
     rules: [],
-    decision: { action: "BUY", confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "BUY", confidence: 0.8, profitProbability: 0.55, bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
     metrics: { equity: 18000, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
     market: { latest: { price: 1800 }, account: { availableFunds: 18000 } },
     ...extras,
@@ -122,6 +122,25 @@ test("live suggestion with automation enabled is eligible for auto-submit", () =
   assert.match(task.pendingAction.message, /全自动接管/);
 });
 
+test("live auto mode submits the AI action without a confirmation dialog", async () => {
+  const task = insertTask(`task_live_auto_submit_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let submitted = 0;
+  const confirmed = await confirmPendingAction(task.id, {
+    source: "auto_timeout",
+    runtime: {
+      submitSuggestionForm: async () => {
+        submitted += 1;
+        return { ok: true, submitted: true, code: "TRADE_SUBMITTED", message: "已自动提交交易请求" };
+      },
+    },
+  });
+  assert.equal(submitted, 1);
+  assert.equal(confirmed.pendingAction.status, "CONFIRMED");
+  assert.equal(confirmed.pendingAction.source, "auto_timeout");
+  assert.equal(state.orders.find((order) => order.taskId === task.id)?.status, "submitted");
+});
+
 test("live confirm submits only after the user confirms", async () => {
   const task = insertTask(`task_live_confirm_${Date.now()}`, { mode: "LIVE" });
   task.pendingAction = buildPendingAction(task, task.decision);
@@ -166,7 +185,7 @@ test("live confirm lets AI plan visible browser clicks", async () => {
 test("live sell suggestion submits SELL action only after confirmation", async () => {
   const task = insertTask(`task_live_sell_${Date.now()}`, {
     mode: "LIVE",
-    decision: { action: "SELL", targetSymbol: "DGJJ", confidence: 0.7, profitProbability: 0.55, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "SELL", targetSymbol: "DGJJ", confidence: 0.7, profitProbability: 0.55, bullishProfitProbability: 0.45, bearishProfitProbability: 0.55, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
   });
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.action, "SELL");
@@ -233,6 +252,37 @@ test("live exit submits 转让 with position ids", async () => {
   assert.deepEqual(submittedInput.targetPositionIds, ["P-9"]);
   assert.equal(confirmed.pendingAction.status, "CONFIRMED");
   assert.match(confirmed.pendingAction.message, /已确认并提交转让卖出订单/);
+});
+
+test("pending action preserves AI entry and exit levels", () => {
+  const task = insertTask(`task_ai_levels_${Date.now()}`, {
+    decision: {
+      action: "BUY",
+      orderType: "LIMIT",
+      entryPrice: 1810,
+      targetPrice: 1810,
+      takeProfitPrice: 1840,
+      stopLossPrice: 1788,
+      profitProbability: 0.62,
+      bullishProfitProbability: 0.62,
+      bearishProfitProbability: 0.38,
+      targetPositionPct: 10,
+      maxOrderValuePct: 4,
+      reasonCodes: [],
+      evidenceIds: [],
+      invalidation: "",
+      riskFlags: [],
+      createdAt: new Date().toISOString(),
+      ttlSec: 300,
+    },
+  });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  assert.equal(task.pendingAction.entryPrice, 1810);
+  assert.equal(task.pendingAction.takeProfitPrice, 1840);
+  assert.equal(task.pendingAction.stopLossPrice, 1788);
+  assert.equal(task.pendingAction.targetPrice, 1810);
+  assert.equal(task.pendingAction.bullishProfitProbability, 0.62);
+  assert.equal(task.pendingAction.bearishProfitProbability, 0.38);
 });
 
 test("multi-board pending action uses and submits the selected board price and identity", async () => {

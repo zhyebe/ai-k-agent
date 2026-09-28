@@ -92,6 +92,9 @@ export interface PendingAction {
   targetSymbolName?: string;
   targetInstrumentId?: string;
   targetPrice?: number | null;
+  entryPrice?: number | null;
+  takeProfitPrice?: number | null;
+  stopLossPrice?: number | null;
   profitProbability?: number;
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
@@ -119,6 +122,9 @@ export interface Decision {
   targetSymbolName?: string;
   targetInstrumentId?: string;
   targetPrice?: number | null;
+  entryPrice?: number | null;
+  takeProfitPrice?: number | null;
+  stopLossPrice?: number | null;
   confidence: number;
   profitProbability?: number;
   bullishProfitProbability?: number;
@@ -446,6 +452,16 @@ export interface OrderItem {
   status: string;
   targetPositionPct: number;
   maxOrderValuePct: number;
+  suggestedPrice?: number | null;
+  suggestedQty?: number | null;
+  entryPrice?: number | null;
+  takeProfitPrice?: number | null;
+  stopLossPrice?: number | null;
+  bullishProfitProbability?: number;
+  bearishProfitProbability?: number;
+  submitted?: boolean;
+  source?: string;
+  message?: string;
   createdAt: string;
 }
 

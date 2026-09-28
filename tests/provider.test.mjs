@@ -154,9 +154,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /second 50/);
     assert.match(seen[0].body.system, /approved Skills/);
     assert.match(seen[0].body.system, /MUST be BUY/);
-    assert.match(seen[0].body.system, /both sides are < 0\.45/);
-    assert.match(seen[0].body.system, /treats BUY\/SELL while holding as an exit/);
-    assert.match(seen[0].body.system, /can profit/);
+    assert.match(seen[0].body.system, /selected side must be >= 0\.45/);
+    assert.match(seen[0].body.system, /do not open a second entry/);
+    assert.match(seen[0].body.system, /defined price difference/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
     assert.match(seen[0].body.system, /built-in browser/);
     assert.match(seen[0].body.system, /Never swap these meanings/);

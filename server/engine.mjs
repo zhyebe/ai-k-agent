@@ -2,7 +2,7 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { analysisTimeoutMs, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, nextCandleTarget, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedExperiencePrompt } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { normalizeBrowserPlan } from "./tools.mjs";
@@ -170,15 +170,18 @@ function profitProbabilityLabel(value) {
   return label.endsWith(".0") ? label.slice(0, -2) : label;
 }
 
+function positivePrice(value) {
+  const price = Number(value);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
 function chosenSideProbability(decision) {
   const overall = Number(decision?.profitProbability || 0);
   if (decision?.action === "BUY") {
-    const bullish = Number(decision?.bullishProfitProbability || 0);
-    return bullish > 0 ? bullish : overall;
+    return Number(decision?.bullishProfitProbability || 0);
   }
   if (decision?.action === "SELL") {
-    const bearish = Number(decision?.bearishProfitProbability || 0);
-    return bearish > 0 ? bearish : overall;
+    return Number(decision?.bearishProfitProbability || 0);
   }
   return overall;
 }
@@ -189,36 +192,12 @@ export function meetsOrderBoundary(decision) {
   return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
 }
 
-function directionalEntryAction(decision) {
-  const bullish = Number(decision?.bullishProfitProbability || 0);
-  const bearish = Number(decision?.bearishProfitProbability || 0);
-  if (bullish < MIN_PROFIT_PROBABILITY && bearish < MIN_PROFIT_PROBABILITY) return "";
-  if (bullish === bearish) return "";
-  if (bullish > bearish && bullish >= MIN_PROFIT_PROBABILITY) return "BUY";
-  if (bearish > bullish && bearish >= MIN_PROFIT_PROBABILITY) return "SELL";
-  return "";
-}
-
 export function applyEntryBoundary(decision, market = {}) {
   const next = { ...decision };
   if (next.exitType === "TAKE_PROFIT" || next.exitType === "STOP_LOSS") return next;
   if (openPositionCount(market) > 0) return next;
-  const bullish = Number(next.bullishProfitProbability || 0);
-  const bearish = Number(next.bearishProfitProbability || 0);
-  const entry = directionalEntryAction(next);
-  if (entry) {
-    next.action = entry;
-    next.profitProbability = entry === "BUY" ? bullish : bearish;
-    next.riskFlags = (next.riskFlags || []).filter((flag) => flag !== "LOW_PROFIT_PROBABILITY");
-  } else if (bullish < MIN_PROFIT_PROBABILITY && bearish < MIN_PROFIT_PROBABILITY) {
-    next.action = "HOLD";
-    next.profitProbability = Math.max(bullish, bearish);
-  } else if (bullish === bearish && (next.action === "BUY" || next.action === "SELL")) {
-    next.profitProbability = bullish;
-  } else {
-    next.action = "HOLD";
-    next.profitProbability = Math.max(bullish, bearish);
-  }
+  // AI owns direction and timing. Host only evaluates the AI-selected side
+  // against the execution boundary; it must never turn HOLD into an order.
   next.signalTier = profitSignalTier(chosenSideProbability(next));
   return next;
 }
@@ -256,7 +235,12 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     targetSymbolName: String(decision.targetSymbolName || ""),
     targetInstrumentId: String(decision.targetInstrumentId || ""),
     targetPrice: preview.targetPrice ?? preview.suggestedPrice,
+    entryPrice: positivePrice(decision.entryPrice),
+    takeProfitPrice: positivePrice(decision.takeProfitPrice),
+    stopLossPrice: positivePrice(decision.stopLossPrice),
     profitProbability: decisionProbability,
+    bullishProfitProbability: Number(decision.bullishProfitProbability || 0),
+    bearishProfitProbability: Number(decision.bearishProfitProbability || 0),
     signalTier,
     status: "WAITING",
     source: null,
@@ -352,9 +336,31 @@ async function openPendingAction(task, { runtime, run } = {}) {
   }
   if (isAutoTakeover(task) && task.pendingAction?.status === "WAITING") {
     try {
+      if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
       await confirmPendingAction(task.id, { source: "auto_timeout", runtime });
     } catch (error) {
-      task.pendingAction.message = `${task.pendingAction.message}；自动执行失败：${error.message}`;
+      task.pendingAction = {
+        ...task.pendingAction,
+        status: "CANCELLED",
+        source: "auto_timeout",
+        resolvedAt: new Date().toISOString(),
+        formSubmitBlocked: false,
+        message: `${task.pendingAction.message}；自动执行失败：${error.message}，下一轮继续监控并重新判断`,
+      };
+      task.nextTrigger = task.pendingAction.message;
+      setNextPoll(task, monitorRetryDelay(task));
+      addEvent("automatic_order_failed", task.pendingAction.message, { taskId: task.id, code: error?.message || "TRADE_SUBMIT_FAILED" });
+      if (run) {
+        appendAgentOutput({
+          taskId: task.id,
+          runId: run.id,
+          stage: "action",
+          kind: "order",
+          level: "error",
+          message: task.pendingAction.message,
+          data: { pendingActionId: task.pendingAction.id, source: "auto_timeout", submitted: false, retryScheduled: true, code: error?.message || "TRADE_SUBMIT_FAILED" },
+        });
+      }
       persistTask(task);
     }
     return task.pendingAction;
@@ -497,6 +503,11 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
     maxOrderValuePct: Number(task.decision?.maxOrderValuePct || 0),
     suggestedPrice: pending.suggestedPrice,
     suggestedQty: pending.suggestedQty,
+    entryPrice: pending.entryPrice,
+    takeProfitPrice: pending.takeProfitPrice,
+    stopLossPrice: pending.stopLossPrice,
+    bullishProfitProbability: pending.bullishProfitProbability,
+    bearishProfitProbability: pending.bearishProfitProbability,
     submitted,
     source,
     message,
@@ -513,6 +524,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (source === "auto_timeout" && task.autoDecisionEnabled !== true) throw new Error("AUTO_DECISION_DISABLED");
   if (source === "auto_timeout" && isLiveTask(task) && task.autoDecisionEnabled !== true) throw new Error("LIVE_REQUIRES_MANUAL_CONFIRM");
+  if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
   pendingConfirmLocks.add(taskId);
   try {
@@ -810,7 +822,9 @@ function setNextPoll(task, delayMs = monitoringPollIntervalMs(task)) {
 }
 
 function pauseForPendingAction(task) {
-  return task?.pendingAction?.status === "WAITING";
+  // Manual mode waits for the user. Auto mode must keep its controller alive
+  // after a rejected/failed browser submission so the next AI round can retry.
+  return task?.pendingAction?.status === "WAITING" && task?.autoDecisionEnabled !== true;
 }
 
 function resumeMonitoringAfterAction(task) {
@@ -1217,8 +1231,7 @@ export function decisionTargetBook(decision, market) {
 
 export function bindDecisionToMarket(decision, market) {
   const books = monitoredBooks(market);
-  const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books)
-    .map((assessment) => openPositionCount(market) > 0 ? assessment : applyEntryBoundary(assessment));
+  const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision ? { ...decision, boardAssessments } : decision;
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
@@ -1831,7 +1844,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         : (isLiveTask(task) ? "规则通过；确认后才会下单或离场，完成后交回 AI" : "规则通过；观察模式不会自动下单") });
     }
 
-    logStage(task, run, "action", "路由最终建议，等待确认后决定是否下单");
+    logStage(task, run, "action", isAutoTakeover(task)
+      ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
+      : "路由最终建议，等待确认后决定是否下单");
     assertCurrent();
     const canPromptOrder = meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
@@ -1856,12 +1871,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const submitted = task.pendingAction?.status === "CONFIRMED";
       const actionName = pendingActionLabel(task.pendingAction || task.decision);
       completeWorkflow(task, "action", waiting
-        ? `${decisionBoardLabel} ${actionName} 待你确认，完成后交回 AI`
+        ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName} 自动执行中` : `${decisionBoardLabel} ${actionName} 待你确认，完成后交回 AI`)
         : submitted && isAutoTakeover(task)
           ? `${decisionBoardLabel} ${actionName} 已自动执行，继续监控`
           : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${actionName} 建议已生成`);
         appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: waiting
-          ? `${decisionBoardLabel} ${actionName}待确认；确认后才会下单或离场`
+          ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName}自动执行中` : `${decisionBoardLabel} ${actionName}待确认；确认后才会下单或离场`)
           : submitted && isAutoTakeover(task)
             ? `${decisionBoardLabel} ${actionName}已自动执行；继续监控持仓离场`
             : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${actionName}建议已生成`, data: { action: task.decision.action, exitType: task.decision.exitType || null, targetPositionIds: task.decision.targetPositionIds || [], targetSymbol: task.decision.targetSymbol, targetSymbolName: task.decision.targetSymbolName, targetInstrumentId: task.decision.targetInstrumentId, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
