@@ -86,6 +86,40 @@ for (const width of [1440, 390]) {
 }
 
 for (const width of [1440, 390]) {
+  test(`live manual decision stays prominent and asks user to submit at ${width}px`, async (t) => {
+    const { page, navigate } = await openPage(t, { width });
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    task.mode = "LIVE";
+    task.autoDecisionEnabled = false;
+    task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
+    task.decision = {
+      ...task.decision, action: "BUY", confidence: 0.7, profitProbability: 0.53,
+      bullishProfitProbability: 0.53, bearishProfitProbability: 0.41,
+      riskFlags: [], targetPositionPct: 5, maxOrderValuePct: 4,
+    };
+    task.pendingAction = {
+      id: "manual-pending", action: "BUY", status: "WAITING", message: "AI 已填写买涨表单",
+      targetSymbol: "DGJJ", profitProbability: 0.53, suggestedPrice: 20, suggestedQty: 1,
+      formFilled: true, formSubmitBlocked: true, createdAt: new Date().toISOString(),
+    };
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await navigate();
+    await page.getByRole("alertdialog").getByRole("button", { name: "已在目标页提交" }).waitFor();
+    assert.match(await page.getByRole("alertdialog").innerText(), /亲自点击目标页提交按钮/);
+    assert.equal(await page.getByText("自动单笔上限 1").count(), 1);
+    assert.equal(await page.getByText(/测试数量/).count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    const panel = page.locator(".decision-panel");
+    const box = await panel.boundingBox();
+    assert.ok(box && box.width >= width * (width > 600 ? 0.48 : 0.9));
+    const fontSize = await panel.locator(".decision-action strong").evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
+    assert.ok(fontSize >= 22);
+    await capture(page, `live-manual-${width}`);
+  });
+}
+
+for (const width of [1440, 390]) {
   test(`workspace skeleton replaces empty states at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width });
     const gate = deferred();

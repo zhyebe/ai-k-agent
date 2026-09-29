@@ -154,19 +154,19 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /second 50/);
     assert.match(seen[0].body.system, /approved Skills/);
     assert.match(seen[0].body.system, /MUST be BUY/);
-    assert.match(seen[0].body.system, /selected side must be >= 0\.45/);
-    assert.match(seen[0].body.system, /valid short plan can capture 20 -> 19/);
-    assert.match(seen[0].body.system, /If both bullish and bearish probabilities are >= 0\.45, do not return HOLD/);
-    assert.match(seen[0].body.system, /profit_probability is your own estimated chance for your selected action and must equal the selected bullish or bearish probability/);
-    assert.match(seen[0].body.system, /do not open a second entry/);
-    assert.match(seen[0].body.system, /defined price difference/);
+    assert.match(seen[0].body.system, /selected probability must be >= 0\.45/);
+    assert.match(seen[0].body.system, /short can capture 20 -> 19/);
+    assert.match(seen[0].body.system, /another K can produce another entry/);
+    assert.match(seen[0].body.system, /never HOLD merely because an earlier position exists/);
+    assert.match(seen[0].body.system, /profit_probability equals the selected direction/);
+    assert.match(seen[0].body.system, /one unit per order/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
-    assert.match(seen[0].body.system, /built-in browser/);
+    assert.match(seen[0].body.system, /host only fills the target form/);
     assert.match(seen[0].body.system, /Never swap these meanings/);
     assert.match(seen[0].body.system, /Price response outranks static displayed depth/);
     assert.match(seen[0].body.system, /correct persistent directional bias/);
-    assert.match(seen[0].body.system, /does not abort at second 50/);
-    assert.match(seen[0].body.system, /next round as usual/);
+    assert.match(seen[0].body.system, /Finish the round's JSON fully/);
+    assert.match(seen[0].body.system, /monitoring continues next round/);
     assert.doesNotMatch(seen[0].body.system, /aborts this round at 50s/);
     assert.doesNotMatch(seen[0].body.system, /Do not wait for maximum profit/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
@@ -206,6 +206,43 @@ test("provider decision receives bounded evidence context", async () => {
     assert.equal(result.action, "HOLD");
     assert.deepEqual(received.messages[1].content.includes("EMA20 slope is flat"), true);
     assert.match(received.messages[0].content, /counterparty may be AI-controlled/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("HOLD above 45% is returned to AI for correction even with open positions", async () => {
+  let calls = 0;
+  let correct = true;
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    calls += 1;
+    const messages = JSON.parse(body).messages;
+    if (calls % 2 === 0) assert.match(messages.at(-1).content, /probability is >= 0\.45 but action is HOLD/);
+    response.setHeader("content-type", "application/json");
+    const decision = calls % 2 === 0 && correct
+      ? { action: "SELL", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 }
+      : { action: "HOLD", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 };
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+    const corrected = await requestDecision(provider, { account: { positions: [] } });
+    assert.equal(corrected.action, "SELL");
+    assert.equal(corrected.bearishProfitProbability, 0.53);
+    assert.equal(calls, 2);
+    correct = false;
+    const inconsistent = await requestDecision(provider, { account: { positions: [] } });
+    assert.equal(inconsistent.action, "HOLD");
+    assert.ok(inconsistent.riskFlags.includes("ANALYSIS_INCOMPLETE"));
+    assert.ok(inconsistent.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"));
+    assert.equal(calls, 4);
+    correct = true;
+    const holding = await requestDecision(provider, { account: { positions: [{ quantity: 1, side: "买" }] } });
+    assert.equal(holding.action, "SELL");
+    assert.equal(calls, 6);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

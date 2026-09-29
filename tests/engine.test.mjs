@@ -137,7 +137,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   }), { account: { positions: [{ quantity: 2 }] } });
   assert.equal(whileHolding.action, "HOLD");
 
-  const closeLong = attachPositionExit({ action: "SELL", profitProbability: 0.6 }, {
+  const closeLong = attachPositionExit({ action: "SELL", exitType: "TAKE_PROFIT", profitProbability: 0.6 }, {
     account: { positions: [{ quantity: 2, positionOrderId: "P-9", symbol: "DGKZ", symbolName: "丹桂康砖（二期）", side: "买" }] },
   });
   assert.equal(closeLong.action, "SELL");
@@ -149,8 +149,23 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   const coverShort = attachPositionExit({ action: "SELL", profitProbability: 0.6 }, {
     account: { positions: [{ quantity: 1, positionOrderId: "P-8", side: "卖" }] },
   });
-  assert.equal(coverShort.action, "BUY");
-  assert.equal(coverShort.exitType, "TAKE_PROFIT");
+  assert.equal(coverShort.action, "SELL");
+  assert.equal(coverShort.exitType || null, null);
+  const wrongExitDirection = attachPositionExit({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-8"] }, {
+    account: { positions: [{ quantity: 1, positionOrderId: "P-8", side: "卖" }] },
+  });
+  assert.equal(wrongExitDirection.action, "HOLD");
+  assert.ok(wrongExitDirection.riskFlags.includes("EXIT_DIRECTION_MISMATCH"));
+  const coverShortExplicit = attachPositionExit({ action: "BUY", exitType: "STOP_LOSS", targetPositionIds: ["P-8"] }, {
+    account: { positions: [{ quantity: 1, positionOrderId: "P-8", side: "卖" }] },
+  });
+  assert.equal(coverShortExplicit.action, "BUY");
+  assert.equal(coverShortExplicit.exitType, "STOP_LOSS");
+  const missingPosition = attachPositionExit({ action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-missing"] }, {
+    account: { positions: [{ quantity: 2, positionOrderId: "P-9", side: "买" }] },
+  });
+  assert.equal(missingPosition.action, "HOLD");
+  assert.ok(missingPosition.riskFlags.includes("EXIT_TARGET_NOT_FOUND"));
 
   const stay = attachPositionExit({ action: "HOLD", profitProbability: 0.52, bullishProfitProbability: 0.43, bearishProfitProbability: 0.52 }, {
     account: { positions: [{ quantity: 2, positionOrderId: "P-9", side: "买" }] },
@@ -168,20 +183,20 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   assert.equal(meetsOrderBoundary(exit), true);
 });
 
-test("自动化流程限制数量为 20，人工确认流程保留建议数量", () => {
-  const base = { id: "quantity-limit", mode: "PAPER", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, automationTestMode: false, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
+test("实盘入场自动与手动都限制为 1，观察模式不填实盘数量", () => {
+  const base = { id: "quantity-limit", mode: "LIVE", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
   const decision = { action: "BUY", targetSymbol: "A", profitProbability: 0.8, targetPositionPct: 30, maxOrderValuePct: 8 };
   const automated = buildPendingAction(base, decision);
-  assert.equal(automated.suggestedQty, 20);
-  assert.equal(automated.automatedQuantityLimit, true);
-  const testAutomated = buildPendingAction({ ...base, automationTestMode: true }, decision);
-  assert.equal(testAutomated.suggestedQty, 1);
+  assert.equal(automated.suggestedQty, 1);
+  assert.equal(automated.quantityLimitApplied, true);
   const manual = buildPendingAction({ ...base, autoDecisionEnabled: false }, decision);
-  assert.equal(manual.suggestedQty, 80);
-  assert.equal(manual.automatedQuantityLimit, false);
-  const testDefault = buildPendingAction({ ...base, metrics: { equity: 0 } }, decision);
-  assert.equal(testDefault.suggestedQty, 1);
-  assert.equal(testDefault.automatedQuantityLimit, false);
+  assert.equal(manual.suggestedQty, 1);
+  assert.equal(manual.quantityLimitApplied, true);
+  const paper = buildPendingAction({ ...base, mode: "PAPER" }, decision);
+  assert.equal(paper.suggestedQty, 80);
+  const minimum = buildPendingAction({ ...base, metrics: { equity: 0 } }, decision);
+  assert.equal(minimum.suggestedQty, 1);
+  assert.equal(minimum.quantityLimitApplied, false);
 });
 
 test("最终决策上下文包含当前页面、账户、时间戳和全部盘口", () => {
@@ -862,7 +877,7 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
   }
 });
 
-test("空仓方向概率达到45%会提示进场，确认后继续监控，持仓买卖按离场处理", async () => {
+test("空仓方向概率达到45%会提示进场，确认后继续监控，AI 明确决定持仓离场", async () => {
   const taskId = `task_entry_exit_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.status = "MONITORING";
@@ -899,6 +914,7 @@ test("空仓方向概率达到45%会提示进场，确认后继续监控，持�
       }
       return {
         action: "SELL",
+        exitType: "TAKE_PROFIT",
         confidence: 0.6,
         profitProbability: 0.6,
         bullishProfitProbability: 0.3,
@@ -943,6 +959,147 @@ test("空仓方向概率达到45%会提示进场，确认后继续监控，持�
   }
 });
 
+test("手动模式同一 K 不重复提示，下一 K 可再次提示入场", async () => {
+  const taskId = `task_next_k_entry_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.mode = "PAPER";
+  let observed = testMarketSnapshot("next-k-1", 100);
+  observed.account.positions = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => observed,
+    fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false, fields: ["买价", "买量"] }),
+    requestDecision: async (_provider, context) => ({
+      action: "BUY", confidence: 0.7, profitProbability: 0.6,
+      bullishProfitProbability: 0.6, bearishProfitProbability: 0.2,
+      targetSymbol: "BTC/USDT", evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
+    }),
+  };
+  try {
+    await runMonitoringCycle(taskId, { runtime });
+    const firstId = task.pendingAction.id;
+    observed = testMarketSnapshot("next-k-2", 101);
+    observed.account.positions = [];
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.id, firstId);
+    task.pendingAction.entryKWindow -= 60_000;
+    observed = testMarketSnapshot("next-k-3", 102);
+    observed.account.positions = [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-earlier" }];
+    await runMonitoringCycle(taskId, { runtime });
+    assert.notEqual(task.pendingAction.id, firstId);
+    assert.equal(task.pendingAction.action, "BUY");
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("红线触发时即使 AI 买卖概率过线也不得进入下单流程", async () => {
+  const taskId = `task_blocked_entry_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  const market = testMarketSnapshot("blocked-entry", 100);
+  market.anomaly = true;
+  market.account = { ...(market.account || {}), positions: [] };
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => market,
+    fillSuggestionForm: async () => { throw new Error("blocked trade reached form"); },
+    requestDecision: async (_provider, context) => ({
+      action: "BUY", confidence: 0.7, profitProbability: 0.7,
+      bullishProfitProbability: 0.7, bearishProfitProbability: 0.2,
+      evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
+    }),
+  };
+  try {
+    const result = await runMonitoringCycle(taskId, { runtime });
+    assert.equal(result.route, "BLOCKED");
+    assert.equal(task.decision.action, "BUY");
+    assert.equal(task.pendingAction || null, null);
+    assert.equal(result.execution.code, "RISK_GATE_BLOCKED");
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("手动入场只等待人点目标页，持仓出现前禁止重复下单", async () => {
+  const taskId = `task_manual_reconcile_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.mode = "LIVE";
+  task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
+  task.status = "MONITORING";
+  task.monitoringEnabled = false;
+  const flat = testMarketSnapshot("manual-flat", 100);
+  flat.account.positions = [];
+  task.market = flat;
+  task.metrics.equity = 1000;
+  task.decision = { action: "BUY", targetSymbol: "BTC/USDT", bullishProfitProbability: 0.6, bearishProfitProbability: 0.2, targetPositionPct: 10, maxOrderValuePct: 4, riskFlags: [] };
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let browserSubmits = 0;
+  const acknowledged = await confirmPendingAction(taskId, { source: "manual_confirm", runtime: { submitSuggestionForm: async () => { browserSubmits += 1; } } });
+  assert.equal(browserSubmits, 0);
+  assert.equal(acknowledged.pendingAction.status, "AWAITING_FILL");
+  task.monitoringEnabled = true;
+  const holding = testMarketSnapshot("manual-filled", 101);
+  holding.account.positions = [{ symbol: "BTC/USDT", symbolName: "测试品种", positionOrderId: "P-manual", side: "买", quantity: 1 }];
+  let observed = flat;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => observed,
+    fillSuggestionForm: async () => { throw new Error("duplicate order prepared"); },
+    requestDecision: async (_provider, context) => ({ action: observed === flat ? "BUY" : "HOLD", confidence: 0.6, profitProbability: 0.6, bullishProfitProbability: 0.6, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300 }),
+  };
+  try {
+    const waiting = await runMonitoringCycle(taskId, { runtime });
+    assert.equal(waiting.route, "ORDER_PENDING");
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    observed = holding;
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+    assert.equal(state.orders.find((order) => order.taskId === taskId)?.status, "filled");
+    assert.equal(browserSubmits, 0);
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("手动离场须等目标持仓数量归零才结束一轮", async () => {
+  const taskId = `task_manual_exit_reconcile_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.mode = "LIVE";
+  task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
+  task.status = "MONITORING";
+  task.monitoringEnabled = false;
+  const holding = testMarketSnapshot("exit-holding", 100);
+  holding.account.positions = [{ symbol: "BTC/USDT", symbolName: "测试品种", positionOrderId: "P-exit", side: "买", quantity: 2 }];
+  task.market = holding;
+  task.decision = { action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-exit"], targetSymbol: "BTC/USDT", bearishProfitProbability: 0.5, bullishProfitProbability: 0.3, riskFlags: [] };
+  task.pendingAction = buildPendingAction(task, task.decision);
+  assert.equal(task.pendingAction.baselinePositionQty, 2);
+  await confirmPendingAction(taskId, { source: "manual_confirm", runtime: { submitSuggestionForm: async () => { throw new Error("manual mode clicked browser"); } } });
+  task.monitoringEnabled = true;
+  const closed = testMarketSnapshot("exit-closed", 99);
+  closed.account.positions = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => closed,
+    requestDecision: async (_provider, context) => ({ action: "HOLD", confidence: 0.4, profitProbability: 0.3, bullishProfitProbability: 0.3, bearishProfitProbability: 0.3, evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300 }),
+  };
+  try {
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+    assert.equal(state.orders.find((order) => order.taskId === taskId)?.status, "filled");
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
 test("等待确认时不拆掉监控循环，确认后立即继续", async () => {
   const taskId = `task_resume_after_confirm_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
@@ -975,7 +1132,7 @@ test("等待确认时不拆掉监控循环，确认后立即继续", async () =>
       },
     });
     await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.equal(cycles, 1);
+    assert.ok(cycles >= 2, `expected monitoring to continue while waiting, got ${cycles}`);
     const confirmed = await confirmPendingAction(taskId);
     assert.equal(confirmed.pendingAction.status, "CONFIRMED");
     await new Promise((resolve) => setTimeout(resolve, 50));

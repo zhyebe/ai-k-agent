@@ -73,7 +73,7 @@ function publicMarket(market) {
 
 export function publicTask(task) {
   if (!task) return task;
-  const { ownerUserId, ...safeTask } = task;
+  const { ownerUserId, automationTestMode, ...safeTask } = task;
   const target = task.target ? { ...task.target, credentialRef: "" } : task.target;
   if (target?.marketAnalysis) target.marketAnalysis = { ...target.marketAnalysis, credentialRef: "" };
   if (target) {
@@ -87,7 +87,6 @@ export function publicTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-    automationTestMode: task.automationTestMode !== false,
     providerId: String(task.providerId || ""),
     monitorAllBoards: task.monitorAllBoards === true,
     pendingAction: task.pendingAction || null,
@@ -208,12 +207,12 @@ export function subscribeState(listener) {
 
 function sanitizeHydratedTask(task) {
   if (!task) return task;
+  const { automationTestMode, ...runtimeTask } = task;
   const safeTask = {
-    ...task,
+    ...runtimeTask,
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-    automationTestMode: task.automationTestMode !== false,
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
     monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : Boolean(task.monitoringEnabled),

@@ -2,7 +2,7 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { analysisTimeoutMs, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, nextCandleTarget, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedExperiencePrompt } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, automatedQuantityLimit, executeDecision, executionLimits, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, MAX_LIVE_ENTRY_QUANTITY, executeDecision, executionLimits, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { normalizeBrowserPlan } from "./tools.mjs";
@@ -87,7 +87,7 @@ function isAutoTakeover(task) {
 function pendingWaitMessage(task, { auto = false } = {}) {
   if (auto && isLiveTask(task)) return "全自动接管：分析通过后直接下单或离场，不再弹窗";
   if (auto) return "全自动接管：分析通过后直接记录，观察模式不会下单";
-  if (isLiveTask(task)) return "请确认下单或离场；你操作完成后交回 AI 继续监控";
+  if (isLiveTask(task)) return "AI 只填表；请在目标页核对并亲自点击提交，再返回标记已提交";
   return "请确认建议；观察模式不会下单";
 }
 
@@ -109,6 +109,23 @@ function openPositionsFromMarket(market) {
   return positions.filter((item) => Number(item?.quantity) > 0);
 }
 
+function pendingPositionQuantity(market, pending) {
+  const ids = new Set((pending?.targetPositionIds || []).map(String).filter(Boolean));
+  const targets = [pending?.targetSymbol, pending?.targetSymbolName, pending?.targetInstrumentId]
+    .map((value) => String(value || "").trim().toLocaleLowerCase()).filter(Boolean);
+  const heldSide = pending?.exitType ? (pending.action === "BUY" ? "SELL" : "BUY") : pending?.action;
+  return openPositionsFromMarket(market).filter((position) => {
+    if (ids.size) return ids.has(String(position.positionOrderId || ""));
+    const matchesTarget = targets.some((target) => [position.symbol, position.symbolName, position.instrumentId]
+      .some((value) => {
+        const normalized = String(value || "").trim().toLocaleLowerCase();
+        return normalized === target;
+      }));
+    const side = String(position.side || "");
+    return matchesTarget && (heldSide === "BUY" ? /买|多|long/i.test(side) : /卖|空|short/i.test(side));
+  }).reduce((sum, position) => sum + Number(position.quantity || 0), 0);
+}
+
 function openPositionCount(market) {
   return openPositionsFromMarket(market).length;
 }
@@ -116,34 +133,38 @@ function openPositionCount(market) {
 function closingActionForPositions(positions) {
   const side = String(positions[0]?.side || "");
   if (/卖|空|short/i.test(side)) return "BUY";
-  return "SELL";
+  if (/买|多|long/i.test(side)) return "SELL";
+  return null;
 }
 
 export function attachPositionExit(decision, market = {}) {
   const positions = openPositionsFromMarket(market);
   if (!positions.length) return decision;
+  if (!decision?.exitType) return decision;
   const requestedIds = (Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : []).map(String).filter(Boolean);
-  const targetPositionIds = requestedIds.length
-    ? requestedIds
-    : positions.map((item) => String(item.positionOrderId || "")).filter(Boolean);
-  const primary = positions[0] || {};
+  const matched = requestedIds.length === 1
+    ? positions.filter((item) => String(item.positionOrderId || "") === requestedIds[0])
+    : requestedIds.length === 0 && positions.length === 1 ? positions : [];
+  const primary = matched.length === 1 ? matched[0] : null;
+  const fail = (flag) => ({
+    ...decision,
+    action: "HOLD",
+    exitType: null,
+    riskFlags: [...new Set([...(decision?.riskFlags || []), flag])],
+  });
+  if (!primary) return fail(requestedIds.length ? "EXIT_TARGET_NOT_FOUND" : "EXIT_TARGET_REQUIRED");
+  if (decision?.exitType !== "TAKE_PROFIT" && decision?.exitType !== "STOP_LOSS") return fail("EXIT_TYPE_REQUIRED");
+  const closingAction = closingActionForPositions([primary]);
+  if (!closingAction) return fail("EXIT_SIDE_UNKNOWN");
+  if (decision.action !== closingAction) return fail("EXIT_DIRECTION_MISMATCH");
   const targeted = {
     ...decision,
-    targetPositionIds,
+    targetPositionIds: [String(primary.positionOrderId || "")].filter(Boolean),
     targetSymbol: decision?.targetSymbol || primary.symbol || "",
     targetSymbolName: decision?.targetSymbolName || primary.symbolName || "",
     targetInstrumentId: decision?.targetInstrumentId || primary.instrumentId || "",
   };
-  if (targeted.exitType === "TAKE_PROFIT" || targeted.exitType === "STOP_LOSS") {
-    if (targeted.action !== "BUY" && targeted.action !== "SELL") targeted.action = closingActionForPositions(positions);
-    return targeted;
-  }
-  if (targeted.action !== "BUY" && targeted.action !== "SELL") return targeted;
-  return {
-    ...targeted,
-    action: closingActionForPositions(positions),
-    exitType: "TAKE_PROFIT",
-  };
+  return targeted;
 }
 
 function shouldUseRecentMonitoring(monitorRecentOnly, market) {
@@ -195,7 +216,6 @@ export function meetsOrderBoundary(decision) {
 export function applyEntryBoundary(decision, market = {}) {
   const next = { ...decision };
   if (next.exitType === "TAKE_PROFIT" || next.exitType === "STOP_LOSS") return next;
-  if (openPositionCount(market) > 0) return next;
   // AI owns direction and timing. Host only evaluates the AI-selected side
   // against the execution boundary; it must never turn HOLD into an order.
   next.signalTier = profitSignalTier(chosenSideProbability(next));
@@ -218,7 +238,7 @@ export function enforceProfitProbability(decision) {
 
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const auto = isAutoTakeover(task);
-  const preview = suggestOrderPreview(task, decision, { enforceAutomationQuantity: auto });
+  const preview = suggestOrderPreview(task, decision, { enforceQuantityLimit: isLiveTask(task) });
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
   const decisionProbability = chosenSideProbability(decision);
@@ -246,14 +266,16 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     source: null,
     suggestedQty: preview.suggestedQty,
     suggestedPrice: preview.suggestedPrice,
-    automatedQuantityLimit: preview.quantityLimitApplied === true,
+    baselinePositionQty: pendingPositionQuantity(task.market, { ...decision, action }),
+    quantityLimitApplied: preview.quantityLimitApplied === true,
     formFilled: false,
     formSubmitBlocked: true,
     createdAt: new Date(now).toISOString(),
+    entryKWindow: decision.exitType ? null : nextCandleTarget({}, now).closeTime,
     deadlineAt: null,
     countdownSec: 0,
     resolvedAt: null,
-    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${preview.quantityLimitApplied ? ` 自动流程数量上限为 ${automatedQuantityLimit(task)}` : ""}`,
+    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${preview.quantityLimitApplied ? ` 实盘单笔入场数量上限为 ${MAX_LIVE_ENTRY_QUANTITY}` : ""}`,
   };
 }
 
@@ -383,32 +405,20 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
   }
   if (task.pendingAction?.status === "WAITING") {
     if (task.autoDecisionEnabled) {
-      task.pendingAction.countdownSec = 0;
-      task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: true })}`;
-      clearPendingActionTimer(task.id);
-      queueMicrotask(() => confirmPendingAction(task.id, { source: "auto_timeout" }).catch(() => {}));
+      clearPendingAction(task, { persist: false });
+      task.nextTrigger = "自动接管已开启；旧建议已取消，等待重新分析";
+      resumeMonitoringAfterAction(task);
     } else {
       task.pendingAction.countdownSec = 0;
       task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${isLiveTask(task) ? "下单和离场都需弹窗确认，完成后交回 AI" : "自动接管已关闭，等待弹窗确认或人工接管"}`;
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${isLiveTask(task) ? "AI 只填表；请在目标页亲自提交，完成后交回 AI" : "自动接管已关闭，等待弹窗确认或人工接管"}`;
       clearPendingActionTimer(task.id);
     }
   }
   task.updatedAt = new Date().toISOString();
   addEvent("auto_decision_updated", isLiveTask(task)
-    ? (task.autoDecisionEnabled ? "全自动接管已开启：分析后直接下单或离场" : "全自动接管已关闭：下单和离场需弹窗确认")
+    ? (task.autoDecisionEnabled ? "全自动接管已开启：分析后直接下单或离场" : "全自动接管已关闭：AI 填表，用户在目标页提交")
     : task.autoDecisionEnabled ? "已打开自动确认，观察模式不会下单" : "已关闭自动确认，建议需弹窗确认", { taskId, enabled: task.autoDecisionEnabled, countdownSec: task.autoDecisionCountdownSec });
-  persistTask(task);
-  return task;
-}
-
-export function setAutomationTestMode(taskId, enabled) {
-  const task = getTask(taskId);
-  if (!task) throw new Error("TASK_NOT_FOUND");
-  task.automationTestMode = enabled !== false;
-  task.updatedAt = new Date().toISOString();
-  addEvent("automation_test_mode_updated", task.automationTestMode ? "自动化测试开关已打开，数量上限为 1" : "自动化测试开关已关闭，数量上限为 20", { taskId, enabled: task.automationTestMode });
   persistTask(task);
   return task;
 }
@@ -462,22 +472,13 @@ export function setTaskMode(taskId, mode) {
   const previous = task.mode;
   task.mode = next;
   if (task.pendingAction?.status === "WAITING") {
-    if (task.autoDecisionEnabled === true) {
-      task.pendingAction.countdownSec = 0;
-      task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: true })}`;
-      clearPendingActionTimer(task.id);
-      queueMicrotask(() => confirmPendingAction(task.id, { source: "auto_timeout" }).catch(() => {}));
-    } else {
-      task.pendingAction.countdownSec = 0;
-      task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${next === "LIVE" ? "下单和离场都需弹窗确认，完成后交回 AI" : "观察模式确认后也不会提交实盘"}`;
-      clearPendingActionTimer(task.id);
-    }
+    clearPendingAction(task, { persist: false });
+    task.nextTrigger = "运行模式已切换；旧建议已取消，等待重新分析";
+    resumeMonitoringAfterAction(task);
   }
   task.updatedAt = new Date().toISOString();
   addEvent("task_mode_updated", next === "LIVE"
-    ? (task.autoDecisionEnabled ? "任务已切换为实盘全自动接管" : "任务已切换为实盘：下单和离场需确认")
+    ? (task.autoDecisionEnabled ? "任务已切换为实盘全自动接管" : "任务已切换为实盘：AI 填表，用户在目标页提交")
     : `任务已切换为${next === "SHADOW" ? "影子记录" : "观察 / 建议"}`, { taskId, mode: next, previous });
   persistTask(task);
   return task;
@@ -518,19 +519,66 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
   return order;
 }
 
+function reconcilePendingPosition(task, market) {
+  const pending = task.pendingAction;
+  if (!pending || !["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || task.mode !== "LIVE") return false;
+  if (!pending.source) return false;
+  const baseline = Number(pending.baselinePositionQty || 0);
+  const quantity = Number(pending.suggestedQty || 0);
+  if (quantity <= 0) return false;
+  const observed = pendingPositionQuantity(market, pending);
+  const filled = pending.exitType ? baseline > 0 && observed <= Math.max(0, baseline - quantity) : observed >= baseline + quantity;
+  if (!filled) return false;
+  clearPendingActionTimer(task.id);
+  const order = recordConfirmedOrder(task, pending, {
+    status: "filled",
+    submitted: true,
+    source: pending.source || "manual_confirm",
+    message: "已通过目标页持仓变化核实成交",
+  });
+  order.status = "filled";
+  order.message = "已通过目标页持仓变化核实成交";
+  persistOrder(order);
+  task.pendingAction = {
+    ...pending,
+    status: "CONFIRMED",
+    source: pending.source || "manual_confirm",
+    resolvedAt: new Date().toISOString(),
+    formSubmitBlocked: false,
+    message: `${pendingActionLabel(pending)}已通过持仓变化核实，继续监控`,
+  };
+  task.nextTrigger = task.pendingAction.message;
+  appendAgentOutput({ taskId: task.id, runId: task.activeRunId || "", stage: "collect", kind: "order", message: task.pendingAction.message, data: { pendingActionId: pending.id, orderId: order.id, observedQuantity: observed } });
+  persistTask(task);
+  return true;
+}
+
 export async function confirmPendingAction(taskId, { source = "manual_confirm", runtime } = {}) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
+  if (isLiveTask(task) && !task.pendingAction.exitType && (!Number.isInteger(Number(task.pendingAction.suggestedQty)) || Number(task.pendingAction.suggestedQty) < 1 || Number(task.pendingAction.suggestedQty) > MAX_LIVE_ENTRY_QUANTITY)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (source === "auto_timeout" && task.autoDecisionEnabled !== true) throw new Error("AUTO_DECISION_DISABLED");
   if (source === "auto_timeout" && isLiveTask(task) && task.autoDecisionEnabled !== true) throw new Error("LIVE_REQUIRES_MANUAL_CONFIRM");
-  if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
+  if (isLiveTask(task) && source === "auto_timeout" && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
   pendingConfirmLocks.add(taskId);
   try {
     clearPendingActionTimer(task.id);
     const actionLabel = pendingActionLabel(task.pendingAction);
     const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "" });
+    if (isLiveTask(task) && source === "manual_confirm") {
+      task.pendingAction = {
+        ...task.pendingAction,
+        status: "AWAITING_FILL",
+        source,
+        message: `请在目标页亲自提交${actionLabel}；Agent 不点击按钮，等待持仓变化核实`,
+      };
+      task.nextTrigger = task.pendingAction.message;
+      appendAgentOutput({ taskId, runId: task.activeRunId || "", stage: "action", kind: "order", message: task.pendingAction.message, data: { pendingActionId: task.pendingAction.id, source, submitted: false } });
+      persistTask(task);
+      return task;
+    }
     if (shouldSubmitLiveOrder(task, source)) {
       task.pendingAction = {
         ...task.pendingAction,
@@ -564,7 +612,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
               controls,
               strategy: LIVE_BOARD_STRATEGY,
             }, { timeoutMs: 20000, signal: submissionAbort.signal });
-            const planned = normalizeBrowserPlan(raw, controls);
+            const planned = normalizeBrowserPlan(raw, controls, { action: task.pendingAction.action, exitType: task.pendingAction.exitType });
             if (planned.ok) browserPlan = planned;
           }
         } catch {}
@@ -606,12 +654,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         });
         task.pendingAction = {
           ...task.pendingAction,
-          status: "CONFIRMED",
+          status: "REJECTED",
           source,
           resolvedAt: new Date().toISOString(),
-          formSubmitBlocked: false,
+          formSubmitBlocked: true,
           message: `已点击${actionLabel}但未成交：${order.message}`,
         };
+        task.status = "MONITORING";
         task.nextTrigger = task.pendingAction.message;
         addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: true, orderId: order.id, submitted: true });
         appendAgentOutput({
@@ -627,6 +676,18 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         return task;
       }
       if (!submitted?.ok || submitted.submitted !== true) {
+        if (submitted?.uncertain === true) {
+          task.pendingAction = {
+            ...task.pendingAction,
+            status: "UNVERIFIED",
+            source,
+            message: `${actionLabel}已点击，但页面没有明确交易结果；继续核对持仓，禁止自动重复下单`,
+          };
+          task.status = "PAUSED";
+          task.nextTrigger = task.pendingAction.message;
+          persistTask(task);
+          return task;
+        }
         task.pendingAction = {
           ...task.pendingAction,
           status: "WAITING",
@@ -644,11 +705,10 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       });
       task.pendingAction = {
         ...task.pendingAction,
-        status: "CONFIRMED",
+        status: "AWAITING_FILL",
         source,
-        resolvedAt: new Date().toISOString(),
         formSubmitBlocked: false,
-        message: `已确认并提交${actionLabel}订单`,
+        message: `已提交${actionLabel}请求，等待持仓变化核实成交`,
       };
       task.nextTrigger = task.pendingAction.message;
       addEvent("suggestion_confirmed", task.pendingAction.message, { taskId, action: task.pendingAction.action, source, orderCreated: true, orderId: order.id, submitted: true });
@@ -744,14 +804,14 @@ export function cancelPendingAction(taskId) {
 export function takeoverPendingAction(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
-  if (task.pendingAction?.status === "WAITING") {
+  if (["WAITING", "AWAITING_FILL", "UNVERIFIED", "REJECTED"].includes(task.pendingAction?.status)) {
     clearPendingActionTimer(task.id);
     task.pendingAction = {
       ...task.pendingAction,
       status: "TAKEN_OVER",
       source: "manual_takeover",
       resolvedAt: new Date().toISOString(),
-      message: "倒计时内已人工接管，自动确认已取消",
+      message: "已人工接管，请在目标页核对订单与持仓",
     };
   }
   return claimManual(taskId);
@@ -822,9 +882,7 @@ function setNextPoll(task, delayMs = monitoringPollIntervalMs(task)) {
 }
 
 function pauseForPendingAction(task) {
-  // Manual mode waits for the user. Auto mode must keep its controller alive
-  // after a rejected/failed browser submission so the next AI round can retry.
-  return task?.pendingAction?.status === "WAITING" && task?.autoDecisionEnabled !== true;
+  return task?.pendingAction?.status === "SUBMITTING";
 }
 
 function resumeMonitoringAfterAction(task) {
@@ -1575,6 +1633,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
     const previousMarket = task.market;
     task.market = toTaskMarket(market);
+    reconcilePendingPosition(task, market);
     syncTaskMetricsFromMarket(task, market);
     task.lastPolledAt = new Date().toISOString();
     task.lastObservedFingerprint = String(market.fingerprint || "");
@@ -1590,7 +1649,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       message: `已采集 ${monitoredCount}/${expectedCount} 个盘${monitoredBoardLabels.length ? `（${monitoredBoardLabels.join("、")}）` : ""} · 当前盘 ${market.symbolName || market.symbol || task.symbol} 最新价 ${task.market.latest.price}，趋势 ${market.trend}，来源 ${market.source}`,
       data: { source: market.source, freshnessSec: market.freshnessSec, historyCount: task.market.historyCount, bookCount: monitoredCount, expectedBookCount: expectedCount, boardCoverage: market.boardCoverage || null, books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, historyCount: book.historyCount })), missingFields: market.missingFields || [] },
     });
-    const marketUnchanged = Boolean(skipIfUnchanged && openPositionCount(market) === 0 && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task));
+    const currentKWindow = nextCandleTarget({}, Date.now()).closeTime;
+    const lastAnalyzedKWindow = task.lastAnalysisAt ? nextCandleTarget({}, new Date(task.lastAnalysisAt).getTime()).closeTime : null;
+    const marketUnchanged = Boolean(skipIfUnchanged && openPositionCount(market) === 0 && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task) && lastAnalyzedKWindow === currentKWindow);
     if (marketUnchanged) {
       const pendingRule = task.rules.some((rule) => rule.status === "pending");
       task.status = monitoringIntent(task)
@@ -1841,28 +1902,33 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         : (isLiveTask(task) ? "规则通过，等待你确认下单或离场" : "规则通过，买卖意图转为建议"));
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: isAutoTakeover(task)
         ? (isLiveTask(task) ? "规则通过；全自动接管，不再弹窗" : "规则通过；观察模式不会下单")
-        : (isLiveTask(task) ? "规则通过；确认后才会下单或离场，完成后交回 AI" : "规则通过；观察模式不会自动下单") });
+        : (isLiveTask(task) ? "规则通过；AI 填表，用户在目标页亲自提交，完成后交回 AI" : "规则通过；观察模式不会自动下单") });
     }
 
     logStage(task, run, "action", isAutoTakeover(task)
       ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
       : "路由最终建议，等待确认后决定是否下单");
     assertCurrent();
-    const canPromptOrder = meetsOrderBoundary(task.decision);
-    const execution = canPromptOrder
+    const unsettledOrder = ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(task.pendingAction?.status);
+    const previousEntryKWindow = task.pendingAction?.entryKWindow || (task.pendingAction?.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null);
+    const sameKEntry = !task.decision.exitType && previousEntryKWindow === nextCandleTarget({}, Date.now()).closeTime;
+    const canPromptOrder = !unsettledOrder && !sameKEntry && !rulePaused && !holdRequired && meetsOrderBoundary(task.decision);
+    const execution = unsettledOrder
+      ? { ok: false, code: task.pendingAction.status === "UNVERIFIED" ? "ORDER_UNVERIFIED" : "ORDER_AWAITING_FILL", route: "ORDER_PENDING", message: task.pendingAction.message }
+      : canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
         ok: true,
         skipped: true,
-        reason: task.decision.action === "HOLD" ? "HOLD" : "BOUNDARY",
-        route: "HOLD",
-        code: task.decision.action === "HOLD" ? "HOLD" : "BELOW_ENTRY_THRESHOLD",
+        reason: task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
+        route,
+        code: task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "BELOW_ENTRY_THRESHOLD",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
     if (canPromptOrder) {
       await openPendingAction(task, { runtime, run });
-    } else {
+    } else if (!unsettledOrder && !sameKEntry) {
       clearPendingAction(task, { persist: false });
     }
     if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
@@ -1876,7 +1942,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           ? `${decisionBoardLabel} ${actionName} 已自动执行，继续监控`
           : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${actionName} 建议已生成`);
         appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "suggestion", message: waiting
-          ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName}自动执行中` : `${decisionBoardLabel} ${actionName}待确认；确认后才会下单或离场`)
+          ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName}自动执行中` : `${decisionBoardLabel} ${actionName}待用户在目标页提交`)
           : submitted && isAutoTakeover(task)
             ? `${decisionBoardLabel} ${actionName}已自动执行；继续监控持仓离场`
             : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${actionName}建议已生成`, data: { action: task.decision.action, exitType: task.decision.exitType || null, targetPositionIds: task.decision.targetPositionIds || [], targetSymbol: task.decision.targetSymbol, targetSymbolName: task.decision.targetSymbolName, targetInstrumentId: task.decision.targetInstrumentId, route, executionCode: execution.code, pendingActionId: task.pendingAction?.id || null } });
@@ -1887,8 +1953,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       appendAgentOutput({ taskId, runId: run.id, stage: "action", level: "error", message: `动作未执行：${execution.message}`, data: { code: execution.code } });
     } else {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
-      completeWorkflow(task, "action", execution.reason === "HOLD" ? "保持观望" : execution.reason === "BOUNDARY" ? "模型建议已保留，未达 45% 入场边界" : "已记录受控动作");
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: execution.reason === "HOLD" ? "决策为 HOLD，无需动作" : execution.reason === "BOUNDARY" ? "模型结论已保留，未达入场边界，不弹确认" : "建议已记录，等待确认" });
+      completeWorkflow(task, "action", execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，未达 45% 入场边界" : "已记录受控动作");
+      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: execution.reason === "HOLD" ? "决策为 HOLD，无需动作" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型结论已保留，未达入场边界，不弹确认" : "建议已记录，等待确认" });
     }
     const analysis = {
       id: run.id,

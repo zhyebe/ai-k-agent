@@ -212,7 +212,7 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .text-muted { color: var(--muted); }
 .wallet-icon { font-size: 16px; font-weight: 700; }
 
-.console-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(310px, 0.85fr); gap: 16px; margin-bottom: 16px; }
+.console-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr); gap: 16px; margin-bottom: 16px; }
 .panel { min-width: 0; background: var(--surface); border: 1px solid var(--border-soft); border-radius: var(--radius); box-shadow: var(--shadow-panel); }
 .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px 0; }
 .panel-kicker { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -265,7 +265,6 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .action-buy { background: var(--red-soft); border-color: rgba(239, 127, 131, 0.25); }.action-sell { background: var(--green-soft); border-color: rgba(111, 219, 138, 0.25); }.action-hold { background: var(--blue-soft); border-color: rgba(126, 185, 238, 0.25); }
 .decision-symbol { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 auto; border-radius: 6px; }.action-buy .decision-symbol { color: var(--red); background: rgba(239, 127, 131, 0.16); }.action-sell .decision-symbol { color: var(--green); background: rgba(111, 219, 138, 0.16); }.action-hold .decision-symbol { color: var(--blue); background: rgba(126, 185, 238, 0.16); }
 .decision-action > div:nth-child(2) { min-width: 0; flex: 1; }.decision-action strong, .decision-action span { display: block; }.decision-action strong { color: var(--text-strong); font-size: 14px; }.decision-action span { margin-top: 4px; color: var(--muted); font-size: 10px; }.decision-time { align-self: flex-start; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
-.confidence-bar { position: relative; height: 27px; margin: 0 18px; overflow: hidden; background: var(--surface-soft); border-radius: 4px; }.confidence-bar > div { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(111, 219, 138, 0.2); border-right: 2px solid var(--green); }.confidence-bar span { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; height: 100%; padding: 0 8px; color: var(--muted); font-size: 10px; }.confidence-bar b { color: var(--green); font-weight: 600; }
 .direction-probabilities { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 18px 0; }
 .direction-probabilities > div { padding-right: 8px; border-right: 1px solid var(--border-soft); }
 .direction-probabilities > div:last-child { border-right: 0; padding-right: 0; }
@@ -293,6 +292,46 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .pending-action-card p { margin: 8px 0 0; color: var(--muted-strong); font-size: 11px; line-height: 1.45; }
 .pending-action-meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 10px; }
 .pending-action-hint { margin: 10px 0 0; color: var(--blue); font-size: 11px; }
+.decision-panel { padding-bottom: 24px; }
+.decision-panel .panel-header { padding: 24px 26px 0; }
+.decision-panel .panel-kicker { font-size: 13px; letter-spacing: 0; }
+.decision-panel h2 { font-size: 24px; }
+.decision-panel .decision-age { font-size: 13px; }
+.decision-panel .decision-action { gap: 16px; margin: 22px 26px 20px; padding: 14px 0 14px 18px; border: 0; border-left: 4px solid var(--blue); border-radius: 0; background: transparent; }
+.decision-panel .action-buy { border-left-color: var(--red); }
+.decision-panel .action-sell { border-left-color: var(--green); }
+.decision-panel .decision-symbol { width: 54px; height: 54px; }
+.decision-panel .decision-action strong { font-size: 26px; line-height: 1.25; overflow-wrap: anywhere; }
+.decision-panel .decision-action span { margin-top: 8px; font-size: 15px; line-height: 1.45; }
+.decision-panel .decision-time { font-size: 13px; white-space: nowrap; }
+.decision-panel .direction-probabilities { gap: 18px; margin: 20px 26px 0; }
+.decision-panel .direction-probabilities span { font-size: 15px; }
+.decision-panel .direction-probabilities b { margin-top: 8px; font-size: 32px; }
+.decision-panel .decision-stats { gap: 16px; margin: 24px 26px; }
+.decision-panel .decision-stats span { font-size: 14px; }
+.decision-panel .decision-stats b { font-size: 20px; }
+.decision-panel .board-assessment-list, .decision-panel .operator-assessment { margin-right: 26px; margin-left: 26px; padding: 14px; }
+.decision-panel .board-assessment-row, .decision-panel .operator-assessment strong, .decision-panel .operator-assessment > span { font-size: 14px; }
+.decision-panel .reason-block { margin: 0 26px; }
+.decision-panel .block-label, .decision-panel .reason-row { font-size: 14px; }
+.decision-panel .reason-row { min-height: 32px; }
+.decision-panel .invalidation, .decision-panel .decision-safe { margin-right: 26px; margin-left: 26px; font-size: 14px; line-height: 1.5; }
+.decision-panel .decision-actions, .decision-panel .pending-action-card { margin-right: 26px; margin-left: 26px; }
+.decision-panel .pending-action-card { padding: 18px; }
+.decision-panel .pending-action-head strong { font-size: 18px; overflow-wrap: anywhere; }
+.decision-panel .pending-action-card p, .decision-panel .pending-action-meta, .decision-panel .pending-action-hint { font-size: 14px; }
+@media (max-width: 680px) {
+  .decision-panel .panel-header { flex-wrap: wrap; padding: 20px 16px 0; }
+  .decision-panel h2 { font-size: 22px; }
+  .decision-panel .decision-action { flex-wrap: wrap; margin: 18px 16px; padding-left: 12px; }
+  .decision-panel .decision-action strong { font-size: 22px; }
+  .decision-panel .decision-action span { font-size: 14px; }
+  .decision-panel .decision-time { width: 100%; margin-left: 70px; }
+  .decision-panel .direction-probabilities, .decision-panel .decision-stats, .decision-panel .reason-block, .decision-panel .board-assessment-list, .decision-panel .operator-assessment, .decision-panel .invalidation, .decision-panel .decision-safe, .decision-panel .decision-actions, .decision-panel .pending-action-card { margin-right: 16px; margin-left: 16px; }
+  .decision-panel .direction-probabilities b { font-size: 28px; }
+  .decision-panel .board-assessment-row { flex-wrap: wrap; }
+  .decision-panel .board-assessment-row span { text-align: left; }
+}
 .trade-confirm-backdrop { z-index: 25; }
 .trade-confirm-shell { width: min(480px, 100%); }
 .trade-confirm-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 20px 0; }

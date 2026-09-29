@@ -99,10 +99,11 @@ export interface PendingAction {
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
   signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
-  status: "WAITING" | "SUBMITTING" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
+  status: "WAITING" | "SUBMITTING" | "AWAITING_FILL" | "UNVERIFIED" | "REJECTED" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
+  baselinePositionQty?: number;
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
-  automatedQuantityLimit?: boolean;
+  quantityLimitApplied?: boolean;
   suggestedPrice: number | null;
   formFilled: boolean;
   formSubmitBlocked: boolean;
@@ -334,7 +335,6 @@ export interface Task {
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
   autoDecisionCountdownSec?: number;
-  automationTestMode?: boolean;
   providerId?: string;
   pendingAction?: PendingAction | null;
   activeRunId?: string | null;

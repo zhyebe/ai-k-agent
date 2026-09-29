@@ -37,9 +37,9 @@ test("buy and sell stay suggestions even when automation is explicitly authorize
   const preview = suggestOrderPreview({ ...task, market: { latest: { price: 100 }, account: { availableFunds: 5000 } }, metrics: { equity: 5000 } }, decision);
   assert.equal(preview.suggestedQty, 2);
   assert.equal(preview.formSubmitBlocked, true);
-  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), false);
   assert.equal(shouldSubmitLiveOrder({ mode: "PAPER" }, "manual_confirm"), false);
-  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: true }, "auto_timeout"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: true, target: { url: "https://smyw.haohandahan.cn/client/#/transcc" } }, "auto_timeout"), true);
   assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false }, "auto_timeout"), false);
 });
 
@@ -48,7 +48,6 @@ test("离场预览使用持仓数量并保留止盈类型", () => {
     symbol: "DGKZ",
     mode: "LIVE",
     autoDecisionEnabled: true,
-    automationTestMode: true,
     metrics: { equity: 5000 },
     market: {
       latest: { price: 1165 },
@@ -61,8 +60,9 @@ test("离场预览使用持仓数量并保留止盈类型", () => {
     targetSymbol: "DGKZ",
     targetPositionIds: ["P-123"],
     profitProbability: 0.8,
-  }, { enforceAutomationQuantity: true });
-  assert.equal(preview.suggestedQty, 1);
+  }, { enforceQuantityLimit: true });
+  assert.equal(preview.suggestedQty, 3);
+  assert.equal(preview.quantityLimitApplied, false);
   assert.equal(preview.exitType, "TAKE_PROFIT");
 });
 
@@ -83,4 +83,14 @@ test("离场预览在未精确匹配单号时仍使用持仓数量", () => {
   });
   assert.equal(preview.suggestedQty, 4);
   assert.equal(preview.exitType, "TAKE_PROFIT");
+});
+
+test("离场目标单号不匹配时不能退回首笔持仓", () => {
+  const preview = suggestOrderPreview({
+    metrics: { equity: 5000 },
+    market: { latest: { price: 100 }, account: { positions: [{ symbol: "DGKZ", positionOrderId: "P-1", quantity: 4 }] } },
+  }, {
+    action: "SELL", exitType: "TAKE_PROFIT", targetSymbol: "DGKZ", targetPositionIds: ["P-2"],
+  });
+  assert.equal(preview.suggestedQty, null);
 });

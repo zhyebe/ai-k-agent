@@ -346,8 +346,59 @@ export function isPositionListExitControlText(text, label) {
 }
 
 export function isTradeWriteResponse(url, method) {
-  if (String(method || "GET").toUpperCase() === "GET") return false;
-  return /intraday-trade|position|holding|warehouse|trade|order|entrust|bargain|deal|transfer|inventory|submit|委托|转让|订立/i.test(String(url || ""));
+  if (String(method || "GET").toUpperCase() !== "POST") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "smyw.haohandahan.cn"
+      && /\/intraday-trade\/trade\/(?!cancel(?:All)?(?:\/|$))[^/]+\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function watchTradeResponse(page) {
+  let matched = null;
+  const listener = (response) => {
+    if (matched || !isTradeWriteResponse(response.url(), response.request?.().method?.())) return;
+    matched = response;
+  };
+  page.on("response", listener);
+  return {
+    peek: () => matched,
+    dispose: () => page.off("response", listener),
+  };
+}
+
+async function readTradePageHint(page) {
+  return page.evaluate(() => {
+    const visible = (element) => {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+    };
+    const notices = Array.from(document.querySelectorAll(".el-message, .el-notification__content, .el-message-box__message"));
+    return String(notices.find(visible)?.textContent || "").trim();
+  });
+}
+
+function tradePageHintKind(hint) {
+  if (/失败|不足|错误|拒绝|无效|未成功/.test(hint)) return "rejected";
+  if (/成功|已受理|已提交|提交完成/.test(hint)) return "submitted";
+  return "";
+}
+
+async function observeTradeFeedback(page, writeResponse, baselineHint) {
+  const deadline = Date.now() + 8000;
+  let responseAt = null;
+  while (Date.now() < deadline) {
+    const response = writeResponse.peek();
+    if (response && responseAt === null) responseAt = Date.now();
+    const hint = await readTradePageHint(page).catch(() => "");
+    if (hint && hint !== baselineHint && tradePageHintKind(hint)) return { response, pageHint: hint };
+    if (responseAt !== null && Date.now() - responseAt >= 1200) return { response, pageHint: "" };
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return { response: writeResponse.peek(), pageHint: "" };
 }
 
 function compactControlLabel(value) {
@@ -363,8 +414,9 @@ export function tradeControlLabels(controls = {}) {
   return labels;
 }
 
-export function normalizeBrowserPlan(plan, controls = {}) {
+export function normalizeBrowserPlan(plan, controls = {}, { action = "", exitType = null } = {}) {
   const allowed = tradeControlLabels(controls);
+  const allowedSubmitLabels = action && !exitType ? tradeSubmitLabels({ action }) : [];
   const actions = [];
   for (const item of Array.isArray(plan?.actions) ? plan.actions : []) {
     if (actions.length >= 8) break;
@@ -375,13 +427,13 @@ export function normalizeBrowserPlan(plan, controls = {}) {
     }
     const label = compactControlLabel(item?.label);
     if (!label || !allowed.some((item) => item === label || item.includes(label) || label.includes(item))) continue;
-    if (type === "click") actions.push({ type: "click", label });
+    if (type === "click" && allowedSubmitLabels.includes(label) && !actions.some((action) => action.type === "click")) actions.push({ type: "click", label });
     if (type === "fill") {
       const value = item.value == null ? "" : String(item.value).slice(0, 32);
       if (value) actions.push({ type: "fill", label, value });
     }
   }
-  return { ok: actions.length > 0, goal: String(plan?.goal || ""), actions };
+  return { ok: actions.length > 0, goal: String(plan?.goal || ""), actions: [...actions.filter((item) => item.type !== "click"), ...actions.filter((item) => item.type === "click")] };
 }
 
 export async function readTradeControls({ sessionId = "default", symbol = "", symbolName = "", instrumentId = "", targetPositionIds = [] } = {}) {
@@ -710,13 +762,27 @@ async function applyBrowserPlan(page, plan) {
       return { ok: true, clicked: true, label };
     }, action);
     if (result?.filled) last.filled.push(action.label);
-    if (result?.clicked) last = { ...last, clicked: true, ok: true, label: action.label, code: "AI_BROWSER_CLICKED" };
+    if (result?.clicked) {
+      last = { ...last, clicked: true, ok: true, label: action.label, code: "AI_BROWSER_CLICKED" };
+      break;
+    }
     await new Promise((resolve) => setTimeout(resolve, 180));
   }
   if (last.clicked) {
     await confirmVisibleTradeDialog(page);
   }
   return last;
+}
+
+export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null, pageHint = "", clicked = {} } = {}) {
+  const detail = String(pageHint || "").trim();
+  if (tradePageHintKind(detail) === "rejected") {
+    return { ok: false, code: "TRADE_REJECTED", message: detail, filled: true, submitted: true, responseOk };
+  }
+  if (tradePageHintKind(detail) === "submitted" || (responseSeen && responseOk === true)) {
+    return { ok: true, code: "TRADE_SUBMITTED", message: detail || "已提交交易请求，等待持仓对账", filled: true, submitted: true, responseOk, submitLabel: clicked?.label || null };
+  }
+  return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };
 }
 
 export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], formAlreadyFilled = false, browserPlan = null } = {}) {
@@ -732,14 +798,9 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     const selected = await selectPageBoardInstrument(sessionId, { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") });
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", message: "目标页无法切换到建议指定的盘口", filled: false, submitted: false };
   }
+  const baselineHint = await readTradePageHint(page).catch(() => "");
+  const writeResponse = watchTradeResponse(page);
   try {
-    const writeWait = page.waitForResponse((response) => {
-      try {
-        return isTradeWriteResponse(response.url(), response.request?.().method?.());
-      } catch {
-        return false;
-      }
-    }, { timeout: 8000 }).catch(() => null);
     let filled = { ok: true, filled: Boolean(exitType), submitted: false, fields: [] };
     let clicked = { clicked: false };
     if (browserPlan?.actions?.length) {
@@ -767,30 +828,13 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (!exitType && !clicked.clicked) {
       return { ok: false, code: clicked.reason || "SUBMIT_BUTTON_NOT_FOUND", message: action === "SELL" ? "目标页未找到卖出订立按钮" : "目标页未找到买入订立按钮", filled: true, submitted: false };
     }
-    const response = await writeWait;
-    let responseOk = null;
-    if (response) {
-      responseOk = response.ok();
-    }
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    const pageHint = await page.evaluate(() => {
-      const toast = document.querySelector(".el-message, .el-notification__content, .el-message-box__message");
-      return String(toast?.textContent || "").trim();
-    });
-    if (responseOk === false || /失败|不足|错误|拒绝/.test(pageHint)) {
-      return { ok: false, code: "TRADE_REJECTED", message: pageHint || "交易所拒绝下单", filled: true, submitted: true, responseOk };
-    }
-    return {
-      ok: true,
-      code: response ? "TRADE_SUBMITTED" : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? "POSITION_LIST_EXIT_CLICKED" : clicked?.code === "AI_BROWSER_CLICKED" ? "AI_BROWSER_CLICKED" : "TRADE_CLICKED",
-      message: pageHint || (clicked?.code === "AI_BROWSER_CLICKED" ? `AI 已点${clicked.label}` : clicked?.code === "POSITION_LIST_EXIT_CLICKED" ? `已点击持仓列表${clicked.label}` : response ? "已提交交易请求" : "已点击下单按钮"),
-      filled: true,
-      submitted: true,
-      responseOk,
-      submitLabel: clicked?.label || null,
-    };
+    const { response, pageHint } = await observeTradeFeedback(page, writeResponse, baselineHint);
+    const responseOk = response ? response.ok() : null;
+    return tradeSubmissionOutcome({ responseSeen: Boolean(response), responseOk, pageHint, clicked });
   } catch (error) {
     return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, filled: true, submitted: false };
+  } finally {
+    writeResponse.dispose();
   }
 }
 
