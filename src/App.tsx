@@ -212,13 +212,13 @@ const taskIsMonitoring = (task: Task | null | undefined) => Boolean(task && !tas
 const openPositions = (task: Task | null | undefined) => (task?.market?.account?.positions || []).filter((item) => Number(item.quantity) > 0);
 const consoleStatusCopy = (task: Task) => {
   const pending = task.pendingAction;
-  if (pending?.status === "WAITING" && task.autoDecisionEnabled !== true) {
-    return pending.exitType ? "AI 已准备离场表单，等待你在目标页亲自提交" : "AI 已填写入场表单，等待你在目标页亲自提交";
+  if (pending?.status === "WAITING" && task.mode !== "LIVE" && task.autoDecisionEnabled !== true) {
+    return pending.exitType ? "AI 已准备离场表单，等待确认" : "AI 已填写入场表单，等待确认";
   }
   if (pending?.status === "SUBMITTING") return "正在目标页执行下单或离场";
   if (pending?.status === "AWAITING_FILL") return "等待目标页持仓变化，核实入场或离场";
-  if (pending?.status === "UNVERIFIED") return "交易写请求未核实，已暂停自动下单，请人工检查";
-  if (pending?.status === "REJECTED") return "交易所拒绝请求，已暂停自动下单，请人工检查";
+  if (pending?.status === "UNVERIFIED") return "交易页面结果未明确，继续监控持仓变化核实成交";
+  if (pending?.status === "REJECTED") return "交易所拒绝请求，下一 K 继续由 AI 重新判断";
   if (task.monitoringEnabled) {
     if (task.status === "MONITORING") {
       return task.autoDecisionEnabled
@@ -426,11 +426,11 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
           <div className="auth-heading">
           <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
           <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用已开通的账号登录。实盘可由 AI 全自动接管，也可由 AI 填表、你在目标页提交。</p>
+          <p>使用已开通的账号登录。LIVE 实盘由 AI 自动接管目标页下单和离场。</p>
           </div>
           <div className="auth-safety">
             <ShieldCheck size={17} />
-            <div className="auth-safety-copy"><strong>受控下单</strong><span>分析由 AI 决定入场和离场；实盘可全自动接管，也可每次确认后在已登录页面提交订单。</span></div>
+            <div className="auth-safety-copy"><strong>自动下单</strong><span>分析由 AI 决定方向、入场和离场；LIVE 通过已登录页面自动提交并核实持仓变化。</span></div>
             <code>CONFIRM</code>
           </div>
           {window.axiomDesktop && <div className="auth-service-settings">
@@ -657,7 +657,7 @@ function App() {
     try {
       const next = await startTask(task.id);
       replaceTask(next);
-      notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察；手动模式出现建议时会提醒你在目标页提交" : "启动未通过，自动动作保持锁定");
+      notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察并自动执行 LIVE 动作" : "启动未通过，等待连接恢复");
     } catch (error) {
       notify(`启动失败：${error instanceof Error ? error.message : "请检查任务配置"}`);
     } finally { setBusyAction(null); }
@@ -732,7 +732,7 @@ function App() {
     try {
       const next = await setTaskMode(task.id, mode);
       replaceTask(next);
-      notify(next.mode === "LIVE" ? (next.autoDecisionEnabled ? "已切换为实盘全自动接管" : "已切换为实盘：下单和离场需确认") : "已切换为观察模式，确认后也不会提交实盘");
+      notify(next.mode === "LIVE" ? "已切换为实盘全自动接管" : "已切换为观察模式，确认后也不会提交实盘");
     } catch (error) {
       notify(`切换运行模式失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
@@ -802,7 +802,7 @@ function App() {
       if (result.skipped) notify("上一轮分析仍在进行，已跳过本次触发");
       else if (result.route === "SUGGESTION_PENDING") {
         const target = decisionTargetLabel(result.task.decision);
-        notify(result.task.mode === "LIVE" ? `分析完成：${target ? `${target} ` : ""}建议已生成，请在目标页核对并提交` : `分析完成：${target ? `${target} ` : ""}已给出建议，观察模式不会下单`);
+        notify(result.task.mode === "LIVE" ? `分析完成：${target ? `${target} ` : ""}AI 将自动执行并持续监控` : `分析完成：${target ? `${target} ` : ""}已给出建议，观察模式不会下单`);
       }
       else if (result.task.status === "PAUSED" || result.task.status === "BLOCKED") notify(`分析暂停：${displayLabel(flags[0] || result.route || result.task.status, { ...riskLabels, ...routeLabels, ...statusMetaLabels }, "需要处理")}`);
       else notify(`分析完成：${decisionTargetLabel(result.task.decision) ? `${decisionTargetLabel(result.task.decision)} · ` : ""}${displaySuggestion(result.task.decision.action)}`);
@@ -1060,7 +1060,7 @@ function App() {
       </main>
 
       {streamOpen && task && <AgentOutputDrawer task={task} lines={agentLines} runs={agentRuns} loading={agentLoading || agentTaskId !== task.id} error={agentError} onRetry={() => setAgentRefreshVersion((value) => value + 1)} onClose={() => setStreamOpen(false)} />}
-      {task?.pendingAction && task.autoDecisionEnabled !== true && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
+      {task?.pendingAction && task.mode !== "LIVE" && task.autoDecisionEnabled !== true && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
         <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
       )}
       {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} savedCredentials={workspace.credentials || []} />}
@@ -1270,7 +1270,7 @@ function PendingActionCard({ pending, onTakeover, busyAction }: { pending: Pendi
         <span>{pending.formFilled ? "表单已填写" : "表单未填写"}</span>
       </div>
       {(pending.entryPrice || pending.takeProfitPrice || pending.stopLossPrice) ? <div className="pending-action-meta"><span>AI 入场 {pending.entryPrice ?? "--"}</span><span>AI 止盈 {pending.takeProfitPrice ?? "--"}</span><span>AI 止损 {pending.stopLossPrice ?? "--"}</span></div> : null}
-      {waiting ? <p className="pending-action-hint">请在目标页核对表单并亲自点击提交；Agent 不会代点。</p> : null}
+      {waiting ? <p className="pending-action-hint">等待确认后执行。</p> : null}
       {pending.status === "AWAITING_FILL" || pending.status === "UNVERIFIED" || pending.status === "REJECTED" ? <button type="button" className="button button-secondary" onClick={onTakeover} disabled={busyAction !== null}><Hand size={15} />人工接管并核对</button> : null}
     </div>
   );
@@ -1310,7 +1310,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
         {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
       </div>
       <div className="invalidation"><AlertTriangle size={14} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
-      {pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} onTakeover={onTakeoverAction} busyAction={busyAction} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? (task.mode === "LIVE" ? "全自动接管中：不弹确认，只展示下单数量与盈亏" : "全自动确认建议，观察模式不会下单") : (task.mode === "LIVE" ? "下单和离场由你在目标页亲自提交，AI 只填表和继续监控" : "观察模式只记录建议，确认后也不会提交实盘")}</span></div>}
+      {pending && task.mode === "LIVE" ? <div className="decision-safe"><ShieldCheck size={14} /><span>{pending.message || "AI 正在自动执行并核实持仓"}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} onTakeover={onTakeoverAction} busyAction={busyAction} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? (task.mode === "LIVE" ? "全自动接管中：不弹确认，只展示下单数量与盈亏" : "全自动确认建议，观察模式不会下单") : (task.mode === "LIVE" ? "实盘动作由 AI 自动提交并持续监控" : "观察模式只记录建议，确认后也不会提交实盘")}</span></div>}
     </section>
   );
 }
@@ -1382,7 +1382,7 @@ function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRu
         <div className="large-flow">{task.workflow.map((step, index) => <div className={`large-step ${step.status}`} key={step.key}><div className="large-step-number">{step.status === "complete" ? <Check size={15} /> : index + 1}</div><div><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className="large-step-line" />}</div>)}</div>
         <div className="overview-actions"><button className={`button ${isRunning ? "button-danger" : "button-primary"}`} onClick={isRunning ? onStop : onRun} disabled={busyAction !== null}>{isRunning ? <><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</> : <><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "运行任务"}</>}</button><button type="button" className="button button-secondary" onClick={onEdit} disabled={busyAction !== null}><Pencil size={14} />编辑</button><button type="button" className="button button-danger" onClick={() => onDelete(task)} disabled={busyAction !== null}><Trash2 size={14} />删除</button></div>
       </div>
-      <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "全自动接管" : "目标页手动提交") : "观察模式不下单"}</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "全自动接管已开启：分析后直接下单或离场" : "AI 只填表；你在目标页亲自提交，之后交回 AI 监控") : "只给出买卖建议，不提交实盘"}</span></div></div></aside>
+      <aside className="workflow-side"><div className="side-stat"><span>任务状态</span><strong>{statusMeta[task.status]?.label || "待确认"}</strong><small>{task.nextTrigger || "等待启动"}</small></div><div className="side-stat"><span>当前建议</span><strong className="tabular">{task.decision.riskFlags.includes("NOT_ANALYZED") ? "--" : displayAction(task.decision.action)}</strong><small>{task.mode === "LIVE" ? "全自动接管" : "观察模式不下单"}</small></div><div className="side-stat"><span>风险标记</span><strong className="tabular">{task.decision.riskFlags.length}</strong><small>{task.decision.riskFlags[0] ? displayLabel(task.decision.riskFlags[0], riskLabels, "待确认") : "无"}</small></div><div className="side-note"><ShieldCheck size={16} /><div><b>自动执行边界</b><span>{task.mode === "LIVE" ? "全自动接管：AI 决定方向、入场、离场并持续核实持仓" : "只给出买卖建议，不提交实盘"}</span></div></div></aside>
       </section>
     </div>
   </>;
@@ -1588,7 +1588,7 @@ function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: {
           <div><span>建议价</span><b className="tabular">{pending.suggestedPrice ?? "--"}</b></div>
           <div><span>建议量</span><b className="tabular">{pending.suggestedQty ?? "--"}</b></div>
         </div>
-        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>应用不会替你点击网页。只有在目标页亲自提交后，再点下方“已在目标页提交”；Agent 将核对持仓变化。</span></div> : null}
+        {live ? <div className="invalidation trade-confirm-warn"><AlertTriangle size={14} /><span>LIVE 订单由 Agent 自动点击目标页控件，并通过持仓变化核实结果。</span></div> : null}
         <p className="trade-confirm-message">{pending.message}</p>
         <div className="modal-actions trade-confirm-actions">
           <button type="button" className="button button-quiet" onClick={onCancel} disabled={busyAction === "cancel"}>{busyAction === "cancel" ? "取消中" : "暂不下单"}</button>

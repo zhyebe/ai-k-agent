@@ -161,7 +161,7 @@ test("live auto mode submits the AI action without a confirmation dialog", async
   assert.equal(state.orders.find((order) => order.taskId === task.id)?.status, "submitted");
 });
 
-test("auto click without a verified write request pauses without retrying", async () => {
+test("auto click without a verified write request keeps monitoring for reconciliation", async () => {
   const task = insertTask(`task_live_unverified_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);
   let submissions = 0;
@@ -175,7 +175,8 @@ test("auto click without a verified write request pauses without retrying", asyn
     },
   });
   assert.equal(submissions, 1);
-  assert.equal(result.pendingAction.status, "UNVERIFIED");
+  assert.equal(result.pendingAction.status, "AWAITING_FILL");
+  assert.equal(result.status, "MONITORING");
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
 
@@ -194,7 +195,7 @@ test("trade rejection is recorded and the next K remains eligible", async () => 
   assert.match(result.pendingAction.message, /可用资金不足/);
 });
 
-test("manual live mode only records human submission and never clicks the target page", async () => {
+test("LIVE mode submits through the target page without a human click", async () => {
   const task = insertTask(`task_live_confirm_${Date.now()}`, { mode: "LIVE" });
   task.pendingAction = buildPendingAction(task, task.decision);
   let submitted = 0;
@@ -207,12 +208,12 @@ test("manual live mode only records human submission and never clicks the target
       },
     },
   });
-  assert.equal(submitted, 0);
+  assert.equal(submitted, 1);
   assert.equal(confirmed.pendingAction.status, "AWAITING_FILL");
-  assert.equal(confirmed.pendingAction.formSubmitBlocked, true);
-  assert.match(confirmed.pendingAction.message, /Agent 不点击按钮/);
+  assert.equal(confirmed.pendingAction.formSubmitBlocked, false);
+  assert.doesNotMatch(confirmed.pendingAction.message, /亲自提交|Agent 不点击按钮/);
   const orders = state.orders.filter((order) => order.taskId === task.id);
-  assert.equal(orders.length, 0);
+  assert.equal(orders.length, 1);
 });
 
 test("live auto mode lets AI plan one direction-matched browser click", async () => {
@@ -373,10 +374,10 @@ test("multi-board pending action uses and submits the selected board price and i
   assert.equal(order.instrumentId, "537");
 });
 
-test("live auto timeout cannot skip the confirm dialog when switch is off", async () => {
+test("LIVE mode does not require a confirm dialog when auto flag is false", async () => {
   const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: false });
   task.pendingAction = buildPendingAction(task, task.decision);
-  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /AUTO_DECISION_DISABLED/);
+  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /BROWSER_SESSION_NOT_FOUND/);
   assert.equal(task.pendingAction.status, "WAITING");
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });

@@ -163,9 +163,9 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "GATE_45", "EXECUTE_VISIBLE_CLICKS"],
-    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立" },
+    entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立" },
     exit: { whileHolding: true, positionList: ["转让", "止盈", "止损"], formFallback: ["卖出转让", "买入转让"] },
-    noSecondEntryWhileHolding: true,
+    noSecondEntryWhileHolding: false,
   },
   kline: {
     summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，判断必须针对下一根将在第50秒打印的K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",

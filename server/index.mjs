@@ -595,7 +595,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     symbol: String(body.symbol || "DGJJ"),
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
-    autoDecisionEnabled: false,
+    autoDecisionEnabled: (body.mode !== "PAPER" && body.mode !== "SHADOW"),
     autoDecisionCountdownSec: 30,
     providerId: request.auth?.type === "user" ? resolveDefaultProviderId(request.auth.user.id) : "",
     pendingAction: null,
@@ -670,6 +670,7 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
   task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;
   task.mode = body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : body.mode === "LIVE" ? "LIVE" : task.mode;
+  if (task.mode === "LIVE") task.autoDecisionEnabled = true;
   task.updatedAt = new Date().toISOString();
   try {
     await persistTask(task);

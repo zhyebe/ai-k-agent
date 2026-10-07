@@ -15,8 +15,6 @@ export function isLiveTask(task) {
 
 export function shouldSubmitLiveOrder(task, source = "manual_confirm") {
   return isLiveTask(task)
-    && source === "auto_timeout"
-    && task?.autoDecisionEnabled === true
     && task?.stopLocked !== true
     && isTradingSwitchOn();
 }
@@ -55,11 +53,12 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);
   const requestedPct = Number(decision?.targetPositionPct || 0);
   const orderPct = Number(decision?.maxOrderValuePct || executionLimits.maxOrderValuePct);
-  const pct = Math.min(
-    requestedPct > 0 ? requestedPct : orderPct,
-    orderPct > 0 ? orderPct : executionLimits.maxOrderValuePct,
-    executionLimits.maxOrderValuePct,
-  );
+  const requestedValuePct = requestedPct > 0 && orderPct > 0
+    ? Math.min(requestedPct, orderPct)
+    : requestedPct > 0 ? requestedPct : orderPct > 0 ? orderPct : 0;
+  const pct = String(task?.mode || "") === "LIVE"
+    ? requestedValuePct
+    : Math.min(requestedValuePct, executionLimits.maxOrderValuePct);
   const hasPrice = Number.isFinite(price) && price > 0;
   let suggestedQty = null;
   const positions = Array.isArray(task?.market?.account?.positions) ? task.market.account.positions : [];
@@ -71,9 +70,9 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
       ? targetIds.has(String(position?.positionOrderId || ""))
       : [position?.symbol, position?.symbolName, position?.instrumentId].some((value) => String(value || "") && targetValues.includes(String(value).trim().toLocaleLowerCase())))
     : [];
-  const targetPosition = targetMatches.length === 1 && targetIds.size <= 1 ? targetMatches[0] : null;
-  if (decision?.exitType && Number(targetPosition?.quantity) > 0) {
-    suggestedQty = Number(targetPosition.quantity);
+  const targetQuantity = targetMatches.reduce((sum, position) => sum + Number(position?.quantity || 0), 0);
+  if (decision?.exitType && targetQuantity > 0) {
+    suggestedQty = targetQuantity;
   } else if (!decision?.exitType && hasPrice && Number.isFinite(equity) && equity > 0 && pct > 0) {
     suggestedQty = Math.max(1, Math.floor((equity * (pct / 100)) / price));
   } else if (!decision?.exitType && hasPrice) {
