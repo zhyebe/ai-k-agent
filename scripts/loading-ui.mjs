@@ -32,8 +32,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function openPage(t, { admin = false, width = 1440 } = {}) {
-  const context = await browser.newContext({ viewport: { width, height: 900 } });
+async function openPage(t, { admin = false, width = 1440, height = 900 } = {}) {
+  const context = await browser.newContext({ viewport: { width, height } });
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
   const errors = [];
@@ -85,18 +85,23 @@ for (const width of [1440, 390]) {
   });
 }
 
-for (const width of [1440, 390]) {
-  test(`live manual decision stays prominent and asks user to submit at ${width}px`, async (t) => {
-    const { page, navigate } = await openPage(t, { width });
+for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]]) {
+  test(`LIVE analysis stays in the first viewport without manual intervention at ${width}x${height}`, async (t) => {
+    const { page, navigate } = await openPage(t, { width, height });
     const sample = structuredClone(workspace);
     const task = sample.tasks[0];
     task.mode = "LIVE";
     task.autoDecisionEnabled = false;
+    task.status = "MONITORING";
+    task.monitoringEnabled = true;
+    task.rules[2].status = "pending";
+    task.rules[3].status = "pending";
     task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
     task.decision = {
       ...task.decision, action: "BUY", confidence: 0.7, profitProbability: 0.53,
       bullishProfitProbability: 0.53, bearishProfitProbability: 0.41,
       riskFlags: [], targetPositionPct: 5, maxOrderValuePct: 4,
+      invalidation: "若当前K或下一根第50秒K放量跌破1231并击穿1230/1229且买盘明显减薄，则多单失效止损，并下修做多概率至0.45以下；若1233/1234卖盘被放量吸收且价格站稳1233，则持有并上移止盈至1234，评估是否有续涨动作。89EMA/KDJ仍缺失，15m方向规则保持不可验证。",
     };
     task.pendingAction = {
       id: "manual-pending", action: "BUY", status: "WAITING", message: "AI 已填写买涨表单",
@@ -105,8 +110,13 @@ for (const width of [1440, 390]) {
     };
     await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
     await navigate();
-    await page.getByRole("alertdialog").getByRole("button", { name: "已在目标页提交" }).waitFor();
-    assert.match(await page.getByRole("alertdialog").innerText(), /亲自点击目标页提交按钮/);
+    await page.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+    assert.equal(await page.getByRole("alertdialog").count(), 0);
+    assert.equal(await page.getByRole("checkbox").count(), 0);
+    assert.equal(await page.getByText(/人工接管|人工复核|转人工处理|亲自点击|手动提交/).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "确认规则并继续" }).count(), 0);
+    assert.equal(await page.locator(".review-callout").count(), 0);
+    assert.equal(await page.getByText("全自动执行", { exact: true }).count(), 1);
     assert.equal(await page.getByText("自动单笔上限 1").count(), 1);
     assert.equal(await page.getByText(/测试数量/).count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
@@ -115,9 +125,47 @@ for (const width of [1440, 390]) {
     assert.ok(box && box.width >= width * (width > 600 ? 0.48 : 0.9));
     const fontSize = await panel.locator(".decision-action strong").evaluate((node) => parseFloat(getComputedStyle(node).fontSize));
     assert.ok(fontSize >= 22);
-    await capture(page, `live-manual-${width}`);
+    const invalidation = await panel.locator(".invalidation").boundingBox();
+    assert.ok(invalidation && invalidation.y + invalidation.height <= height, JSON.stringify(invalidation));
+    const status = await panel.locator(".decision-safe").boundingBox();
+    assert.ok(status && status.y + status.height <= height, JSON.stringify(status));
+    assert.equal(await page.locator(".content-scroll").evaluate((node) => node.scrollTop), 0);
+    assert.equal(await panel.locator(".decision-details").getAttribute("open"), null);
+    await panel.locator(".decision-details > summary").click();
+    assert.equal(await panel.locator(".decision-stats").isVisible(), true);
+    await panel.locator(".decision-details > summary").click();
+    await page.evaluate(() => { document.querySelector(".content-scroll").scrollTop = 0; window.scrollTo(0, 0); });
+    await capture(page, `live-analysis-${width}-${height}`);
   });
 }
+
+for (const status of ["TAKEN_OVER", "AWAITING_FILL", "UNVERIFIED", "REJECTED", "SUBMITTING"]) {
+  test(`LIVE ${status} stays automatic without a manual takeover control`, async (t) => {
+    const { page, navigate } = await openPage(t);
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+    task.pendingAction = { id: "legacy-pending", action: "SELL", status, message: status === "TAKEN_OVER" ? "已人工接管，请在目标页核对订单与持仓" : "Agent 自动执行并持续核实持仓", createdAt: new Date().toISOString() };
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await navigate();
+    await page.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+    assert.equal(await page.getByText(/人工接管/).count(), 0);
+    assert.equal(await page.getByRole("alertdialog").count(), 0);
+    assert.match(await page.locator(".decision-safe").innerText(), /自动/);
+  });
+}
+
+test("an explicitly stopped LIVE task is never displayed as running", async (t) => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  Object.assign(sample.tasks[0], { mode: "LIVE", autoDecisionEnabled: true, status: "MANUAL_CONTROL", stopLocked: true, monitoringEnabled: false, pendingAction: { id: "stopped", status: "TAKEN_OVER", message: "已人工接管，请在目标页核对订单与持仓" } });
+  await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+  await navigate();
+  await page.getByRole("button", { name: "开始观察", exact: true }).waitFor();
+  assert.equal(await page.getByText(/人工接管/).count(), 0);
+  assert.match(await page.locator(".status-copy").innerText(), /已停止/);
+  assert.match(await page.locator(".decision-safe").innerText(), /已停止/);
+});
 
 for (const width of [1440, 390]) {
   test(`workspace skeleton replaces empty states at ${width}px`, async (t) => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
-import { buildPendingAction, cancelPendingAction, confirmPendingAction, setAutoDecision, setTaskMode, stopController, takeoverPendingAction } from "../server/engine.mjs";
+import { buildPendingAction, cancelPendingAction, claimManual, confirmPendingAction, setAutoDecision, setTaskMode, startTask, stopController, stopTask, takeoverPendingAction } from "../server/engine.mjs";
 import { isForbiddenTradeControl, isPositionListExitControlText, isTradeWriteResponse, normalizeBrowserPlan, positionListExitLabels, suggestionFormLabels, tradePaneLabel, tradeSubmissionOutcome, tradeSubmitLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
 
@@ -123,15 +123,51 @@ test("auto takeover confirms suggestion without a countdown prompt", async () =>
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
 
-test("takeover cancels pending auto confirm and locks trading", () => {
+test("manual takeover only applies when automatic execution is disabled", () => {
   const task = insertTask(`task_takeover_${Date.now()}`);
-  task.autoDecisionEnabled = true;
   task.pendingAction = buildPendingAction(task, task.decision);
   const next = takeoverPendingAction(task.id);
   assert.equal(next.pendingAction.status, "TAKEN_OVER");
   assert.equal(next.status, "MANUAL_CONTROL");
   assert.equal(next.stopLocked, true);
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});
+
+for (const mode of ["PAPER", "LIVE"]) {
+  test(`${mode} automatic execution ignores legacy manual takeover requests`, () => {
+    const task = insertTask(`task_auto_legacy_${mode}_${Date.now()}`, { mode, autoDecisionEnabled: mode === "PAPER", monitoringEnabled: true });
+    task.pendingAction = buildPendingAction(task, task.decision);
+    for (const takeover of [claimManual, takeoverPendingAction]) {
+      const next = takeover(task.id);
+      assert.equal(next.status, "MONITORING");
+      assert.equal(next.stopLocked, false);
+      assert.equal(next.monitoringEnabled, true);
+      assert.equal(next.pendingAction.status, "WAITING");
+    }
+    stopTask(task.id);
+    assert.equal(task.stopLocked, true);
+    assert.equal(task.monitoringEnabled, false);
+  });
+}
+
+test("restarting LIVE clears old takeover suggestions but preserves pending fill reconciliation", () => {
+  const connectorId = `connector_restart_${Date.now()}`;
+  state.connectors.unshift({ connectorId, reviewStatus: "APPROVED", adapterId: "haohan-readonly", capabilities: ["read_visible_market"] });
+  try {
+    for (const status of ["TAKEN_OVER", "AWAITING_FILL"]) {
+      const task = insertTask(`task_restart_${status}_${Date.now()}`, { mode: "LIVE", status: "MANUAL_CONTROL", stopLocked: true, riskProfile: "Balanced" });
+      task.target.connectorId = connectorId;
+      task.pendingAction = { ...buildPendingAction(task, task.decision), status, message: "old action" };
+      startTask(task.id);
+      stopController(task.id);
+      assert.equal(task.autoDecisionEnabled, true);
+      assert.equal(task.stopLocked, false);
+      assert.equal(task.monitoringEnabled, true);
+      assert.equal(task.pendingAction?.status || null, status === "TAKEN_OVER" ? null : "AWAITING_FILL");
+    }
+  } finally {
+    state.connectors = state.connectors.filter((item) => item.connectorId !== connectorId);
+  }
 });
 
 test("live suggestion with automation enabled is eligible for auto-submit", () => {

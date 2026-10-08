@@ -804,6 +804,7 @@ export function cancelPendingAction(taskId) {
 export function takeoverPendingAction(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
+  if (isAutoTakeover(task)) return task;
   if (["WAITING", "AWAITING_FILL", "UNVERIFIED", "REJECTED"].includes(task.pendingAction?.status)) {
     clearPendingActionTimer(task.id);
     task.pendingAction = {
@@ -1037,6 +1038,11 @@ export function startTask(taskId) {
   }
   task.status = "STARTING";
   task.stopLocked = false;
+  if (isLiveTask(task)) task.autoDecisionEnabled = true;
+  if (task.pendingAction?.status === "TAKEN_OVER") {
+    clearPendingActionTimer(task.id);
+    task.pendingAction = null;
+  }
   task.monitoringEnabled = true;
   task.monitorFailureCount = 0;
   task.lastObservedFingerprint = "";
@@ -1052,7 +1058,9 @@ export function startTask(taskId) {
   setNextPoll(task, 0);
   transitionWorkflow(task, "analyze", "进入持续观察，等待分析触发");
   task.updatedAt = new Date().toISOString();
-  addEvent("task_monitoring", "启动检查通过，Agent 已进入持续监控；买卖仍只给出建议", { taskId });
+  addEvent("task_monitoring", isLiveTask(task)
+    ? "启动检查通过，Agent 持续监控并自动执行入场与离场"
+    : "启动检查通过，Agent 已进入持续监控；买卖只给出建议", { taskId });
   persistTask(task);
   startController(taskId, { userId: task.ownerUserId || "" });
   return task;
@@ -1078,7 +1086,7 @@ export function stopTask(taskId) {
   task.status = "MANUAL_CONTROL";
   task.target.connectionStatus = task.target.connectionStatus === "connected" ? "connected" : task.target.connectionStatus;
   task.updatedAt = new Date().toISOString();
-  addEvent("manual_control", "已切换人工接管；现有持仓未自动平仓，服务端不会下单", { taskId });
+  addEvent("manual_control", "用户已停止自动运行；现有持仓保持不变", { taskId });
   persistTask(task);
   return task;
 }
@@ -1086,6 +1094,7 @@ export function stopTask(taskId) {
 export function claimManual(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
+  if (isAutoTakeover(task)) return task;
   advanceTaskGeneration(task);
   task.stopLocked = true;
   task.monitoringEnabled = false;

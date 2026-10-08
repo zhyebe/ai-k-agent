@@ -1026,17 +1026,18 @@ test("红线触发时即使 AI 买卖概率过线也不得进入下单流程", a
   }
 });
 
-test("LIVE 规则标记不会阻止 AI 达标方向自动提交", async () => {
-  const taskId = `task_live_rule_mark_${Date.now()}`;
+for (const exitType of [null, "TAKE_PROFIT", "STOP_LOSS"]) {
+test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () => {
+  const taskId = `task_live_rule_mark_${exitType}_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.mode = "LIVE";
   task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
   task.status = "MONITORING";
   task.monitoringEnabled = true;
-  task.rules = [{ id: "review", status: "pending", mode: "REVIEW" }];
+  task.rules = [{ id: "review", status: "pending", mode: "REVIEW" }, { id: "anomaly", status: "pending", mode: "BLOCK" }];
   const market = testMarketSnapshot("live-rule-mark", 100);
   market.anomaly = true;
-  market.account.positions = [];
+  market.account.positions = exitType ? [{ symbol: "BTC/USDT", side: "卖", quantity: 1, positionOrderId: "P-auto-short" }] : [];
   let submitted = 0;
   const runtime = {
     openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
@@ -1045,7 +1046,8 @@ test("LIVE 规则标记不会阻止 AI 达标方向自动提交", async () => {
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
     submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; },
     requestDecision: async (_provider, context) => ({
-      action: "BUY", confidence: 0.7, profitProbability: 0.7, bullishProfitProbability: 0.7, bearishProfitProbability: 0.2,
+      action: "BUY", exitType, targetPositionIds: exitType ? ["P-auto-short"] : [], confidence: 0.7,
+      profitProbability: exitType ? 0.2 : 0.7, bullishProfitProbability: exitType ? 0.2 : 0.7, bearishProfitProbability: 0.2,
       evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
     }),
   };
@@ -1055,10 +1057,12 @@ test("LIVE 规则标记不会阻止 AI 达标方向自动提交", async () => {
     assert.equal(submitted, 1);
     assert.equal(result.task.status, "MONITORING");
     assert.equal(result.task.pendingAction.status, "AWAITING_FILL");
+    assert.equal(result.task.pendingAction.exitType || null, exitType);
   } finally {
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
   }
 });
+}
 
 test("实盘入场由 AI 自动提交，持仓变化后自动核实", async () => {
   const taskId = `task_manual_reconcile_${Date.now()}`;

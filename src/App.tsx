@@ -19,7 +19,6 @@ import {
   FileText,
   Gauge,
   Globe2,
-  Hand,
   History,
   KeyRound,
   Laptop,
@@ -54,7 +53,6 @@ import {
   approveSkill,
   autoJudge,
   agentStreamUrl,
-  claimManual,
   cancelPendingAction,
   confirmPendingAction,
   createTask,
@@ -79,7 +77,6 @@ import {
   startTask,
   stopTask,
   syncProviderModels,
-  takeoverPendingAction,
   testConnector,
   testProvider,
   updateTask,
@@ -107,7 +104,7 @@ const statusMeta: Record<TaskStatus, { label: string; tone: string; icon: typeof
   RISK_CHECK: { label: "风控检查中", tone: "amber", icon: ShieldCheck },
   EXECUTING: { label: "执行动作中", tone: "green", icon: Zap },
   STOPPING: { label: "停止中", tone: "red", icon: Square },
-  MANUAL_CONTROL: { label: "人工接管", tone: "amber", icon: Hand },
+  MANUAL_CONTROL: { label: "已停止", tone: "neutral", icon: Square },
   PAUSED: { label: "已暂停", tone: "amber", icon: CirclePause },
   BLOCKED: { label: "启动被阻断", tone: "red", icon: CircleAlert },
   ERROR: { label: "异常已保护", tone: "red", icon: AlertTriangle },
@@ -211,6 +208,7 @@ const formatTime = (value: string) => {
 const taskIsMonitoring = (task: Task | null | undefined) => Boolean(task && !task.stopLocked && (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && ["STARTING", "MONITORING", "ANALYZING", "RISK_CHECK", "EXECUTING", "STOPPING"].includes(task.status))));
 const openPositions = (task: Task | null | undefined) => (task?.market?.account?.positions || []).filter((item) => Number(item.quantity) > 0);
 const consoleStatusCopy = (task: Task) => {
+  if (task.stopLocked || task.status === "MANUAL_CONTROL") return "任务已停止，自动交易未运行";
   const pending = task.pendingAction;
   if (pending?.status === "WAITING" && task.mode !== "LIVE" && task.autoDecisionEnabled !== true) {
     return pending.exitType ? "AI 已准备离场表单，等待确认" : "AI 已填写入场表单，等待确认";
@@ -221,13 +219,12 @@ const consoleStatusCopy = (task: Task) => {
   if (pending?.status === "REJECTED") return "交易所拒绝请求，下一 K 继续由 AI 重新判断";
   if (task.monitoringEnabled) {
     if (task.status === "MONITORING") {
-      return task.autoDecisionEnabled
-        ? "全自动接管中：分析后直接下单或离场，并持续监控持仓"
+      return task.mode === "LIVE" || task.autoDecisionEnabled
+        ? "AI 全自动执行：自主判断入场、持仓、止盈与止损"
         : "Agent 正在持续读取行情，数据变化后启动新一轮分析";
     }
     return "本轮出现问题，Agent 将继续重试，不会因单轮失败结束";
   }
-  if (task.status === "MANUAL_CONTROL") return "Agent 已释放控制权，账户由人工操作";
   if ((task.decision.riskFlags || []).includes("REAUTH_REQUIRED")) return "登录态失效，需要重新登录";
   return "当前任务需要你的注意";
 };
@@ -669,21 +666,9 @@ function App() {
     try {
       const next = await stopTask(task.id);
       replaceTask(next);
-      notify("已停止自动控制，任务进入人工接管");
+      notify("已停止自动运行，现有持仓保持不变");
     } catch (error) {
       notify(`停止失败：${error instanceof Error ? error.message : "请稍后重试"}`);
-    } finally { setBusyAction(null); }
-  }
-
-  async function handleManual() {
-    if (!task) return;
-    setBusyAction("manual");
-    try {
-      const next = await claimManual(task.id);
-      replaceTask(next);
-      notify("人工接管已确认，Agent 不会自动买卖");
-    } catch (error) {
-      notify(`接管失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -744,9 +729,9 @@ function App() {
     try {
       const next = await setAutoDecision(task.id, enabled, task.autoDecisionCountdownSec || 30);
       replaceTask(next);
-      notify(enabled
-        ? (next.mode === "LIVE" ? "已打开全自动接管：分析后直接下单或离场，不再弹窗" : "已打开自动确认，观察模式不会下单")
-        : "已关闭全自动接管，AI 填表后需你在目标页提交");
+      notify(next.mode === "LIVE" ? "实盘由 AI 全自动执行入场与离场"
+        : next.autoDecisionEnabled ? "已打开自动确认，观察模式不会下单"
+        : "已关闭自动确认，观察模式建议需确认");
     } catch (error) {
       notify(`自动决策切换失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
@@ -774,18 +759,6 @@ function App() {
       notify(next.pendingAction?.message || "已取消本次建议，未下单");
     } catch (error) {
       notify(`取消失败：${error instanceof Error ? error.message : "没有待确认建议"}`);
-    } finally { setBusyAction(null); }
-  }
-
-  async function handleTakeoverAction() {
-    if (!task) return;
-    setBusyAction("takeover");
-    try {
-      const next = await takeoverPendingAction(task.id);
-      replaceTask(next);
-      notify("已人工接管，倒计时自动确认已取消");
-    } catch (error) {
-      notify(`接管失败：${error instanceof Error ? error.message : "请稍后重试"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -1046,11 +1019,11 @@ function App() {
           </div>
         </header>
 
-        <div className="content-scroll">
+        <div className={`content-scroll ${view === "console" ? "console-content" : ""}`}>
           {loadError && <LoadError title={workspaceReady ? "同步失败，当前显示上次数据" : "工作区加载失败"} message={loadError} busy={workspaceLoading} onRetry={() => setRefreshVersion((value) => value + 1)} />}
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
-          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onManual={handleManual} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} onConfirmAction={handleConfirmAction} onTakeoverAction={handleTakeoverAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "console" && (task ? <ConsoleView task={task} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
@@ -1072,19 +1045,19 @@ function App() {
   );
 }
 
-function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onManual, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onSelectProvider, onSelectMarket, onSetMode, onConfirmAction, onTakeoverAction }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onManual: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onSelectMarket: (selection: { symbol: string; symbolName?: string; instrumentId?: string }) => void; onSetMode: (mode: string) => void; onConfirmAction: () => void; onTakeoverAction: () => void }) {
-  const pendingReview = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
+function ConsoleView({ task, workspace, isRunning, busyAction, onStart, onStop, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onSelectProvider, onSelectMarket, onSetMode }: { task: Task; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onSelectMarket: (selection: { symbol: string; symbolName?: string; instrumentId?: string }) => void; onSetMode: (mode: string) => void }) {
+  const pendingReview = task.mode !== "LIVE" && task.autoDecisionEnabled !== true && task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
   const providers = configuredProviders(workspace.providers);
   const currentProviderId = selectedProviderId(task, workspace.providers);
   const positions = openPositions(task);
   const openQty = positions.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   return <>
     <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BusyIcon busy={busyAction === "analyze"}><BarChart3 size={15} /></BusyIcon>{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
-    <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{task.monitoringEnabled && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{consoleStatusCopy(task)}</span></div><div className="status-meta"><label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label><label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>{task.mode === "LIVE" ? "全自动接管" : "自动确认"} {task.autoDecisionEnabled ? "开" : "关"}</span></label><span>自动单笔上限 1</span><span><LockKeyhole size={13} />{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "下单 自动" : "下单 手动提交") : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.mode === "direct-ai" ? "经验直传 AI" : `${workspace.rag?.indexedChunks || 0} 个索引切片`}</span></div></section>
-    <div className="console-grid"><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} onManual={onManual} onConfirmAction={onConfirmAction} onTakeoverAction={onTakeoverAction} busyAction={busyAction} /><MarketPanel task={task} onSelectMarket={onSelectMarket} busyAction={busyAction} /></div>
+    <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{taskIsMonitoring(task) && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{consoleStatusCopy(task)}</span></div><div className="status-meta"><label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label>{task.mode === "LIVE" ? <span className="auto-decision-switch on"><Bot size={13} />全自动执行</span> : <label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" checked={task.autoDecisionEnabled === true} disabled={busyAction !== null} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>自动确认 {task.autoDecisionEnabled ? "开" : "关"}</span></label>}<span>自动单笔上限 1</span><span><LockKeyhole size={13} />{task.mode === "LIVE" ? "下单 自动" : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.mode === "direct-ai" ? "经验直传 AI" : `${workspace.rag?.indexedChunks || 0} 个索引切片`}</span></div></section>
+    <div className="console-grid"><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} /><MarketPanel task={task} onSelectMarket={onSelectMarket} busyAction={busyAction} /></div>
     <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail={positions.length ? `${positions.length} 笔持仓` : "只读"} change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change={openQty ? `持仓 ${openQty}` : "观察"} tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
     <WorkflowPanel task={task} onConnectorTest={onConnectorTest} busyAction={busyAction} />
-    <RulesPanel rules={task.rules} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
+    <RulesPanel rules={task.rules} automatic={task.mode === "LIVE" || task.autoDecisionEnabled === true} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
   </>;
 }
 
@@ -1242,7 +1215,7 @@ function remainingSeconds(deadlineAt?: string | null) {
   return Number.isFinite(value) ? Math.max(0, value) : 0;
 }
 
-function PendingActionCard({ pending, onTakeover, busyAction }: { pending: PendingAction; onTakeover: () => void; busyAction: string | null }) {
+function PendingActionCard({ pending }: { pending: PendingAction }) {
   const [remain, setRemain] = useState(() => remainingSeconds(pending.deadlineAt));
   useEffect(() => {
     setRemain(remainingSeconds(pending.deadlineAt));
@@ -1271,12 +1244,11 @@ function PendingActionCard({ pending, onTakeover, busyAction }: { pending: Pendi
       </div>
       {(pending.entryPrice || pending.takeProfitPrice || pending.stopLossPrice) ? <div className="pending-action-meta"><span>AI 入场 {pending.entryPrice ?? "--"}</span><span>AI 止盈 {pending.takeProfitPrice ?? "--"}</span><span>AI 止损 {pending.stopLossPrice ?? "--"}</span></div> : null}
       {waiting ? <p className="pending-action-hint">等待确认后执行。</p> : null}
-      {pending.status === "AWAITING_FILL" || pending.status === "UNVERIFIED" || pending.status === "REJECTED" ? <button type="button" className="button button-secondary" onClick={onTakeover} disabled={busyAction !== null}><Hand size={15} />人工接管并核对</button> : null}
     </div>
   );
 }
 
-function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAction, onTakeoverAction, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; onManual: () => void; onConfirmAction: () => void; onTakeoverAction: () => void; busyAction: string | null }) {
+function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const analysisFailure = decision.riskFlags.find((flag) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].includes(flag));
@@ -1289,7 +1261,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
       ? bearishProbability
       : Number(decision.profitProbability ?? 0);
   const target = decisionTargetLabel(decision);
-  const pending = task.pendingAction;
+  const pending = task.pendingAction?.status === "TAKEN_OVER" ? null : task.pendingAction;
   return (
     <section className="panel decision-panel">
       <div className="panel-header">
@@ -1302,15 +1274,18 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, onManual, onConfirmAc
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
-      <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
-      {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · 多 上涨 {profitProbabilityLabel(Number(item.bullishProfitProbability ?? 0))}% · 空 下跌 {profitProbabilityLabel(Number(item.bearishProfitProbability ?? 0))}%</span></div>)}</div> : null}
-      {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}
-      <div className="reason-block">
-        <span className="block-label">机器可验证依据</span>
-        {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
-      </div>
-      <div className="invalidation"><AlertTriangle size={14} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
-      {pending && task.mode === "LIVE" ? <div className="decision-safe"><ShieldCheck size={14} /><span>{pending.message || "AI 正在自动执行并核实持仓"}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} onTakeover={onTakeoverAction} busyAction={busyAction} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button><button className="button button-quiet button-full" onClick={onManual} disabled={busyAction !== null}><Hand size={15} />转人工处理</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? (task.mode === "LIVE" ? "全自动接管中：不弹确认，只展示下单数量与盈亏" : "全自动确认建议，观察模式不会下单") : (task.mode === "LIVE" ? "实盘动作由 AI 自动提交并持续监控" : "观察模式只记录建议，确认后也不会提交实盘")}</span></div>}
+      <div className="invalidation"><AlertTriangle size={18} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
+      {task.stopLocked ? <div className="decision-safe decision-stopped"><Square size={14} /><span>任务已停止，自动交易未运行</span></div> : task.mode === "LIVE" ? <div className="decision-safe"><Activity size={16} /><span>{pending?.message || "AI 自动执行入场与离场，持续监控持仓"}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? "全自动确认建议，观察模式不会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
+      <details className="decision-details">
+        <summary>分析依据与各盘详情</summary>
+        <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
+        {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · 多 上涨 {profitProbabilityLabel(Number(item.bullishProfitProbability ?? 0))}% · 空 下跌 {profitProbabilityLabel(Number(item.bearishProfitProbability ?? 0))}%</span></div>)}</div> : null}
+        {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}
+        <div className="reason-block">
+          <span className="block-label">机器可验证依据</span>
+          {decision.reasonCodes.length ? decision.reasonCodes.map((code) => <div className="reason-row" key={code}><CheckCircle2 size={14} /><span>{displayLabel(code, reasonLabels, "其他分析依据")}</span></div>) : <div className="reason-row"><CircleDashed size={14} /><span>还没有可引用的理由码</span></div>}
+        </div>
+      </details>
     </section>
   );
 }
@@ -1319,8 +1294,17 @@ function WorkflowPanel({ task, onConnectorTest, busyAction }: { task: Task; onCo
   return <section className="panel workflow-panel"><div className="panel-header"><div><div className="panel-kicker"><Workflow size={14} />工作流进度</div><h2>从连接到动作</h2></div><button className="text-button" onClick={() => onConnectorTest({ taskId: task.id, connectorId: task.target.connectorId, type: task.target.type, name: task.target.name, url: task.target.url, appId: task.target.appId, installPath: task.target.installPath })} disabled={busyAction !== null || !task.target.connectorId}><RefreshCw size={14} />重新测试连接</button></div><div className="workflow-rail">{task.workflow.map((step, index) => <div className={`workflow-step ${step.status}`} key={step.key}><div className="workflow-node">{step.status === "complete" ? <Check size={14} /> : step.status === "active" ? <span className="node-pulse" /> : <span>{index + 1}</span>}</div><div className="workflow-copy"><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className={`workflow-connector ${step.status === "complete" ? "complete" : ""}`} />}</div>)}</div></section>;
 }
 
-function RulesPanel({ rules, pendingReview, onAutoJudge, busyAction }: { rules: Rule[]; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
-  return <section className="panel rules-panel"><div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />规则裁决</div><h2>执行前检查</h2></div><span className="count-badge">{rules.filter((rule) => rule.status === "passed").length}/{rules.length} 已通过</span></div><div className="rule-list">{rules.map((rule) => <div className="rule-row" key={rule.id}><span className={`rule-order rule-${rule.mode.toLowerCase()}`}>{String(rule.order).padStart(2, "0")}</span><div className="rule-copy"><strong>{rule.name}</strong><span>{rule.detail}</span></div><span className={`rule-mode mode-${rule.mode.toLowerCase()}`}>{rule.mode === "AUTO" ? "自动" : rule.mode === "REVIEW" ? "人工" : "红线"}</span><span className={`rule-status status-${rule.status}`}>{rule.status === "passed" ? <CheckCircle2 size={15} /> : rule.status === "pending" ? <CirclePause size={15} /> : <CircleDashed size={15} />}</span></div>)}</div>{pendingReview && <div className="review-callout"><div><AlertTriangle size={16} /><span>规则 3 需要人工判断，当前动作已暂停</span></div><button className="button button-small button-primary" onClick={onAutoJudge} disabled={busyAction !== null}><Check size={14} />确认</button></div>}</section>;
+function RulesPanel({ rules, automatic, pendingReview, onAutoJudge, busyAction }: { rules: Rule[]; automatic: boolean; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
+  return <section className="panel rules-panel">
+    <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />规则裁决</div><h2>{automatic ? "策略参考" : "执行前检查"}</h2></div><span className="count-badge">{rules.filter((rule) => rule.status === "passed").length}/{rules.length} 已通过</span></div>
+    <div className="rule-list">{rules.map((rule) => <div className="rule-row" key={rule.id}>
+      <span className={`rule-order rule-${rule.mode.toLowerCase()}`}>{String(rule.order).padStart(2, "0")}</span>
+      <div className="rule-copy"><strong>{automatic && rule.mode === "REVIEW" ? "AI 策略复核" : automatic && rule.mode === "BLOCK" ? "异常波动参考" : rule.name}</strong><span>{automatic && rule.mode !== "AUTO" ? (rule.status === "pending" ? "标记已记录，AI 持续判断入场与离场" : "未触发") : rule.detail}</span></div>
+      <span className={`rule-mode mode-${rule.mode.toLowerCase()}`}>{automatic ? "参考" : rule.mode === "AUTO" ? "自动" : rule.mode === "REVIEW" ? "人工" : "红线"}</span>
+      <span className={`rule-status status-${rule.status}`}>{rule.status === "passed" ? <CheckCircle2 size={15} /> : rule.status === "pending" ? <AlertTriangle size={15} /> : <CircleDashed size={15} />}</span>
+    </div>)}</div>
+    {pendingReview && <div className="review-callout"><div><AlertTriangle size={16} /><span>规则 3 需要人工判断，当前动作已暂停</span></div><button className="button button-small button-primary" onClick={onAutoJudge} disabled={busyAction !== null}><Check size={14} />确认</button></div>}
+  </section>;
 }
 
 function WalletIcon() { return <span className="wallet-icon">¥</span>; }
@@ -1402,7 +1386,7 @@ function SummaryTile({ label, value, icon, tone }: { label: string; value: strin
 function SkillRow({ skill, onApprove, onDelete, busyAction, directAi }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null; directAi?: boolean }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{directAi ? "直传 AI" : `${skill.chunks} 个切片`}</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
 
 function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderEdit, onProviderTest, onProviderModels, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderEdit: (provider: Provider) => void; onProviderTest: (provider: Provider) => void; onProviderModels: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />MySQL 账号级托管</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>支持任意模型 ID、OpenAI Responses / Chat Completions、Anthropic Messages、Gemini 及完整请求 URL。配置和模型列表只保存到当前账号的服务端数据库。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "实盘全自动" : "实盘可自动下单") : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode !== "LIVE" ? "禁止" : task.autoDecisionEnabled ? "自动允许" : "确认后允许"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />MySQL 账号级托管</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>支持任意模型 ID、OpenAI Responses / Chat Completions、Anthropic Messages、Gemini 及完整请求 URL。配置和模型列表只保存到当前账号的服务端数据库。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? "实盘全自动" : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode !== "LIVE" ? "禁止" : "自动允许"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
