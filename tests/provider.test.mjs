@@ -182,7 +182,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /never HOLD merely because an earlier position exists/);
     assert.match(seen[0].body.system, /profit_probability equals the selected direction/);
     assert.match(seen[0].body.system, /one unit per order/);
-    assert.match(seen[0].body.system, /Never leave an actionable loss or profit-taking exit as HOLD/);
+    assert.match(seen[0].body.system, /Never leave an AI-identified maximum-profit or minimum-loss exit as HOLD/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
     assert.match(seen[0].body.system, /host only fills the target form/);
     assert.match(seen[0].body.system, /Never swap these meanings/);
@@ -191,10 +191,11 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /Finish the round's JSON fully/);
     assert.match(seen[0].body.system, /monitoring continues next round/);
     assert.doesNotMatch(seen[0].body.system, /aborts this round at 50s/);
-    assert.match(seen[0].body.system, /without waiting for maximum profit/);
-    assert.match(seen[0].body.system, /Conservative exit policy overrides entry opportunities/);
-    assert.match(seen[0].body.system, /any positive net proceeds after known fees and slippage/);
-    assert.match(seen[0].body.system, /Do not wait for a larger gain, a preset target, the next K, or the 45% entry threshold/);
+    assert.match(seen[0].body.system, /maximizes expected net profit or minimizes expected loss/);
+    assert.match(seen[0].body.system, /Exit timing is an AI forecast, not a fixed immediate-profit rule/);
+    assert.match(seen[0].body.system, /A positive current mark alone is not an exit signal/);
+    assert.match(seen[0].body.system, /Do not wait for another K after you explicitly decide that exit now is optimal/);
+    assert.doesNotMatch(seen[0].body.system, /any positive net proceeds after known fees and slippage/);
     assert.match(seen[0].body.system, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(seen[0].body.system, /never lower them to justify HOLD/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
@@ -289,7 +290,7 @@ for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
       assert.equal(result.action, "SELL");
       assert.equal(result.exitType, exitType);
       assert.deepEqual(result.targetPositionIds, ["P-risk"]);
-      assert.match(requests[1].messages.at(-1).content, /Conservative exits take priority/);
+      assert.match(requests[1].messages.at(-1).content, /compare exiting now with holding through the next relevant move/);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

@@ -303,6 +303,46 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
+for (const autoDecisionEnabled of [false, true]) {
+  for (const price of [98, 102]) {
+    test(`${autoDecisionEnabled ? "自动" : "手动"}模式越过旧离场价${price}仍先分析，AI持仓判断不被价格替代`, async () => {
+      const taskId = `hold_outlook_${autoDecisionEnabled}_${price}_${Date.now()}`;
+      const task = insertNorthstarTask(taskId);
+      Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+      const market = testMarketSnapshot(`hold-outlook-${price}`, price);
+      market.account.positions = [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-hold", orderPrice: 100, takeProfitPrice: 101, stopLossPrice: 99 }];
+      let analyzed = 0;
+      let submitted = 0;
+      const runtime = {
+        openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
+        browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+        observeMarket: async () => market,
+        fillSuggestionForm: async () => { throw new Error("AI_HOLD_MUST_NOT_FILL"); },
+        submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
+        requestDecision: async (_provider, context) => {
+          analyzed += 1;
+          assert.equal(context.account.positions[0].positionOrderId, "P-hold");
+          assert.equal(context.strategy.loop.exit.profitGoal, "MAXIMIZE_EXPECTED_NET_PROFIT");
+          assert.equal(context.strategy.loop.exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
+          return { action: "HOLD", bullishProfitProbability: 0.3, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], analysisSummary: "继续持仓的预期净结果更好", riskFlags: [] };
+        },
+      };
+      try {
+        await runMonitoringCycle(taskId, { runtime });
+        await runMonitoringCycle(taskId, { runtime });
+        assert.equal(analyzed, 2);
+        assert.equal(submitted, 0);
+        assert.equal(task.decision.action, "HOLD");
+        assert.equal(task.decision.exitType || null, null);
+        assert.equal(task.pendingAction, undefined);
+      } finally {
+        stopController(taskId);
+        state.tasks = state.tasks.filter((item) => item.id !== taskId);
+      }
+    });
+  }
+}
+
 test("实盘入场自动与手动都限制为 1，观察模式不填实盘数量", () => {
   const base = { id: "quantity-limit", mode: "LIVE", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
   const decision = { action: "BUY", targetSymbol: "A", profitProbability: 0.8, targetPositionPct: 30, maxOrderValuePct: 8 };
