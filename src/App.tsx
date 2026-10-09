@@ -214,7 +214,7 @@ const consoleStatusCopy = (task: Task) => {
     return task.mode === "LIVE" ? "AI 已填表，请在目标页点击入场；成交后自动离场" : "AI 已填写入场表单，等待确认";
   }
   if (pending?.status === "SUBMITTING") return "正在目标页执行下单或离场";
-  if (pending?.status === "AWAITING_FILL") return "等待目标页持仓变化，核实入场或离场";
+  if (pending?.status === "AWAITING_FILL") return "成交后台核实，持续分析行情和持仓";
   if (pending?.status === "UNVERIFIED") return "交易页面结果未明确，继续监控持仓变化核实成交";
   if (pending?.status === "REJECTED") return "交易所拒绝请求，下一 K 继续由 AI 重新判断";
   if (task.monitoringEnabled) {
@@ -1266,7 +1266,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
     <section className="panel decision-panel">
       <div className="panel-header">
         <div><div className="panel-kicker"><Bot size={14} />Agent 判断</div><h2>当前建议</h2></div>
-        <span className="decision-age"><span className="online-dot" />{analyzed ? `有效期 ${decision.ttlSec} 秒` : "未分析"}</span>
+        <span className="decision-age"><span className="online-dot" />{analyzed ? decision.analysisDurationMs != null ? `AI ${Math.round(decision.analysisDurationMs / 1000)} 秒 · 数据 ${decision.observedAt ? formatTime(decision.observedAt) : "--"}` : `有效期 ${decision.ttlSec} 秒` : "未分析"}</span>
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
@@ -1276,8 +1276,10 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       <div className="invalidation"><AlertTriangle size={18} /><span>失效条件：{decision.invalidation || "数据过期或风险超限时失效"}</span></div>
       {task.stopLocked ? <div className="decision-safe decision-stopped"><Square size={14} /><span>任务已停止，自动交易未运行</span></div> : task.mode === "LIVE" ? <div className="decision-safe" role={pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? "alert" : "status"}><Activity size={16} /><span>{pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? (pending.formFilled ? `AI 已填表，请在目标页点击${pending.action === "SELL" ? "卖出订立" : "买入订立"}入场按钮；之后自动确认、监控并离场` : pending.message) : pending?.message || (task.autoDecisionEnabled ? "AI 自动入场与离场，持续监控持仓" : "手动入场；AI 自动监控持仓并离场")}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? "全自动确认建议，观察模式不会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
+      {task.unsettledActions?.length ? <div className="decision-safe" role="status"><Activity size={14} /><span>后台核实 {task.unsettledActions.length} 笔历史请求</span></div> : null}
       <details className="decision-details">
         <summary>分析依据与各盘详情</summary>
+        {task.unsettledActions?.length ? <div className="reason-block"><span className="block-label">历史请求核实</span>{task.unsettledActions.map((item) => <div className="reason-row" key={item.id}>{decisionTargetLabel(item)} · {exitActionLabel(item.action, item.exitType)} · {item.message}</div>)}</div> : null}
         <div className="decision-stats"><div><span>目标仓位</span><b className="tabular">{decision.targetPositionPct}%</b></div><div><span>单笔上限</span><b className="tabular">{decision.maxOrderValuePct}%</b></div><div><span>证据</span><b className="tabular">{decision.evidenceIds.length} 条</b></div></div>
         {decision.boardAssessments?.length ? <div className="board-assessment-list"><span className="block-label">各盘判断</span>{decision.boardAssessments.map((item, index) => <div className="board-assessment-row" key={`${item.instrumentId || item.symbol || item.symbolName}-${index}`}><strong>{item.symbolName || item.symbol || item.instrumentId}</strong><span>{displaySuggestion(item.action)} · 多 上涨 {profitProbabilityLabel(Number(item.bullishProfitProbability ?? 0))}% · 空 下跌 {profitProbabilityLabel(Number(item.bearishProfitProbability ?? 0))}%</span></div>)}</div> : null}
         {decision.operatorAssessment ? <div className="operator-assessment"><div><span className="block-label">操盘手行为</span><strong>{operatorLikelihoodLabels[decision.operatorAssessment.likelihood] || "无法判断"} · {operatorImpactLabels[decision.operatorAssessment.impact] || "影响较低"}</strong></div><span>{decision.operatorAssessment.evidence.length ? decision.operatorAssessment.evidence.join("；") : "当前行为样本不足，未确认自动化或 AI 操盘"}</span></div> : null}

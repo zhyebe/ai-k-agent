@@ -1198,7 +1198,7 @@ export async function observeMarket(task, connector) {
     return { ok: false, code: "READONLY_MARKET_ADAPTER_UNAVAILABLE", message: "当前目标没有只读行情适配器" };
   }
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
-  let pageSnapshot = await readVisiblePage(sessionId);
+  let pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
   if (!pageSnapshot.ok) {
     const opened = await openMarketBrowser(task, connector);
     if (!opened.ok) return opened;

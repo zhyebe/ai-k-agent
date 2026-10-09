@@ -8,6 +8,24 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
+test("live fast analysis disables official DeepSeek thinking without changing the model or custom gateways", async (t) => {
+  const bodies = [];
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", bullish_profit_probability: 0.52, bearish_profit_probability: 0.2, target_symbol: "DGKZ" }) } }] }));
+  });
+  for (const baseUrl of ["https://api.deepseek.com", "https://gateway.example.test"]) {
+    const decision = await requestDecision({ apiKey: "test", baseUrl, apiFormat: "chat", model: "deepseek-v4-pro" }, { market: { observedAt: "2026-10-09T06:00:00Z" }, evidenceIds: [] }, { fastAnalysis: true });
+    assert.equal(decision.action, "BUY");
+    assert.equal(decision.bullishProfitProbability, 0.52);
+  }
+  assert.deepEqual(bodies[0].thinking, { type: "disabled" });
+  assert.equal(bodies[1].thinking, undefined);
+  assert.equal(bodies[0].model, "deepseek-v4-pro");
+  assert.match(bodies[0].messages[0].content, /Latency-critical live decision/);
+  assert.equal(bodies.length, 2);
+});
+
 test("provider verification performs a real inference with the configured model", async () => {
   const server = http.createServer(async (request, response) => {
     assert.equal(request.url, "/v1/chat/completions");

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test, { after, before } from "node:test";
 import { chromium } from "playwright";
-import { closeAllBrowserSessions, openBrowserPage, setBrowserSessionFactory } from "../server/browser.mjs";
+import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSessionFactory } from "../server/browser.mjs";
+import { parseHaohanAccount } from "../server/haohan.mjs";
 import { continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
@@ -108,10 +109,37 @@ test("Element UI split header/body tables still identify side, quantity and exac
     header.append(table.querySelector("thead"));
     wrapper.append(header, table);
   });
+  const snapshot = await readVisiblePage("trade-fixture");
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.deepEqual(account.positions.map((item) => item.positionOrderId), ["P-10", "P-1", "P-2"]);
+  assert.equal(account.positionsVerified, true);
   const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", exitType: "STOP_LOSS", quantity: 3, symbolName: "测试商品" });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.submittedQuantity, 3);
   assert.deepEqual((await page.evaluate(() => window.exits)).map((item) => item.id), ["P-1", "P-2"]);
+});
+
+test("another empty table cannot masquerade as empty holdings", async () => {
+  await page.reload();
+  await page.locator("#positions").evaluate((table) => { table.style.display = "none"; });
+  await page.evaluate(() => {
+    const empty = document.createElement("table");
+    empty.innerHTML = "<tr><th>历史委托</th></tr><tr><td>暂无数据</td></tr>";
+    document.body.append(empty);
+  });
+  const snapshot = await readVisiblePage("trade-fixture");
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positionsVerified, false);
+  assert.equal(account.positionEmpty, false);
+});
+
+test("a partially unreadable position row cannot verify the holdings snapshot", async () => {
+  await page.reload();
+  await page.locator("#positions tbody tr").first().locator("td").nth(2).evaluate((cell) => { cell.textContent = "--"; });
+  const snapshot = await readVisiblePage("trade-fixture");
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positionsVerified, false);
+  assert.equal(account.positionEmpty, false);
 });
 
 test("consecutive entries recognize identical new success notices", async () => {

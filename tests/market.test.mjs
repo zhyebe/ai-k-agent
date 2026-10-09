@@ -190,7 +190,8 @@ F10
   assert.equal(parsed.account.availableFunds, 5143.09);
   assert.equal(parsed.account.equity, 5143.09);
   assert.equal(parsed.account.dayPnl, 0);
-  assert.equal(parsed.account.positionEmpty, true);
+  assert.equal(parsed.account.positionEmpty, false);
+  assert.equal(parsed.account.positionsVerified, false);
   assert.equal(parsed.pageView.quote.prevClose, 1159);
   assert.equal(parsed.pageView.quote.outerVolume, 3488200);
   assert.equal(parsed.pageView.orderBook.asks[0].price, 1142);

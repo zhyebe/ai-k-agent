@@ -19,7 +19,7 @@ export async function analyzeCollectedMarket(provider, market, context, options 
   if (contextBytes > 1024 * 1024) throw new Error("AI_CONTEXT_TOO_LARGE");
   const books = layered.books?.length ? layered.books : [layered];
   const totalKlineRows = books.reduce((sum, book) => sum + Object.values(book.timeframes || {}).reduce((rows, timeframe) => rows + (timeframe.history?.length || 0), 0), 0);
-  const decision = await requestDecision(provider, input, options);
+  const decision = await requestDecision(provider, input, { fastAnalysis: true, ...options });
   return {
     decision,
     market: layered,

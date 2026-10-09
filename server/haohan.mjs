@@ -493,7 +493,7 @@ export function parseHaohanPositions(tables = []) {
       });
     }
   }
-  return positions;
+  return positions.filter((position, index) => !position.positionOrderId || positions.findIndex((item) => item.positionOrderId === position.positionOrderId) === index);
 }
 
 export function parseHaohanAccount(visibleText, tables = []) {
@@ -503,8 +503,10 @@ export function parseHaohanAccount(visibleText, tables = []) {
   const valueChange = labeledValue(visibleText, ["货值变化"]);
   const dayPnl = labeledValue(visibleText, ["今日盈亏", "当日盈亏"]) ?? valueChange ?? realtimeValueChange;
   const riskRate = labeledValue(visibleText, ["风险率"]);
-  const positions = parseHaohanPositions(tables);
-  const positionEmpty = positions.length === 0 && /持仓明细/.test(visibleText) && /暂无数据/.test(visibleText);
+  const positions = parseHaohanPositions(tables.filter((table) => !table.loading));
+  const positionTables = tables.filter((table) => !table.loading && table.rows?.some((row) => row.some((cell) => /持仓单号/.test(String(cell)))));
+  const positionEmpty = positions.length === 0 && positionTables.some((table) => /暂无数据/.test(table.emptyText || "") || table.rows.some((row) => row.some((cell) => /暂无数据/.test(String(cell)))));
+  const positionsVerified = positionEmpty || (positions.length > 0 && positions.every((item) => item.positionOrderId && Number.isFinite(item.quantity) && item.quantity > 0 && /买|卖|多|空|long|short/i.test(item.side)));
   return {
     availableFunds: round(availableFunds, 2),
     equity: round(equity, 2),
@@ -515,6 +517,7 @@ export function parseHaohanAccount(visibleText, tables = []) {
     maxOrderQty: round(labeledValue(visibleText, ["最大下单量"]), 4),
     deposit: round(labeledValue(visibleText, ["订金"]), 2),
     positionEmpty,
+    positionsVerified,
     positions,
     exposurePct: positionEmpty ? 0 : null,
   };

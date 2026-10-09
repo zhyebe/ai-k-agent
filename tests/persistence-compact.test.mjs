@@ -8,6 +8,16 @@ test("LIVE persistence preserves the selected entry mode", () => {
   }
 });
 
+test("pending reconciliation survives restart independently of the latest action", () => {
+  const previous = { id: "old-exit", status: "AWAITING_FILL", targetPositionIds: ["P-1"], baselinePositionQty: 1, suggestedQty: 1 };
+  const latest = { id: "new-entry", status: "AWAITING_FILL" };
+  const runtime = compactTaskRuntime({ pendingAction: latest, unsettledActions: [previous], lastEntryKWindow: 1234, decision: { observedAt: "2026-10-09T06:00:00Z", analysisDurationMs: 800 } });
+  assert.equal(runtime.pendingAction, latest);
+  assert.deepEqual(runtime.unsettledActions, [previous]);
+  assert.equal(runtime.lastEntryKWindow, 1234);
+  assert.equal(runtime.decision.analysisDurationMs, 800);
+});
+
 test("compactTaskRuntime does not persist market snapshots", () => {
   const runtime = compactTaskRuntime({
     workflow: ["monitor"],

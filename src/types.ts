@@ -115,6 +115,9 @@ export interface PendingAction {
 }
 
 export interface Decision {
+  observedAt?: string | null;
+  analysisDurationMs?: number | null;
+  collectionDurationMs?: number | null;
   action: "BUY" | "SELL" | "HOLD";
   orderType?: "MARKET" | "LIMIT";
   exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
@@ -337,6 +340,7 @@ export interface Task {
   autoDecisionCountdownSec?: number;
   providerId?: string;
   pendingAction?: PendingAction | null;
+  unsettledActions?: PendingAction[];
   activeRunId?: string | null;
   riskProfile: string;
   workflow: WorkflowStep[];

@@ -140,6 +140,29 @@ for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`fast decision timestamps and background requests stay readable at ${width}px`, async (t) => {
+    const { page, navigate } = await openPage(t, { width, height: 900 });
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+    Object.assign(task.decision, { action: "BUY", bullishProfitProbability: 0.52, bearishProfitProbability: 0.44, riskFlags: [], analysisDurationMs: 2800, observedAt: "2026-10-09T06:00:00Z", invalidation: "跌破支撑立即止损" });
+    task.pendingAction = { id: "latest-entry", action: "BUY", status: "AWAITING_FILL", message: "已提交买涨请求，后台核实成交；继续分析与执行其他买卖" };
+    task.unsettledActions = [{ id: "old-exit", action: "SELL", exitType: "STOP_LOSS", status: "AWAITING_FILL", targetSymbolName: "丹桂康砖（二期）" }];
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await navigate();
+    await page.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+    assert.match(await page.locator(".decision-age").innerText(), /AI 3 秒.*数据/);
+    assert.equal(await page.getByRole("alertdialog").count(), 0);
+    assert.match(await page.locator(".decision-panel").innerText(), /后台核实 1 笔历史请求/);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    const panel = await page.locator(".decision-panel").boundingBox();
+    const age = await page.locator(".decision-age").boundingBox();
+    assert.ok(age.x >= panel.x && age.x + age.width <= panel.x + panel.width + 1);
+    await capture(page, `fast-analysis-${width}`);
+  });
+}
+
 for (const status of ["TAKEN_OVER", "AWAITING_FILL", "UNVERIFIED", "REJECTED", "SUBMITTING"]) {
   test(`LIVE ${status} stays automatic without a manual takeover control`, async (t) => {
     const { page, navigate } = await openPage(t);

@@ -90,7 +90,7 @@ test("网页反馈优先于接口响应，点击本身不能证明成交", () =>
   assert.deepEqual(tradeSubmissionOutcome({ responseSeen: false, clicked: { label: "止盈" } }), {
     ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk: null,
   });
-  assert.equal(tradeSubmissionOutcome({ responseSeen: true, responseOk: true }).submitted, true);
+  assert.equal(tradeSubmissionOutcome({ responseSeen: true, responseOk: true }).uncertain, true);
   assert.equal(tradeSubmissionOutcome({ responseSeen: true, responseOk: false }).code, "TRADE_SUBMISSION_UNVERIFIED");
   assert.equal(tradeSubmissionOutcome({ responseSeen: true, responseOk: true, pageHint: "可用资金不足" }).code, "TRADE_REJECTED");
   assert.equal(tradeSubmissionOutcome({ responseSeen: false, pageHint: "可用资金不足" }).code, "TRADE_REJECTED");
@@ -252,22 +252,25 @@ test("LIVE manual entry acknowledgement never clicks the website submit button",
   assert.equal(orders.length, 0);
 });
 
-test("live auto mode lets AI plan one direction-matched browser click", async () => {
+test("live auto mode executes the decision without a second AI planning request", async () => {
   const task = insertTask(`task_ai_browser_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);
   let submittedInput;
+  let planningCalls = 0;
   await confirmPendingAction(task.id, {
     source: "auto_timeout",
     runtime: {
-      readTradeControls: async () => ({ ok: true, buttons: [{ label: "买入订立" }], fields: [{ label: "买量" }], rowActions: [] }),
-      requestBrowserActions: async () => ({ actions: [{ type: "click", label: "买入订立" }, { type: "click", label: "关闭窗口" }] }),
+      readTradeControls: async () => { planningCalls += 1; return { ok: true }; },
+      requestBrowserActions: async () => { planningCalls += 1; return { actions: [] }; },
       submitSuggestionForm: async (input) => {
         submittedInput = input;
         return { ok: true, submitted: true, code: "AI_BROWSER_CLICKED", message: "AI 已点买入订立" };
       },
     },
   });
-  assert.deepEqual(submittedInput.browserPlan.actions, [{ type: "click", label: "买入订立" }]);
+  assert.equal(submittedInput.action, "BUY");
+  assert.equal(submittedInput.browserPlan, undefined);
+  assert.equal(planningCalls, 0);
 });
 
 test("live sell suggestion submits SELL action only after confirmation", async () => {
@@ -292,7 +295,7 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   assert.equal(submittedInput.action, "SELL");
   assert.equal(submittedInput.exitType || null, null);
   assert.equal(confirmed.pendingAction.status, "AWAITING_FILL");
-  assert.match(confirmed.pendingAction.message, /等待持仓变化核实成交/);
+  assert.match(confirmed.pendingAction.message, /后台核实成交/);
   const order = state.orders.find((item) => item.taskId === task.id);
   assert.equal(order.action, "SELL");
   assert.equal(order.status, "submitted");
@@ -341,7 +344,7 @@ test("live exit submits 转让 with position ids", async () => {
   assert.equal(submittedInput.exitType, "TAKE_PROFIT");
   assert.deepEqual(submittedInput.targetPositionIds, ["P-9"]);
   assert.equal(confirmed.pendingAction.status, "AWAITING_FILL");
-  assert.match(confirmed.pendingAction.message, /等待持仓变化核实成交/);
+  assert.match(confirmed.pendingAction.message, /后台核实成交/);
 });
 
 test("partial row exits reconcile only submitted rows and available quantities", async () => {

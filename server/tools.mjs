@@ -527,7 +527,7 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
   if (tradePageHintKind(detail) === "rejected") {
     return { ok: false, code: "TRADE_REJECTED", message: detail, filled: true, submitted: true, responseOk };
   }
-  if (tradePageHintKind(detail) === "submitted" || (responseSeen && responseOk === true)) {
+  if (tradePageHintKind(detail) === "submitted") {
     return { ok: true, code: "TRADE_SUBMITTED", message: detail || "已提交交易请求，等待持仓对账", filled: true, submitted: true, responseOk, submitLabel: clicked?.label || null };
   }
   return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };

@@ -48,10 +48,12 @@ test("direct analysis sends full approved owner experience and both order books 
     const payload = JSON.parse(options.body);
     const input = JSON.parse(payload.messages.at(-1).content);
     const context = input.context || input;
-    assert.equal(context.evidence[0].excerpt, content);
-    assert.equal(context.experiencePrompt, experiencePrompt);
+    assert.equal(context.evidence[0].excerpt, undefined);
+    assert.equal(context.experiencePrompt, undefined);
     assert.equal(context.approvedSkills[0].title, "经验");
-    assert.match(context.approvedSkills[0].content, /成交量与趋势/);
+    assert.equal(context.approvedSkills[0].content, undefined);
+    assert.equal(payload.messages.filter((message) => message.content.includes(content)).length, 1);
+    assert.ok(payload.messages.some((message) => message.content.includes(experiencePrompt)));
     assert.equal(context.strategy.kline.printSecond, 50);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);

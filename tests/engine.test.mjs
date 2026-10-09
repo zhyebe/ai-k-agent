@@ -243,7 +243,7 @@ for (const autoDecisionEnabled of [false, true]) {
         browserLoginStatus: async () => ({ ok: true, authenticated: true }),
         observeMarket: async () => market,
         fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
-        submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
+        submitSuggestionForm: async () => { submitted += 1; return { ok: true, filled: true, submitted: true }; },
         requestDecision: async (_provider, context) => ({
           action, bullishProfitProbability: action === "BUY" ? 0.44 : 0.41,
           bearishProfitProbability: action === "SELL" ? 0.44 : 0.41,
@@ -673,6 +673,144 @@ function testMarketSnapshot(fingerprint, price) {
     raw: { source: "test", timeline: { ticks: [{ timestamp: now, price }] } },
   };
 }
+
+test("待核实离场不阻挡立即入场，旧单继续独立核实且自动流程不重复填表", async () => {
+  const task = insertNorthstarTask(`unsettled_entry_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+  let observed = testMarketSnapshot("pending-old-exit", 100);
+  observed.account.positions = [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-old" }];
+  task.market = observed;
+  task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "STOP_LOSS", targetSymbol: "BTC/USDT", targetPositionIds: ["P-old"] }), status: "AWAITING_FILL", source: "auto_timeout" };
+  const oldId = task.pendingAction.id;
+  let filled = 0;
+  const submissions = [];
+  let action = "BUY";
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => observed,
+    fillSuggestionForm: async () => { filled += 1; return { ok: true, filled: true }; },
+    submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, filled: true, submitted: true }; },
+    requestDecision: async (_provider, context) => ({ action, targetSymbol: "BTC/USDT", confidence: 0.7, bullishProfitProbability: 0.52, bearishProfitProbability: 0.44, evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
+  };
+  try {
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(submissions.length, 1);
+    assert.equal(submissions[0].action, "BUY");
+    assert.equal(filled, 0);
+    assert.equal(task.pendingAction.formFilled, true);
+    assert.equal(task.unsettledActions[0].id, oldId);
+    assert.equal(task.status, "MONITORING");
+    assert.equal(task.decision.observedAt, observed.observedAt);
+    assert.ok(task.decision.analysisDurationMs >= 0);
+    // Same K stays idempotent even though an exit is tracked separately.
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(submissions.length, 1);
+    observed = testMarketSnapshot("old-exit-closed", 101);
+    observed.account.positions = [];
+    action = "HOLD";
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.unsettledActions.length, 0);
+    assert.equal(state.orders.find((order) => order.idempotencyKey.endsWith(oldId))?.status, "filled");
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+  } finally {
+    stopController(task.id);
+    state.tasks = state.tasks.filter((item) => item.id !== task.id);
+  }
+});
+
+test("已提交的持仓不重复转让，其他持仓立即离场", async () => {
+  const task = insertNorthstarTask(`unsettled_other_exit_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: false, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("two-exits", 100);
+  market.account.positions = ["P-1", "P-2"].map((positionOrderId) => ({ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId }));
+  task.market = market;
+  task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "STOP_LOSS", targetSymbol: "BTC/USDT", targetPositionIds: ["P-1"] }), status: "AWAITING_FILL", source: "auto_timeout" };
+  const submissions = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => market,
+    submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, filled: true, submitted: true }; },
+    requestDecision: async (_provider, context) => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"], evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
+  };
+  try {
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(submissions.length, 1);
+    assert.deepEqual(submissions[0].targetPositionIds, ["P-2"]);
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(submissions.length, 1);
+    assert.equal(task.status, "MONITORING");
+  } finally {
+    stopController(task.id);
+    state.tasks = state.tasks.filter((item) => item.id !== task.id);
+  }
+});
+
+test("连续 K 可入场多笔，同一个新增持仓不会重复核实多笔成交", async () => {
+  const task = insertNorthstarTask(`concurrent_entries_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+  let observed = testMarketSnapshot("entry-one", 100);
+  observed.account.positions = [];
+  let action = "BUY";
+  let submissions = 0;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => observed,
+    submitSuggestionForm: async () => { submissions += 1; return { ok: true, filled: true, submitted: true }; },
+    requestDecision: async (_provider, context) => ({ action, targetSymbol: "BTC/USDT", bullishProfitProbability: 0.52, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
+  };
+  try {
+    await runMonitoringCycle(task.id, { runtime });
+    task.pendingAction.entryKWindow -= 60_000;
+    observed = testMarketSnapshot("entry-two", 100);
+    observed.account.positions = [];
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(submissions, 2);
+    action = "HOLD";
+    observed = testMarketSnapshot("entry-one-filled", 100);
+    observed.account.positions = [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-new" }];
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.unsettledActions.length, 0);
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    assert.equal(state.orders.filter((order) => order.taskId === task.id && order.status === "filled").length, 1);
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    observed.account.positions[0].quantity = 2;
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+    assert.equal(state.orders.filter((order) => order.taskId === task.id && order.status === "filled").length, 2);
+  } finally {
+    stopController(task.id);
+    state.tasks = state.tasks.filter((item) => item.id !== task.id);
+  }
+});
+
+test("未读到持仓不代表离场成交，下一次真实空仓才核实", async () => {
+  const task = insertNorthstarTask(`unknown_holdings_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("unknown-holdings", 100);
+  task.market = { ...market, account: { positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-1" }] } };
+  task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "STOP_LOSS", targetSymbol: "BTC/USDT", targetPositionIds: ["P-1"] }), status: "AWAITING_FILL", source: "auto_timeout" };
+  market.account = { positions: [], positionsVerified: false };
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => market,
+    requestDecision: async () => ({ action: "HOLD", bullishProfitProbability: 0.2, bearishProfitProbability: 0.2, riskFlags: [] }),
+  };
+  try {
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    market.account.positionsVerified = true;
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+  } finally {
+    stopController(task.id);
+    state.tasks = state.tasks.filter((item) => item.id !== task.id);
+  }
+});
 
 test("生产后端只调度客户端分析，不分片、不向客户端重发完整行情", async () => {
   const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
@@ -1281,7 +1419,7 @@ test(`手动入场无需软件确认，成交后自动${exitType}并开启下一
     assert.equal(task.pendingAction.status, "CONFIRMED");
     assert.equal(task.stopLocked, false);
     assert.equal(task.monitoringEnabled, true);
-    task.pendingAction.createdAt = new Date(Date.now() - 60_000).toISOString();
+    task.lastEntryKWindow -= 60_000;
     observed = testMarketSnapshot("manual-flow-next-k", 103);
     observed.account.positions = [];
     action = "BUY";

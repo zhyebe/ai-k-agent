@@ -174,10 +174,13 @@ function providerRequestCandidates(provider) {
   return [primary, { provider: responsesV1, url: providerRequestUrl(responsesV1) }, { provider: chat, url: providerRequestUrl(chat) }];
 }
 
-function chatCompletionsBody(provider, messages) {
+function chatCompletionsBody(provider, messages, options = {}) {
+  const officialDeepSeek = new URL(provider.baseUrl).hostname === "api.deepseek.com";
   return {
     model: provider.model,
     messages,
+    // DeepSeek defaults to high-effort thinking; live decisions use its documented fast mode.
+    ...(options.fastAnalysis === true && officialDeepSeek ? { thinking: { type: "disabled" } } : {}),
   };
 }
 
@@ -231,7 +234,7 @@ function providerRequestBody(provider, messages, options = {}) {
   if (wireApi === "responses") return responsesBody(provider, messages);
   if (wireApi === "anthropic") return anthropicBody(provider, messages, options);
   if (wireApi === "gemini") return geminiBody(messages);
-  return chatCompletionsBody(provider, messages);
+  return chatCompletionsBody(provider, messages, options);
 }
 
 export function extractModelText(payload) {
@@ -641,11 +644,30 @@ export async function requestDecision(provider, context, options = {}) {
   const apiKey = providerApiKey(provider);
   if (!apiKey || !provider.baseUrl) return normalizeDecision({ action: "HOLD", risk_flags: ["PROVIDER_NOT_READY"] });
   const conversationMessages = buildConversationMessages(requestContext);
+  const wireContext = { ...requestContext };
+  // Keep approved source text once, in its dedicated message, without dropping evidence IDs.
+  if (requestContext.experiencePrompt) {
+    delete wireContext.experiencePrompt;
+    wireContext.evidence = requestContext.evidence?.map((item) => {
+      if (item.type !== "approved_experience") return item;
+      const { excerpt, content, ...metadata } = item;
+      return metadata;
+    });
+    wireContext.approvedSkills = requestContext.approvedSkills?.map(({ content, ...metadata }) => metadata);
+  }
+  if (conversationMessages.length) {
+    if (wireContext.conversation) {
+      const { recentRounds, ...currentRound } = wireContext.conversation;
+      wireContext.conversation = currentRound;
+    }
+    delete wireContext.recentRounds;
+  }
+  const fastAnalysisPrompt = "Latency-critical live decision. Return one complete, compact JSON object; no markdown or long explanation. Keep analysis_summary within 180 Chinese characters, invalidation within 100, each board summary within 80, and reason_codes/risk_flags/key_levels/watch_conditions at most 3 items each. Put action, exit_type, target_position_ids and both directional probabilities first. Assess every open position and monitored book; preserve exact IDs, honest probabilities, entry/exit prices and net-cost reasoning. Do not spend output restating source Skills or historical rounds. Resolve action/probability consistency in this same response.";
   const messages = [
-    { role: "system", content: `${defaultSystemPrompt}\n${entryThresholdPrompt}\n${conservativeExitPrompt}\n${orderBookPrompt}\n${operatorPrompt}\n${permanentCounterpartyPrompt}` },
+    { role: "system", content: `${defaultSystemPrompt}\n${entryThresholdPrompt}\n${conservativeExitPrompt}\n${orderBookPrompt}\n${operatorPrompt}\n${permanentCounterpartyPrompt}${options.fastAnalysis ? `\n${fastAnalysisPrompt}` : ""}` },
     ...conversationMessages,
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),
-    { role: "user", content: JSON.stringify(requestContext) },
+    { role: "user", content: JSON.stringify(wireContext) },
   ];
   const response = await requestProviderJson(provider, messages, options);
   if (!response?.content) return normalizeDecision({ action: "HOLD", risk_flags: ["EMPTY_MODEL_RESPONSE"] });

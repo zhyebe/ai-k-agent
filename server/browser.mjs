@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
+import { activateTradeControl } from "./trade-controls.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -185,9 +186,14 @@ async function collectTables(page) {
       const rect = element.getBoundingClientRect();
       return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
     };
-    const roots = [...document.querySelectorAll("table, [role='table'], [role='grid']")].filter(visible).slice(0, 20);
+    const roots = [...document.querySelectorAll(".el-table, table, [role='table'], [role='grid']")]
+      .filter((root) => visible(root) && !root.parentElement?.closest(".el-table, table, [role='table'], [role='grid']")).slice(0, 20);
     return roots.map((root) => ({
-      rows: [...root.querySelectorAll("tr, [role='row']")].slice(0, 120).map((row) => [...row.querySelectorAll("th, td, [role='columnheader'], [role='gridcell']")].slice(0, 30).map((cell) => String(cell.innerText || cell.textContent || "").trim())),
+      rows: [...root.querySelectorAll("tr, [role='row']")]
+        .filter((row) => visible(row) && !row.closest(".el-table__fixed, .el-table__fixed-right, .el-table__footer-wrapper"))
+        .slice(0, 120).map((row) => [...row.querySelectorAll("th, td, [role='columnheader'], [role='gridcell']")].slice(0, 30).map((cell) => String(cell.innerText || cell.textContent || "").trim())),
+      emptyText: [...root.querySelectorAll(".el-table__empty-block, .el-table__empty-text")].filter(visible).map((node) => node.innerText).join(" "),
+      loading: [...root.querySelectorAll(".el-loading-mask")].some(visible),
     })).filter((table) => table.rows.some((row) => row.length));
   });
 }
@@ -457,10 +463,14 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
   }
 }
 
-export async function readVisiblePage(sessionId = "default") {
+export async function readVisiblePage(sessionId = "default", { inspectPositions = false } = {}) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
+    if (inspectPositions) {
+      await activateTradeControl(session.page, "持仓明细");
+      await session.page.waitForFunction(() => [...document.querySelectorAll("th")].some((node) => /持仓单号/.test(node.textContent) && node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).catch(() => {});
+    }
     const raw = await session.page.evaluate(() => ({
       url: location.href,
       title: document.title,
