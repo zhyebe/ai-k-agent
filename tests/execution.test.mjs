@@ -37,10 +37,12 @@ test("buy and sell stay suggestions until the LIVE engine submits them", () => {
   const preview = suggestOrderPreview({ ...task, market: { latest: { price: 100 }, account: { availableFunds: 5000 } }, metrics: { equity: 5000 } }, decision);
   assert.equal(preview.suggestedQty, 2);
   assert.equal(preview.formSubmitBlocked, true);
-  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE" }, "manual_confirm"), false);
   assert.equal(shouldSubmitLiveOrder({ mode: "PAPER" }, "manual_confirm"), false);
   assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: true, target: { url: "https://smyw.haohandahan.cn/client/#/transcc" } }, "auto_timeout"), true);
-  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false }, "auto_timeout"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false }, "auto_timeout"), false);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false, pendingAction: { exitType: "TAKE_PROFIT" } }, "auto_timeout"), true);
+  assert.equal(shouldSubmitLiveOrder({ mode: "LIVE", autoDecisionEnabled: false, pendingAction: { exitType: "STOP_LOSS" } }, "auto_timeout"), true);
 });
 
 test("离场预览使用持仓数量并保留止盈类型", () => {

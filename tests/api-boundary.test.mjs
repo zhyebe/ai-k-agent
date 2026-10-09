@@ -184,7 +184,7 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(hosted.body.task.target.credentialRef, "");
     assert.equal(hosted.body.task.providerId, userProvider.body.provider.id);
     assert.equal(hosted.body.task.mode, "LIVE");
-    assert.equal(hosted.body.task.autoDecisionEnabled, true);
+    assert.equal(hosted.body.task.autoDecisionEnabled, false);
     assert.equal(hosted.body.task.target.url, "https://smyw.haohandahan.cn/client/#/transcc");
     assert.equal("automationTestMode" in hosted.body.task, false);
 

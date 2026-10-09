@@ -1031,6 +1031,7 @@ test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () =
   const taskId = `task_live_rule_mark_${exitType}_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.mode = "LIVE";
+  task.autoDecisionEnabled = true;
   task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
   task.status = "MONITORING";
   task.monitoringEnabled = true;
@@ -1064,10 +1065,12 @@ test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () =
 });
 }
 
-test("实盘入场由 AI 自动提交，持仓变化后自动核实", async () => {
+for (const autoDecisionEnabled of [false, true]) {
+test(`实盘${autoDecisionEnabled ? "自动" : "手动"}入场，持仓变化后自动核实`, async () => {
   const taskId = `task_manual_reconcile_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.mode = "LIVE";
+  task.autoDecisionEnabled = autoDecisionEnabled;
   task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
   task.status = "MONITORING";
   task.monitoringEnabled = false;
@@ -1079,7 +1082,7 @@ test("实盘入场由 AI 自动提交，持仓变化后自动核实", async () =
   task.pendingAction = buildPendingAction(task, task.decision);
   let browserSubmits = 0;
   const acknowledged = await confirmPendingAction(taskId, { source: "manual_confirm", runtime: { submitSuggestionForm: async () => { browserSubmits += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; } } });
-  assert.equal(browserSubmits, 1);
+  assert.equal(browserSubmits, autoDecisionEnabled ? 1 : 0);
   assert.equal(acknowledged.pendingAction.status, "AWAITING_FILL");
   task.monitoringEnabled = true;
   const holding = testMarketSnapshot("manual-filled", 101);
@@ -1100,11 +1103,77 @@ test("实盘入场由 AI 自动提交，持仓变化后自动核实", async () =
     await runMonitoringCycle(taskId, { runtime });
     assert.equal(task.pendingAction.status, "CONFIRMED");
     assert.equal(state.orders.find((order) => order.taskId === taskId)?.status, "filled");
-    assert.equal(browserSubmits, 1);
+    assert.equal(browserSubmits, autoDecisionEnabled ? 1 : 0);
   } finally {
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
   }
 });
+}
+
+for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
+test(`手动入场无需软件确认，成交后自动${exitType}并开启下一轮`, async () => {
+  const taskId = `manual_full_flow_${exitType}_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: false, status: "MONITORING", monitoringEnabled: true });
+  let observed = testMarketSnapshot("manual-flow-flat", 100);
+  observed.account.positions = [];
+  let action = "BUY";
+  let exited = false;
+  const submissions = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    continueManualEntry: async () => ({ ok: true, continued: false }),
+    observeMarket: async () => observed,
+    fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
+    submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true }; },
+    requestDecision: async (_provider, context) => ({
+      action, exitType: exited ? exitType : null, targetPositionIds: exited ? ["P-human"] : [],
+      targetSymbol: "BTC/USDT", confidence: 0.7, bullishProfitProbability: 0.6, bearishProfitProbability: 0.3,
+      evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
+    }),
+  };
+  startController(taskId, { runCycle: async () => { task.nextPollAt = new Date(Date.now() + 60_000).toISOString(); return { task }; } });
+  try {
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "WAITING");
+    assert.equal(task.pendingAction.source, null);
+    assert.equal(submissions.length, 0);
+    observed = testMarketSnapshot("manual-flow-holding", 101);
+    observed.account.positions = [{ symbol: "BTC/USDT", side: "买入", quantity: 1, positionOrderId: "P-human" }];
+    action = "HOLD";
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+    const entry = state.orders.find((order) => order.taskId === taskId);
+    assert.equal(entry.status, "filled");
+    assert.equal(entry.source, "manual_browser");
+    action = "SELL";
+    exited = true;
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(submissions.length, 1);
+    assert.equal(submissions[0].exitType, exitType);
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    observed = testMarketSnapshot("manual-flow-closed", 102);
+    observed.account.positions = [];
+    action = "HOLD";
+    exited = false;
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "CONFIRMED");
+    assert.equal(task.stopLocked, false);
+    assert.equal(task.monitoringEnabled, true);
+    task.pendingAction.createdAt = new Date(Date.now() - 60_000).toISOString();
+    observed = testMarketSnapshot("manual-flow-next-k", 103);
+    observed.account.positions = [];
+    action = "BUY";
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(task.pendingAction.status, "WAITING");
+    assert.equal(submissions.length, 1);
+  } finally {
+    stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+}
 
 test("实盘离场由 AI 自动提交，持仓归零后自动核实", async () => {
   const taskId = `task_manual_exit_reconcile_${Date.now()}`;

@@ -349,7 +349,7 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
   .decision-panel .decision-action { flex-wrap: wrap; margin: 12px 16px; padding-left: 12px; }
   .decision-panel .decision-action strong { font-size: 22px; }
   .decision-panel .decision-action span { font-size: 14px; }
-  .decision-panel .decision-time { width: 100%; margin-left: 54px; }
+  .decision-panel .decision-time { display: none; }
   .decision-details > summary { padding-right: 16px; padding-left: 16px; }
   .decision-panel .direction-probabilities, .decision-panel .decision-stats, .decision-panel .reason-block, .decision-panel .board-assessment-list, .decision-panel .operator-assessment, .decision-panel .invalidation, .decision-panel .decision-safe, .decision-panel .decision-actions, .decision-panel .pending-action-card { margin-right: 16px; margin-left: 16px; }
   .decision-panel .direction-probabilities b { font-size: 28px; }

@@ -2,7 +2,7 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { analysisTimeoutMs, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, nextCandleTarget, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedExperiencePrompt } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, MAX_LIVE_ENTRY_QUANTITY, executeDecision, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, MAX_LIVE_ENTRY_QUANTITY, executeDecision, isAutomaticAction, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { normalizeBrowserPlan } from "./tools.mjs";
@@ -74,20 +74,21 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
     fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
+    continueManualEntry: use("continueManualEntry", (input) => callBrowserMethod("continueManualEntry", userId, input)),
     readTradeControls: use("readTradeControls", (input) => callBrowserMethod("readTradeControls", userId, input)),
     submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, input, options)),
     requestBrowserActions: use("requestBrowserActions", (provider, context, options) => callProviderMethod("requestBrowserActions", userId, { provider, context, options })),
   };
 }
 
-function isAutoTakeover(task) {
-  return isLiveTask(task) || task?.autoDecisionEnabled === true;
+function isAutoTakeover(task, decision = task?.decision) {
+  return isAutomaticAction(task, decision);
 }
 
 function pendingWaitMessage(task, { auto = false } = {}) {
   if (auto && isLiveTask(task)) return "全自动接管：分析通过后直接下单或离场，持续核实持仓";
   if (auto) return "全自动接管：分析通过后直接记录，观察模式不会下单";
-  if (isLiveTask(task)) return "实盘动作由 AI 自动提交并持续核实持仓";
+  if (isLiveTask(task)) return "手动入场：AI 只填表，请在目标页点击入场按钮；成交后 AI 自动监控并离场";
   return "请确认建议；观察模式不会下单";
 }
 
@@ -250,7 +251,7 @@ export function enforceProfitProbability(decision) {
 }
 
 export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
-  const auto = isAutoTakeover(task);
+  const auto = isAutoTakeover(task, decision);
   const preview = suggestOrderPreview(task, decision, { enforceQuantityLimit: isLiveTask(task) });
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
@@ -360,7 +361,7 @@ async function openPendingAction(task, { runtime, run } = {}) {
         message: task.pendingAction.formFilled
           ? (isAutoTakeover(task)
             ? `已在目标页准备${pendingActionLabel(task.pendingAction)}，全自动接管将直接执行`
-            : `已在目标页准备${pendingActionLabel(task.pendingAction)}，等待你确认后执行`)
+            : `已填写${pendingActionLabel(task.pendingAction)}表单，请在目标页点击入场按钮；成交后自动监控离场`)
           : `${pendingTargetLabel(task.pendingAction)}建议待确认；目标页未填写表单，尚未提交`,
         data: { pendingActionId: task.pendingAction.id, targetSymbol: task.pendingAction.targetSymbol, targetSymbolName: task.pendingAction.targetSymbolName, targetInstrumentId: task.pendingAction.targetInstrumentId, filled: task.pendingAction.formFilled, submitted: false },
       });
@@ -369,7 +370,7 @@ async function openPendingAction(task, { runtime, run } = {}) {
     task.pendingAction.formFilled = false;
     task.pendingAction.message = `${task.pendingAction.message}；填表失败：${error.message}`;
   }
-  if ((isLiveTask(task) || isAutoTakeover(task)) && task.pendingAction?.status === "WAITING") {
+  if (isAutoTakeover(task, task.pendingAction) && task.pendingAction?.status === "WAITING") {
     try {
       if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
       await confirmPendingAction(task.id, { source: "auto_timeout", runtime });
@@ -408,7 +409,7 @@ async function openPendingAction(task, { runtime, run } = {}) {
 export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
-  task.autoDecisionEnabled = isLiveTask(task) ? true : enabled === true;
+  task.autoDecisionEnabled = enabled === true;
   if (countdownSec !== undefined) {
     const next = Number(countdownSec);
     if (!Number.isFinite(next)) throw new Error("COUNTDOWN_INVALID");
@@ -424,13 +425,13 @@ export function setAutoDecision(taskId, { enabled, countdownSec } = {}) {
     } else {
       task.pendingAction.countdownSec = 0;
       task.pendingAction.deadlineAt = null;
-      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${isLiveTask(task) ? "实盘动作由 AI 自动提交并持续核实持仓" : "自动接管已关闭，等待弹窗确认或人工接管"}`;
+      task.pendingAction.message = `${pendingTargetLabel(task.pendingAction)}：${pendingWaitMessage(task, { auto: isAutoTakeover(task, task.pendingAction) })}`;
       clearPendingActionTimer(task.id);
     }
   }
   task.updatedAt = new Date().toISOString();
   addEvent("auto_decision_updated", isLiveTask(task)
-    ? (task.autoDecisionEnabled ? "全自动接管已开启：分析后直接下单或离场" : "全自动接管已关闭：AI 填表，用户在目标页提交")
+    ? (task.autoDecisionEnabled ? "自动入场已开启：AI 自动入场、监控与离场" : "手动入场：AI 填表，用户点击入场；后续自动确认、监控与离场")
     : task.autoDecisionEnabled ? "已打开自动确认，观察模式不会下单" : "已关闭自动确认，建议需弹窗确认", { taskId, enabled: task.autoDecisionEnabled, countdownSec: task.autoDecisionCountdownSec });
   persistTask(task);
   return task;
@@ -484,7 +485,6 @@ export function setTaskMode(taskId, mode) {
   if (task.pendingAction?.status === "SUBMITTING") throw new Error("PENDING_ACTION_BUSY");
   const previous = task.mode;
   task.mode = next;
-  if (next === "LIVE") task.autoDecisionEnabled = true;
   if (task.pendingAction?.status === "WAITING") {
     clearPendingAction(task, { persist: false });
     task.nextTrigger = "运行模式已切换；旧建议已取消，等待重新分析";
@@ -536,7 +536,7 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
 function reconcilePendingPosition(task, market) {
   const pending = task.pendingAction;
   if (!pending || !["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || task.mode !== "LIVE") return false;
-  if (!pending.source) return false;
+  if (!pending.source && (pending.exitType || task.autoDecisionEnabled === true)) return false;
   const baseline = Number(pending.baselinePositionQty || 0);
   const quantity = Number(pending.suggestedQty || 0);
   if (quantity <= 0) return false;
@@ -547,7 +547,7 @@ function reconcilePendingPosition(task, market) {
   const order = recordConfirmedOrder(task, pending, {
     status: "filled",
     submitted: true,
-    source: pending.source || "manual_confirm",
+    source: pending.source || "manual_browser",
     message: "已通过目标页持仓变化核实成交",
   });
   order.status = "filled";
@@ -556,7 +556,7 @@ function reconcilePendingPosition(task, market) {
   task.pendingAction = {
     ...pending,
     status: "CONFIRMED",
-    source: pending.source || "manual_confirm",
+    source: pending.source || "manual_browser",
     resolvedAt: new Date().toISOString(),
     formSubmitBlocked: false,
     message: `${pendingActionLabel(pending)}已通过持仓变化核实，继续监控`,
@@ -579,6 +579,17 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     clearPendingActionTimer(task.id);
     const actionLabel = pendingActionLabel(task.pendingAction);
     const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "" });
+    if (isLiveTask(task) && !isAutomaticAction(task)) {
+      task.pendingAction = {
+        ...task.pendingAction,
+        status: "AWAITING_FILL",
+        source: "manual_browser",
+        message: "手动入场由用户在目标页提交；AI 继续监控持仓，成交后自动判断离场",
+      };
+      task.nextTrigger = task.pendingAction.message;
+      persistTask(task);
+      return task;
+    }
     if (shouldSubmitLiveOrder(task, source)) {
       task.pendingAction = {
         ...task.pendingAction,
@@ -599,6 +610,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
             symbolName: task.pendingAction.targetSymbolName,
             instrumentId: task.pendingAction.targetInstrumentId,
             targetPositionIds: task.pendingAction.targetPositionIds,
+            exitType: task.pendingAction.exitType,
           });
           if (controls?.ok) {
             const provider = findProviderForUser(task.providerId, task.ownerUserId);
@@ -645,6 +657,11 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       } finally {
         if (pendingSubmissionCancels.get(taskId)) pendingSubmissionCancels.delete(taskId);
       }
+      if (task.pendingAction?.exitType && submitted?.completedPositionIds?.length) {
+        const partial = { ...task.pendingAction, targetPositionIds: submitted.completedPositionIds };
+        task.pendingAction = { ...partial, baselinePositionQty: pendingPositionQuantity(task.market, partial), suggestedQty: pendingPositionQuantity(task.market, partial) };
+      }
+      if (task.pendingAction?.exitType && Number(submitted?.submittedQuantity) > 0) task.pendingAction.suggestedQty = Number(submitted.submittedQuantity);
       if (submitted?.submitted === true && submitted.ok !== true) {
         const order = recordConfirmedOrder(task, task.pendingAction, {
           status: "rejected",
@@ -804,7 +821,7 @@ export function cancelPendingAction(taskId) {
 export function takeoverPendingAction(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
-  if (isAutoTakeover(task)) return task;
+  if (isLiveTask(task) || isAutoTakeover(task)) return task;
   if (["WAITING", "AWAITING_FILL", "UNVERIFIED", "REJECTED"].includes(task.pendingAction?.status)) {
     clearPendingActionTimer(task.id);
     task.pendingAction = {
@@ -1038,7 +1055,6 @@ export function startTask(taskId) {
   }
   task.status = "STARTING";
   task.stopLocked = false;
-  if (isLiveTask(task)) task.autoDecisionEnabled = true;
   if (task.pendingAction?.status === "TAKEN_OVER") {
     clearPendingActionTimer(task.id);
     task.pendingAction = null;
@@ -1094,7 +1110,7 @@ export function stopTask(taskId) {
 export function claimManual(taskId) {
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
-  if (isAutoTakeover(task)) return task;
+  if (isLiveTask(task) || isAutoTakeover(task)) return task;
   advanceTaskGeneration(task);
   task.stopLocked = true;
   task.monitoringEnabled = false;
@@ -1616,6 +1632,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     assertCurrent();
     if (!loginResult.ok || !loginResult.authenticated) return stopForLoginFailure(task, run, loginResult);
 
+    if (isLiveTask(task) && !task.autoDecisionEnabled && !task.pendingAction?.exitType && ["WAITING", "AWAITING_FILL"].includes(task.pendingAction?.status)) {
+      const continued = await runtime.continueManualEntry({ sessionId: task.target?.browserSessionId || `task:${task.id}`, action: task.pendingAction.action });
+      assertCurrent();
+      if (continued?.continued) {
+        task.pendingAction = { ...task.pendingAction, status: "AWAITING_FILL", source: "manual_browser", message: "用户已点击入场，Agent 已自动处理网页确认；继续监控成交与离场" };
+      }
+    }
+
     logStage(task, run, "collect", "读取网页可见数据与只读行情");
     const market = await runtime.observeMarket(task, connector);
     assertCurrent();
@@ -1902,15 +1926,15 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     } else {
       completeWorkflow(task, "rules", isAutoTakeover(task)
         ? (isLiveTask(task) ? "规则通过，全自动接管将直接下单或离场" : "规则通过，全自动记录建议")
-        : (isLiveTask(task) ? "规则通过，等待你确认下单或离场" : "规则通过，买卖意图转为建议"));
+        : (isLiveTask(task) ? "规则通过，AI 填表后由用户点击入场；后续自动监控离场" : "规则通过，买卖意图转为建议"));
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: isAutoTakeover(task)
         ? (isLiveTask(task) ? "规则通过；全自动接管，不再弹窗" : "规则通过；观察模式不会下单")
-        : (isLiveTask(task) ? "规则通过；AI 自动提交下单或离场并继续监控" : "规则通过；观察模式不会自动下单") });
+        : (isLiveTask(task) ? "规则通过；手动入场后 AI 自动确认、监控并离场" : "规则通过；观察模式不会自动下单") });
     }
 
     logStage(task, run, "action", isAutoTakeover(task)
       ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
-      : "路由最终建议，等待确认后决定是否下单");
+      : (isLiveTask(task) ? "准备入场表单，等待用户点击入场按钮" : "路由最终建议，等待确认后决定是否下单"));
     assertCurrent();
     const unsettledExit = Boolean(task.pendingAction?.exitType)
       && ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(task.pendingAction?.status);
@@ -1942,7 +1966,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const submitted = task.pendingAction?.status === "CONFIRMED";
       const actionName = pendingActionLabel(task.pendingAction || task.decision);
       completeWorkflow(task, "action", waiting
-        ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName} 自动执行中` : `${decisionBoardLabel} ${actionName} 待你确认，完成后交回 AI`)
+        ? (isAutoTakeover(task) ? `${decisionBoardLabel} ${actionName} 自动执行中` : isLiveTask(task) ? `${decisionBoardLabel} ${actionName} 等待用户点击入场；后续自动监控离场` : `${decisionBoardLabel} ${actionName} 建议待确认`)
         : submitted && isAutoTakeover(task)
           ? `${decisionBoardLabel} ${actionName} 已自动执行，继续监控`
           : `${decisionBoardLabel ? `${decisionBoardLabel} ` : ""}${actionName} 建议已生成`);

@@ -85,7 +85,7 @@ export function publicTask(task) {
   return {
     ...safeTask,
     automationAuthorized: false,
-    autoDecisionEnabled: String(task.mode || "") === "LIVE" || task.autoDecisionEnabled === true,
+    autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: String(task.providerId || ""),
     monitorAllBoards: task.monitorAllBoards === true,
@@ -211,7 +211,7 @@ function sanitizeHydratedTask(task) {
   const safeTask = {
     ...runtimeTask,
     automationAuthorized: false,
-    autoDecisionEnabled: String(task.mode || "") === "LIVE" || task.autoDecisionEnabled === true,
+    autoDecisionEnabled: task.autoDecisionEnabled === true,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,

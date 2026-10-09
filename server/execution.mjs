@@ -13,9 +13,15 @@ export function isLiveTask(task) {
   return String(task?.mode || "") === "LIVE";
 }
 
+export function isAutomaticAction(task, decision = task?.pendingAction || task?.decision) {
+  return task?.autoDecisionEnabled === true
+    || (isLiveTask(task) && ["TAKE_PROFIT", "STOP_LOSS"].includes(decision?.exitType));
+}
+
 export function shouldSubmitLiveOrder(task, source = "manual_confirm") {
   return isLiveTask(task)
     && task?.stopLocked !== true
+    && isAutomaticAction(task)
     && isTradingSwitchOn();
 }
 
@@ -102,7 +108,7 @@ export function executeDecision(task, decision, connector) {
   if (decision.action === "HOLD") return { ok: true, skipped: true, reason: "HOLD", route: "HOLD", executionEnabled: false, orderCreated: false };
   const preview = suggestOrderPreview(task, decision);
   const live = isLiveTask(task) && isTradingSwitchOn();
-  const auto = task.autoDecisionEnabled === true;
+  const auto = isAutomaticAction(task, decision);
   addEvent("suggestion_ready", live
     ? (auto ? "分析通过，全自动接管将直接下单或离场" : "买卖建议已生成，AI 填表后由用户在目标页提交")
     : "买卖建议已生成，等待确认；当前模式不会提交实盘", {

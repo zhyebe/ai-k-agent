@@ -86,7 +86,7 @@ for (const width of [1440, 390]) {
 }
 
 for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]]) {
-  test(`LIVE analysis stays in the first viewport without manual intervention at ${width}x${height}`, async (t) => {
+  test(`LIVE manual entry prompt and analysis stay in the first viewport at ${width}x${height}`, async (t) => {
     const { page, navigate } = await openPage(t, { width, height });
     const sample = structuredClone(workspace);
     const task = sample.tasks[0];
@@ -112,11 +112,12 @@ for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]
     await navigate();
     await page.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
     assert.equal(await page.getByRole("alertdialog").count(), 0);
-    assert.equal(await page.getByRole("checkbox").count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: "自动入场" }).isChecked(), false);
     assert.equal(await page.getByText(/人工接管|人工复核|转人工处理|亲自点击|手动提交/).count(), 0);
     assert.equal(await page.getByRole("button", { name: "确认规则并继续" }).count(), 0);
     assert.equal(await page.locator(".review-callout").count(), 0);
-    assert.equal(await page.getByText("全自动执行", { exact: true }).count(), 1);
+    assert.equal(await page.getByText("手动入场", { exact: true }).count(), 1);
+    assert.match(await page.locator(".decision-safe").innerText(), /请在目标页点击买入订立入场按钮/);
     assert.equal(await page.getByText("自动单笔上限 1").count(), 1);
     assert.equal(await page.getByText(/测试数量/).count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);

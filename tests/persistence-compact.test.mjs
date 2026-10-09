@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persistence.mjs";
 
+test("LIVE persistence preserves the selected entry mode", () => {
+  for (const enabled of [false, true]) {
+    assert.equal(compactTaskRuntime({ mode: "LIVE", autoDecisionEnabled: enabled }).autoDecisionEnabled, enabled);
+  }
+});
+
 test("compactTaskRuntime does not persist market snapshots", () => {
   const runtime = compactTaskRuntime({
     workflow: ["monitor"],

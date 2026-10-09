@@ -6,13 +6,14 @@ const path = require("node:path");
 const { _electron } = require("playwright");
 
 async function main() {
+  const { tradeFixture } = await import("../tests/fixtures/trade-page.mjs");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "axiom browser 中文 "));
   const executablePath = process.env.AXIOM_DESKTOP_EXECUTABLE;
   const screenshot = path.join(process.env.AXIOM_SMOKE_OUTPUT || os.tmpdir(), "axiom-client-browser-smoke.png");
   fs.mkdirSync(path.dirname(screenshot), { recursive: true });
   const server = http.createServer((_request, response) => {
     response.setHeader("content-type", "text/html; charset=utf-8");
-    response.end('<html><head><title>Desktop browser fixture</title></head><body style="background:#101820;color:white"><h1>Desktop browser fixture</h1><table><tr><td>销售①</td><td>101</td><td>20</td></tr><tr><td>采购①</td><td>100</td><td>30</td></tr></table></body></html>');
+    response.end(tradeFixture);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   let host;
@@ -29,7 +30,12 @@ async function main() {
     const result = await host.evaluate((electron, input) => globalThis.axiomBrowserSmoke(electron, input), { url: `http://127.0.0.1:${server.address().port}`, screenshot });
     assert.equal(result.packaged, Boolean(executablePath));
     assert.equal(result.mode, "desktop-embedded");
-    assert.equal(result.title, "Desktop browser fixture");
+    assert.equal(result.title, "Trade controls fixture");
+    assert.equal(result.manualFilled, true);
+    assert.equal(result.manualBeforeClick, 0);
+    assert.equal(result.manualContinued, true);
+    assert.deepEqual(result.entries.map((item) => item.side), ["BUY", "SELL"]);
+    assert.deepEqual(result.exits, [{ id: "P-1", price: "21", quantity: "2" }, { id: "P-2", price: "21", quantity: "1" }]);
     assert.equal(result.orderBook.bids[0].price, 100);
     assert.equal(result.orderBook.asks[0].price, 101);
     assert.equal(result.sessions, 1);

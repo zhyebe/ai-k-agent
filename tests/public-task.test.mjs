@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { publicTask } from "../server/store.mjs";
 
+test("LIVE entry mode remains manual or automatic in public tasks", () => {
+  for (const enabled of [false, true]) {
+    assert.equal(publicTask({ mode: "LIVE", autoDecisionEnabled: enabled }).autoDecisionEnabled, enabled);
+  }
+});
+
 test("publicTask keeps ticks and latest objects so desktop workspace can render", () => {
   const task = publicTask({
     id: "task_1",

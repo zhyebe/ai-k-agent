@@ -60,11 +60,11 @@ test("forbidden trade controls stay blocked for submit labels", () => {
   assert.deepEqual(tradeSubmitLabels({ action: "SELL" }), ["卖出订立", "卖订立"]);
   assert.deepEqual(tradeSubmitLabels({ action: "SELL", exitType: "TAKE_PROFIT" }), ["卖出转让", "卖转让"]);
   assert.deepEqual(tradeSubmitLabels({ action: "BUY", exitType: "STOP_LOSS" }), ["买入转让", "买转让"]);
-  assert.deepEqual(positionListExitLabels({ exitType: "TAKE_PROFIT" }), ["止盈", "转让"]);
-  assert.deepEqual(positionListExitLabels({ exitType: "STOP_LOSS" }), ["止损", "转让"]);
+  assert.deepEqual(positionListExitLabels({ exitType: "TAKE_PROFIT" }), ["转让"]);
+  assert.deepEqual(positionListExitLabels({ exitType: "STOP_LOSS" }), ["转让"]);
   assert.deepEqual(positionListExitLabels({}), ["转让"]);
   assert.equal(isPositionListExitControlText("转让", "转让"), true);
-  assert.equal(isPositionListExitControlText("止盈 | 止损", "止盈"), true);
+  assert.equal(isPositionListExitControlText("止盈 | 止损", "止盈"), false);
   assert.equal(isPositionListExitControlText("止盈价", "止盈"), false);
   const plan = normalizeBrowserPlan({
     actions: [
@@ -160,7 +160,7 @@ test("restarting LIVE clears old takeover suggestions but preserves pending fill
       task.pendingAction = { ...buildPendingAction(task, task.decision), status, message: "old action" };
       startTask(task.id);
       stopController(task.id);
-      assert.equal(task.autoDecisionEnabled, true);
+      assert.equal(task.autoDecisionEnabled, false);
       assert.equal(task.stopLocked, false);
       assert.equal(task.monitoringEnabled, true);
       assert.equal(task.pendingAction?.status || null, status === "TAKEN_OVER" ? null : "AWAITING_FILL");
@@ -231,7 +231,7 @@ test("trade rejection is recorded and the next K remains eligible", async () => 
   assert.match(result.pendingAction.message, /可用资金不足/);
 });
 
-test("LIVE mode submits through the target page without a human click", async () => {
+test("LIVE manual entry acknowledgement never clicks the website submit button", async () => {
   const task = insertTask(`task_live_confirm_${Date.now()}`, { mode: "LIVE" });
   task.pendingAction = buildPendingAction(task, task.decision);
   let submitted = 0;
@@ -244,12 +244,12 @@ test("LIVE mode submits through the target page without a human click", async ()
       },
     },
   });
-  assert.equal(submitted, 1);
+  assert.equal(submitted, 0);
   assert.equal(confirmed.pendingAction.status, "AWAITING_FILL");
-  assert.equal(confirmed.pendingAction.formSubmitBlocked, false);
-  assert.doesNotMatch(confirmed.pendingAction.message, /亲自提交|Agent 不点击按钮/);
+  assert.equal(confirmed.pendingAction.formSubmitBlocked, true);
+  assert.match(confirmed.pendingAction.message, /用户在目标页提交/);
   const orders = state.orders.filter((order) => order.taskId === task.id);
-  assert.equal(orders.length, 1);
+  assert.equal(orders.length, 0);
 });
 
 test("live auto mode lets AI plan one direction-matched browser click", async () => {
@@ -344,6 +344,21 @@ test("live exit submits 转让 with position ids", async () => {
   assert.match(confirmed.pendingAction.message, /等待持仓变化核实成交/);
 });
 
+test("partial row exits reconcile only submitted rows and available quantities", async () => {
+  const task = insertTask(`partial_exit_${Date.now()}`, {
+    mode: "LIVE", autoDecisionEnabled: false,
+    decision: { action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"] },
+    market: { latest: { price: 20 }, account: { positions: [{ positionOrderId: "P-1", quantity: 2 }, { positionOrderId: "P-2", quantity: 1 }] } },
+  });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  await confirmPendingAction(task.id, { source: "auto_timeout", runtime: {
+    submitSuggestionForm: async () => ({ ok: true, submitted: true, completedPositionIds: ["P-1"], submittedQuantity: 1 }),
+  } });
+  assert.deepEqual(task.pendingAction.targetPositionIds, ["P-1"]);
+  assert.equal(task.pendingAction.baselinePositionQty, 2);
+  assert.equal(task.pendingAction.suggestedQty, 1);
+});
+
 test("pending action preserves AI entry and exit levels", () => {
   const task = insertTask(`task_ai_levels_${Date.now()}`, {
     decision: {
@@ -410,12 +425,21 @@ test("multi-board pending action uses and submits the selected board price and i
   assert.equal(order.instrumentId, "537");
 });
 
-test("LIVE mode does not require a confirm dialog when auto flag is false", async () => {
+test("LIVE manual entry does not submit even through a legacy auto-timeout request", async () => {
   const task = insertTask(`task_live_auto_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: false });
   task.pendingAction = buildPendingAction(task, task.decision);
-  await assert.rejects(() => confirmPendingAction(task.id, { source: "auto_timeout" }), /BROWSER_SESSION_NOT_FOUND/);
-  assert.equal(task.pendingAction.status, "WAITING");
+  await confirmPendingAction(task.id, { source: "auto_timeout" });
+  assert.equal(task.pendingAction.status, "AWAITING_FILL");
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+});
+
+test("LIVE entry switch can be turned off; task-mode changes preserve it", () => {
+  const task = insertTask(`task_entry_mode_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  setAutoDecision(task.id, { enabled: false });
+  assert.equal(task.autoDecisionEnabled, false);
+  setTaskMode(task.id, "PAPER");
+  setTaskMode(task.id, "LIVE");
+  assert.equal(task.autoDecisionEnabled, false);
 });
 
 test("existing paper tasks can switch to confirm-gated live", () => {
