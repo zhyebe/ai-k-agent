@@ -9,6 +9,7 @@ import { normalizeBrowserPlan } from "./tools.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
+import { hasDirectionalProbabilities, higherProbabilityDirection } from "./entry-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -161,10 +162,9 @@ export function attachPositionExit(decision, market = {}) {
     const side = String(position.side || "");
     return expectedHeldSide === "long" ? /买|多|long/i.test(side) : /卖|空|short/i.test(side);
   };
-  let matched = requestedIds.length
+  const matched = requestedIds.length
     ? positions.filter((item) => requestedIds.includes(String(item.positionOrderId || "")))
     : positions.filter((item) => matchesTarget(item) && matchesHeldSide(item));
-  if (!matched.length && requestedIds.length && targetValues.length) matched = positions.filter((item) => matchesTarget(item) && matchesHeldSide(item));
   if (!matched.length) return fail(requestedIds.length ? "EXIT_TARGET_NOT_FOUND" : "EXIT_TARGET_REQUIRED");
   const wrongDirection = matched.some((item) => closingActionForPositions([item]) !== decision.action);
   if (wrongDirection) return fail("EXIT_DIRECTION_MISMATCH");
@@ -221,10 +221,20 @@ function chosenSideProbability(decision) {
   return overall;
 }
 
+export function narrowDirectionTrigger(decision) {
+  if (decision?.exitType || (decision?.action !== "BUY" && decision?.action !== "SELL")) return false;
+  return decision.action === higherProbabilityDirection(decision);
+}
+
+function signalTierForDecision(decision) {
+  const tier = profitSignalTier(chosenSideProbability(decision));
+  return tier === "HOLD" && narrowDirectionTrigger(decision) ? "EXPLORATORY" : tier;
+}
+
 export function meetsOrderBoundary(decision) {
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
   if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
-  return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
+  return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY || narrowDirectionTrigger(decision);
 }
 
 export function applyEntryBoundary(decision, market = {}) {
@@ -232,19 +242,22 @@ export function applyEntryBoundary(decision, market = {}) {
   if (next.exitType === "TAKE_PROFIT" || next.exitType === "STOP_LOSS") return next;
   // AI owns direction and timing. Host only evaluates the AI-selected side
   // against the execution boundary; it must never turn HOLD into an order.
-  next.signalTier = profitSignalTier(chosenSideProbability(next));
+  next.signalTier = signalTierForDecision(next);
   return next;
 }
 
 export function enforceProfitProbability(decision) {
   const next = {
     ...decision,
+    directionalProbabilitiesComplete: hasDirectionalProbabilities(decision),
     profitProbability: normalizeUnitProbability(decision?.profitProbability),
     bullishProfitProbability: normalizeUnitProbability(decision?.bullishProfitProbability),
     bearishProfitProbability: normalizeUnitProbability(decision?.bearishProfitProbability),
   };
-  next.signalTier = profitSignalTier(chosenSideProbability(next));
-  if ((next.action === "BUY" || next.action === "SELL") && !meetsOrderBoundary(next)) {
+  next.signalTier = signalTierForDecision(next);
+  if (meetsOrderBoundary(next)) {
+    next.riskFlags = (next.riskFlags || []).filter((flag) => flag !== "LOW_PROFIT_PROBABILITY");
+  } else if (next.action === "BUY" || next.action === "SELL") {
     next.riskFlags = [...new Set([...(next.riskFlags || []), "LOW_PROFIT_PROBABILITY"])];
   }
   return next;
@@ -256,7 +269,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const action = decision.action === "SELL" ? "SELL" : "BUY";
   const targetLabel = String(decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "目标盘口");
   const decisionProbability = chosenSideProbability(decision);
-  const signalTier = decision.signalTier || profitSignalTier(decisionProbability);
+  const signalTier = decision.signalTier || signalTierForDecision(decision);
   const signalLabel = profitSignalLabel(signalTier);
   const probabilityLabel = `${profitProbabilityLabel(decisionProbability)}%`;
   return {
@@ -1316,6 +1329,10 @@ export function bindDecisionToMarket(decision, market) {
   const books = monitoredBooks(market);
   const boardAssessments = uniqueBoardAssessments(decision?.boardAssessments, books);
   if (!decision || (decision.action !== "BUY" && decision.action !== "SELL")) return decision ? { ...decision, boardAssessments } : decision;
+  if (decision.exitType && decision.targetPositionIds?.length) {
+    const verified = openPositionsFromMarket(market).filter((position) => decision.targetPositionIds.includes(String(position.positionOrderId || "")));
+    if (verified.length === decision.targetPositionIds.length && verified.every((position) => closingActionForPositions([position]) === decision.action)) return { ...decision, boardAssessments };
+  }
   const requestedTarget = normalizedInstrumentValues({
     symbol: decision.targetSymbol,
     symbolName: decision.targetSymbolName,
@@ -1884,7 +1901,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const blocked = task.rules.some((rule) => rule.status === "pending" && rule.mode === "BLOCK");
     const reviewRequired = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
     // Rule results remain visible evidence, but they do not replace the AI's directional decision.
-    // LIVE execution is gated only by an explicit AI HOLD, the 45% side probability, and the same-K guard.
+    // LIVE execution is gated only by an explicit AI HOLD, the 45%/narrow-gap entry trigger, and the same-K guard; AI exits go immediately.
     const liveExecution = isLiveTask(task);
     const rulePaused = liveExecution ? false : blocked || reviewRequired || automaticRuleFailures.length > 0;
     let route = "SUGGESTION_PENDING";
@@ -1982,7 +1999,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       appendAgentOutput({ taskId, runId: run.id, stage: "action", level: "error", message: `动作未执行：${execution.message}`, data: { code: execution.code } });
     } else {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
-      completeWorkflow(task, "action", execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，未达 45% 入场边界" : "已记录受控动作");
+      completeWorkflow(task, "action", execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，未达45%或两侧差小于5%的入场边界" : "已记录受控动作");
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: execution.reason === "HOLD" ? "决策为 HOLD，无需动作" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型结论已保留，未达入场边界，不弹确认" : "建议已记录，等待确认" });
     }
     const analysis = {

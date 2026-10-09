@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { higherProbabilityDirection } from "../server/entry-policy.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -155,11 +156,13 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /approved Skills/);
     assert.match(seen[0].body.system, /MUST be BUY/);
     assert.match(seen[0].body.system, /selected probability must be >= 0\.45/);
+    assert.match(seen[0].body.system, /differ by less than 0\.05/);
     assert.match(seen[0].body.system, /short can capture 20 -> 19/);
     assert.match(seen[0].body.system, /another K can produce another entry/);
     assert.match(seen[0].body.system, /never HOLD merely because an earlier position exists/);
     assert.match(seen[0].body.system, /profit_probability equals the selected direction/);
     assert.match(seen[0].body.system, /one unit per order/);
+    assert.match(seen[0].body.system, /Never leave an actionable loss or profit-taking exit as HOLD/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
     assert.match(seen[0].body.system, /host only fills the target form/);
     assert.match(seen[0].body.system, /Never swap these meanings/);
@@ -168,7 +171,12 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /Finish the round's JSON fully/);
     assert.match(seen[0].body.system, /monitoring continues next round/);
     assert.doesNotMatch(seen[0].body.system, /aborts this round at 50s/);
-    assert.doesNotMatch(seen[0].body.system, /Do not wait for maximum profit/);
+    assert.match(seen[0].body.system, /without waiting for maximum profit/);
+    assert.match(seen[0].body.system, /Conservative exit policy overrides entry opportunities/);
+    assert.match(seen[0].body.system, /any positive net proceeds after known fees and slippage/);
+    assert.match(seen[0].body.system, /Do not wait for a larger gain, a preset target, the next K, or the 45% entry threshold/);
+    assert.match(seen[0].body.system, /Both manual-entry and auto-entry modes automate exits/);
+    assert.match(seen[0].body.system, /never lower them to justify HOLD/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
     assert.ok(seen[1].body.systemInstruction);
@@ -176,6 +184,99 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("narrow probability gap asks AI for the higher direction instead of HOLD", async () => {
+  let calls = 0;
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    calls += 1;
+    response.setHeader("content-type", "application/json");
+    const decision = calls === 1
+      ? { action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.42, profit_probability: 0.44 }
+      : { action: "BUY", bullish_profit_probability: 0.44, bearish_profit_probability: 0.42, profit_probability: 0.44 };
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+    const result = await requestDecision(provider, { account: { positions: [] } });
+    assert.equal(result.action, "BUY");
+    assert.equal(calls, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+for (const [bullish, bearish, correctAction] of [[0.44, 0.42, "BUY"], [0.48, 0.51, "SELL"]]) {
+  test(`narrow gap corrects the lower direction to AI-selected ${correctAction}`, async () => {
+    let calls = 0;
+    const server = http.createServer(async (request, response) => {
+      for await (const _chunk of request) {}
+      calls += 1;
+      const action = calls === 1 ? (correctAction === "BUY" ? "SELL" : "BUY") : correctAction;
+      const decision = { action, bullish_profit_probability: bullish, bearish_profit_probability: bearish };
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
+    });
+    const port = await listen(server);
+    try {
+      const result = await requestDecision(createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" }), {});
+      assert.equal(calls, 2);
+      assert.equal(result.action, correctAction);
+      assert.equal(result.bullishProfitProbability, bullish);
+      assert.equal(result.bearishProfitProbability, bearish);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+}
+
+test("missing probabilities are not zero-probability evidence for narrow-gap entries", async () => {
+  let calls = 0;
+  const server = http.createServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    calls += 1;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.03 }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const result = await requestDecision(createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" }), {});
+    assert.equal(calls, 1);
+    assert.equal(result.action, "HOLD");
+    assert.equal(higherProbabilityDirection(result), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
+  test(`${exitType} with HOLD is corrected by AI even below entry thresholds`, async () => {
+    let calls = 0;
+    const requests = [];
+    const server = http.createServer(async (request, response) => {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      requests.push(JSON.parse(body));
+      calls += 1;
+      const decision = { action: calls === 1 ? "HOLD" : "SELL", exit_type: exitType, target_position_ids: ["P-risk"], bullish_profit_probability: 0.2, bearish_profit_probability: 0.2 };
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
+    });
+    const port = await listen(server);
+    try {
+      const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
+      const result = await requestDecision(provider, { account: { positions: [{ side: "买", quantity: 1, positionOrderId: "P-risk" }] } });
+      assert.equal(calls, 2);
+      assert.equal(result.action, "SELL");
+      assert.equal(result.exitType, exitType);
+      assert.deepEqual(result.targetPositionIds, ["P-risk"]);
+      assert.match(requests[1].messages.at(-1).content, /Conservative exits take priority/);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+}
 
 test("owned providers with the same name, model and URL share an identity", () => {
   const first = { ownerUserId: "user_1", name: "gateway", model: "your-model", baseUrl: "https://gateway.example.test/" };
@@ -214,12 +315,13 @@ test("provider decision receives bounded evidence context", async () => {
 test("HOLD above 45% is returned to AI for correction even with open positions", async () => {
   let calls = 0;
   let correct = true;
+  const correctionMessages = [];
   const server = http.createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     calls += 1;
     const messages = JSON.parse(body).messages;
-    if (calls % 2 === 0) assert.match(messages.at(-1).content, /probability is >= 0\.45 but action is HOLD/);
+    if (calls % 2 === 0) correctionMessages.push(messages.at(-1).content);
     response.setHeader("content-type", "application/json");
     const decision = calls % 2 === 0 && correct
       ? { action: "SELL", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 }
@@ -243,6 +345,7 @@ test("HOLD above 45% is returned to AI for correction even with open positions",
     const holding = await requestDecision(provider, { account: { positions: [{ quantity: 1, side: "买" }] } });
     assert.equal(holding.action, "SELL");
     assert.equal(calls, 6);
+    assert.ok(correctionMessages.every((message) => /probability is >= 0\.45 OR/.test(message)));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

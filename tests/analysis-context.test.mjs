@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
+import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
+
+test("策略保留或关系入场，保守离场优先且两种入场模式都自动离场", () => {
+  const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
+  assert.equal(entry.minimumProbability, 0.45);
+  assert.equal(entry.alternateTrigger, "STRICTLY_HIGHER_SIDE_WITH_GAP_LT_0.05");
+  assert.equal(entry.triggerRelation, "OR");
+  assert.equal(exit.priority, "BEFORE_ENTRY");
+  assert.equal(exit.profitGoal, "LOCK_ANY_POSITIVE_NET_PROFIT");
+  assert.equal(exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
+  assert.equal(exit.onExitDecision, "EXECUTE_IMMEDIATELY");
+  assert.equal(exit.automaticInBothEntryModes, true);
+  assert.deepEqual(exit.positionList, ["转让"]);
+});
 
 function history(size, start = 1700000000000, step = 60000) {
   return Array.from({ length: size }, (_, index) => ({
