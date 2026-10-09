@@ -397,7 +397,7 @@ test("multi-board pending action uses and submits the selected board price and i
   const task = insertTask(`task_target_board_${Date.now()}`, {
     mode: "LIVE",
     autoDecisionEnabled: true,
-    decision: { action: "BUY", targetSymbol: "DGKZ", targetSymbolName: "丹桂康砖（二期）", targetInstrumentId: "537", confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "BUY", targetSymbol: "DGKZ", targetSymbolName: "丹桂康砖（二期）", targetInstrumentId: "537", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3, confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
     market: {
       symbol: "DGJJ",
       latest: { price: 1800 },
@@ -458,6 +458,41 @@ test("switching into live cancels stale paper suggestions", () => {
   setTaskMode(task.id, "LIVE");
   assert.equal(task.pendingAction.status, "CANCELLED");
 });
+
+for (const action of ["BUY", "SELL"]) {
+  for (const probability of [undefined, 0.44, 0.45]) {
+    test(`live submit checks persisted ${action} probability ${probability} against 45%`, async () => {
+      const task = insertTask(`task_probability_guard_${action}_${probability}_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+      task.decision = {
+        ...task.decision,
+        action,
+        profitProbability: 0.9,
+        bullishProfitProbability: action === "BUY" ? probability : 0.9,
+        bearishProfitProbability: action === "SELL" ? probability : 0.9,
+      };
+      task.pendingAction = buildPendingAction(task, task.decision);
+      task.decision = { ...task.decision, bullishProfitProbability: 0.95, bearishProfitProbability: 0.95 };
+      let submitted = 0;
+      const submit = () => confirmPendingAction(task.id, { source: "auto_timeout", runtime: {
+        submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
+      } });
+      try {
+        if (probability >= 0.45) {
+          await submit();
+          assert.equal(submitted, 1);
+          assert.equal(task.pendingAction.status, "AWAITING_FILL");
+        } else {
+          await assert.rejects(submit, /BELOW_ENTRY_THRESHOLD/);
+          assert.equal(submitted, 0);
+          assert.equal(task.pendingAction.status, "WAITING");
+          assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
+        }
+      } finally {
+        state.tasks = state.tasks.filter((item) => item.id !== task.id);
+      }
+    });
+  }
+}
 
 test("live submit rejects a persisted entry above one unit", async () => {
   const task = insertTask(`task_quantity_guard_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });

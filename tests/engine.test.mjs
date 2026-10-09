@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, narrowDirectionTrigger, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -120,7 +120,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
     bearishProfitProbability: 0.44,
   }));
   assert.equal(belowBothSides.action, "SELL");
-  assert.equal(meetsOrderBoundary(belowBothSides), true);
+  assert.equal(meetsOrderBoundary(belowBothSides), false);
 
   const noSides = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
@@ -183,40 +183,29 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   assert.equal(meetsOrderBoundary(exit), true);
 });
 
-test("两侧概率差小于5%时，高概率方向可触发入场，仍不替AI改方向", () => {
-  const narrowLong = applyEntryBoundary(enforceProfitProbability({
-    action: "BUY",
-    profitProbability: 0.44,
-    bullishProfitProbability: 0.44,
-    bearishProfitProbability: 0.41,
-    riskFlags: [],
-  }));
-  assert.equal(narrowDirectionTrigger(narrowLong), true);
-  assert.equal(meetsOrderBoundary(narrowLong), true);
-  assert.equal(narrowLong.signalTier, "EXPLORATORY");
-
-  const narrowShort = enforceProfitProbability({
-    action: "SELL",
-    profitProbability: 0.43,
-    bullishProfitProbability: 0.41,
-    bearishProfitProbability: 0.43,
-    riskFlags: [],
-  });
-  assert.equal(narrowDirectionTrigger(narrowShort), true);
-  assert.equal(meetsOrderBoundary(narrowShort), true);
-
-  assert.equal(meetsOrderBoundary({ action: "BUY", bullishProfitProbability: 0.44, bearishProfitProbability: 0.41 }), true);
-  assert.equal(meetsOrderBoundary({ action: "BUY", bullishProfitProbability: 0.41, bearishProfitProbability: 0.44 }), false);
-  assert.equal(meetsOrderBoundary({ action: "BUY", bullishProfitProbability: 0.44, bearishProfitProbability: 0.39 }), false);
-  assert.equal(meetsOrderBoundary({ action: "BUY", bullishProfitProbability: 0.44, bearishProfitProbability: 0.44 }), false);
-  assert.equal(narrowDirectionTrigger({ action: "BUY", bullishProfitProbability: 0.44 }), false);
-  assert.equal(narrowDirectionTrigger({ action: "BUY", bullishProfitProbability: 0.44, bearishProfitProbability: null }), false);
+test("入场硬性检查所选方向至少45%，不比较多空差值，不改写AI方向或概率", () => {
+  for (const action of ["BUY", "SELL"]) {
+    for (const probability of [0, 0.03, 0.21, 0.44, 0.449999, 0.45, 0.450001]) {
+      for (const otherProbability of [probability, Math.max(0, probability - 0.02), 0.9]) {
+        const decision = applyEntryBoundary(enforceProfitProbability({
+          action,
+          profitProbability: probability,
+          bullishProfitProbability: action === "BUY" ? probability : otherProbability,
+          bearishProfitProbability: action === "SELL" ? probability : otherProbability,
+          riskFlags: [],
+        }));
+        assert.equal(decision.action, action);
+        assert.equal(decision.profitProbability, probability);
+        assert.equal(meetsOrderBoundary(decision), probability >= 0.45);
+        assert.equal(decision.signalTier, probability >= 0.45 ? "EXPLORATORY" : "HOLD");
+        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), probability < 0.45);
+      }
+    }
+  }
   for (const missing of [undefined, null, "", "invalid", -0.01]) {
     const incomplete = enforceProfitProbability({ action: "BUY", bullishProfitProbability: 0.03, bearishProfitProbability: missing });
-    assert.equal(narrowDirectionTrigger(incomplete), false);
     assert.equal(meetsOrderBoundary(incomplete), false);
   }
-  assert.equal(meetsOrderBoundary(enforceProfitProbability({ action: "BUY", bullishProfitProbability: 0.03, bearishProfitProbability: 0 })), true);
 });
 
 test("已核实持仓可以立即离场，不要求它仍在入场监测盘口中", () => {
@@ -231,37 +220,48 @@ test("已核实持仓可以立即离场，不要求它仍在入场监测盘口�
 
 for (const autoDecisionEnabled of [false, true]) {
   for (const action of ["BUY", "SELL"]) {
-    test(`窄差值${action}入场仍走${autoDecisionEnabled ? "自动" : "手动"}提交策略`, async () => {
-      const taskId = `narrow_${action}_${autoDecisionEnabled}_${Date.now()}`;
-      const task = insertNorthstarTask(taskId);
-      Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
-      const market = testMarketSnapshot("narrow-entry", 100);
-      market.account.positions = [];
-      let submitted = 0;
-      const runtime = {
-        openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
-        browserLoginStatus: async () => ({ ok: true, authenticated: true }),
-        observeMarket: async () => market,
-        fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
-        submitSuggestionForm: async () => { submitted += 1; return { ok: true, filled: true, submitted: true }; },
-        requestDecision: async (_provider, context) => ({
-          action, bullishProfitProbability: action === "BUY" ? 0.44 : 0.41,
-          bearishProfitProbability: action === "SELL" ? 0.44 : 0.41,
-          targetPositionPct: 10, maxOrderValuePct: 4, evidenceIds: [context.evidenceIds[0]], riskFlags: [],
-        }),
-      };
-      try {
-        await runMonitoringCycle(taskId, { runtime });
-        assert.equal(task.pendingAction.action, action);
-        assert.equal(task.pendingAction.suggestedQty, 1);
-        assert.equal(task.pendingAction.formFilled, true);
-        assert.equal(submitted, autoDecisionEnabled ? 1 : 0);
-        assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
-      } finally {
-        stopController(taskId);
-        state.tasks = state.tasks.filter((item) => item.id !== taskId);
-      }
-    });
+    for (const probability of [0.44, 0.45]) {
+      test(`${probability * 100}% ${action}入场硬性门槛遵守${autoDecisionEnabled ? "自动" : "手动"}提交策略`, async () => {
+        const taskId = `threshold_${probability}_${action}_${autoDecisionEnabled}_${Date.now()}`;
+        const task = insertNorthstarTask(taskId);
+        Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+        const market = testMarketSnapshot("threshold-entry", 100);
+        market.account.positions = [];
+        let submitted = 0;
+        let filled = 0;
+        const runtime = {
+          openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
+          browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+          observeMarket: async () => market,
+          fillSuggestionForm: async () => { filled += 1; return { ok: true, filled: true, submitted: false }; },
+          submitSuggestionForm: async () => { submitted += 1; return { ok: true, filled: true, submitted: true }; },
+          requestDecision: async (_provider, context) => ({
+            action, bullishProfitProbability: action === "BUY" ? probability : 0.42,
+            bearishProfitProbability: action === "SELL" ? probability : 0.42,
+            targetPositionPct: 10, maxOrderValuePct: 4, evidenceIds: [context.evidenceIds[0]], riskFlags: [],
+          }),
+        };
+        try {
+          await runMonitoringCycle(taskId, { runtime });
+          assert.equal(task.decision.action, action);
+          if (probability < 0.45) {
+            assert.equal(task.pendingAction, undefined);
+            assert.equal(filled, 0);
+            assert.equal(submitted, 0);
+            assert.ok(task.decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
+            return;
+          }
+          assert.equal(task.pendingAction.action, action);
+          assert.equal(task.pendingAction.suggestedQty, 1);
+          assert.equal(task.pendingAction.formFilled, true);
+          assert.equal(submitted, autoDecisionEnabled ? 1 : 0);
+          assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
+        } finally {
+          stopController(taskId);
+          state.tasks = state.tasks.filter((item) => item.id !== taskId);
+        }
+      });
+    }
   }
 }
 

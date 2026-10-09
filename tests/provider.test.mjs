@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
-import { higherProbabilityDirection } from "../server/entry-policy.mjs";
+import { hasDirectionalProbabilities } from "../server/entry-policy.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -174,7 +174,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /approved Skills/);
     assert.match(seen[0].body.system, /MUST be BUY/);
     assert.match(seen[0].body.system, /selected probability must be >= 0\.45/);
-    assert.match(seen[0].body.system, /differ by less than 0\.05/);
+    assert.match(seen[0].body.system, /hard entry requirement/);
+    assert.match(seen[0].body.system, /BUY requires bullish_profit_probability >= 0\.45; SELL requires bearish_profit_probability >= 0\.45/);
+    assert.doesNotMatch(seen[0].body.system, /differ by less than 0\.05|narrow-gap trigger/);
     assert.match(seen[0].body.system, /short can capture 20 -> 19/);
     assert.match(seen[0].body.system, /another K can produce another entry/);
     assert.match(seen[0].body.system, /never HOLD merely because an earlier position exists/);
@@ -203,44 +205,42 @@ test("Anthropic and Gemini adapters send their native authentication and payload
   }
 });
 
-test("narrow probability gap asks AI for the higher direction instead of HOLD", async () => {
+test("below 45% HOLD is preserved without a second AI request even when probabilities are close", async (t) => {
   let calls = 0;
-  const server = http.createServer(async (request, response) => {
-    for await (const _chunk of request) {}
+  let bullish = 0;
+  let bearish = 0;
+  t.mock.method(globalThis, "fetch", async () => {
     calls += 1;
-    response.setHeader("content-type", "application/json");
-    const decision = calls === 1
-      ? { action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.42, profit_probability: 0.44 }
-      : { action: "BUY", bullish_profit_probability: 0.44, bearish_profit_probability: 0.42, profit_probability: 0.44 };
-    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: bullish, bearish_profit_probability: bearish }) } }] }));
   });
-  const port = await listen(server);
-  try {
-    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
-    const result = await requestDecision(provider, { account: { positions: [] } });
-    assert.equal(result.action, "BUY");
-    assert.equal(calls, 2);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
+  for (const [longProbability, shortProbability] of [[0.44, 0.42], [0.21, 0.2], [0.449999, 0.44]]) {
+    bullish = longProbability;
+    bearish = shortProbability;
+    const before = calls;
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test", model: "demo", apiFormat: "chat" }, { account: { positions: [] } });
+    assert.equal(result.action, "HOLD");
+    assert.equal(result.bullishProfitProbability, bullish);
+    assert.equal(result.bearishProfitProbability, bearish);
+    assert.equal(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"), false);
+    assert.equal(calls, before + 1);
   }
 });
 
-for (const [bullish, bearish, correctAction] of [[0.44, 0.42, "BUY"], [0.48, 0.51, "SELL"]]) {
-  test(`narrow gap corrects the lower direction to AI-selected ${correctAction}`, async () => {
+for (const [bullish, bearish, selectedAction] of [[0.44, 0.42, "SELL"], [0.48, 0.51, "BUY"], [0.51, 0.48, "SELL"]]) {
+  test(`probability proximity does not override AI-selected ${selectedAction} at ${bullish}/${bearish}`, async () => {
     let calls = 0;
     const server = http.createServer(async (request, response) => {
       for await (const _chunk of request) {}
       calls += 1;
-      const action = calls === 1 ? (correctAction === "BUY" ? "SELL" : "BUY") : correctAction;
-      const decision = { action, bullish_profit_probability: bullish, bearish_profit_probability: bearish };
+      const decision = { action: selectedAction, bullish_profit_probability: bullish, bearish_profit_probability: bearish };
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
     });
     const port = await listen(server);
     try {
       const result = await requestDecision(createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" }), {});
-      assert.equal(calls, 2);
-      assert.equal(result.action, correctAction);
+      assert.equal(calls, 1);
+      assert.equal(result.action, selectedAction);
       assert.equal(result.bullishProfitProbability, bullish);
       assert.equal(result.bearishProfitProbability, bearish);
     } finally {
@@ -249,7 +249,7 @@ for (const [bullish, bearish, correctAction] of [[0.44, 0.42, "BUY"], [0.48, 0.5
   });
 }
 
-test("missing probabilities are not zero-probability evidence for narrow-gap entries", async () => {
+test("missing probabilities do not force a below-threshold HOLD into an entry", async () => {
   let calls = 0;
   const server = http.createServer(async (request, response) => {
     for await (const _chunk of request) {}
@@ -262,7 +262,7 @@ test("missing probabilities are not zero-probability evidence for narrow-gap ent
     const result = await requestDecision(createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" }), {});
     assert.equal(calls, 1);
     assert.equal(result.action, "HOLD");
-    assert.equal(higherProbabilityDirection(result), null);
+    assert.equal(hasDirectionalProbabilities(result), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -363,7 +363,7 @@ test("HOLD above 45% is returned to AI for correction even with open positions",
     const holding = await requestDecision(provider, { account: { positions: [{ quantity: 1, side: "买" }] } });
     assert.equal(holding.action, "SELL");
     assert.equal(calls, 6);
-    assert.ok(correctionMessages.every((message) => /probability is >= 0\.45 OR/.test(message)));
+    assert.ok(correctionMessages.every((message) => /selected direction's profit probability >= 0\.45/.test(message)));
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

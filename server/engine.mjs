@@ -8,7 +8,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { hasDirectionalProbabilities, higherProbabilityDirection } from "./entry-policy.mjs";
+import { hasDirectionalProbabilities } from "./entry-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -242,20 +242,14 @@ function chosenSideProbability(decision) {
   return overall;
 }
 
-export function narrowDirectionTrigger(decision) {
-  if (decision?.exitType || (decision?.action !== "BUY" && decision?.action !== "SELL")) return false;
-  return decision.action === higherProbabilityDirection(decision);
-}
-
 function signalTierForDecision(decision) {
-  const tier = profitSignalTier(chosenSideProbability(decision));
-  return tier === "HOLD" && narrowDirectionTrigger(decision) ? "EXPLORATORY" : tier;
+  return profitSignalTier(chosenSideProbability(decision));
 }
 
 export function meetsOrderBoundary(decision) {
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
   if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
-  return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY || narrowDirectionTrigger(decision);
+  return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
 }
 
 export function applyEntryBoundary(decision, market = {}) {
@@ -637,6 +631,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
+  if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("BELOW_ENTRY_THRESHOLD");
   if (isLiveTask(task) && !task.pendingAction.exitType && (!Number.isInteger(Number(task.pendingAction.suggestedQty)) || Number(task.pendingAction.suggestedQty) < 1 || Number(task.pendingAction.suggestedQty) > MAX_LIVE_ENTRY_QUANTITY)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
@@ -1935,7 +1930,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const blocked = task.rules.some((rule) => rule.status === "pending" && rule.mode === "BLOCK");
     const reviewRequired = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
     // Rule results remain visible evidence, but they do not replace the AI's directional decision.
-    // LIVE execution is gated only by an explicit AI HOLD, the 45%/narrow-gap entry trigger, and the same-K guard; AI exits go immediately.
+    // LIVE execution is gated only by an explicit AI HOLD, the selected-side 45% entry threshold, and the same-K guard; AI exits go immediately.
     const liveExecution = isLiveTask(task);
     const rulePaused = liveExecution ? false : blocked || reviewRequired || automaticRuleFailures.length > 0;
     let route = "SUGGESTION_PENDING";
@@ -2034,7 +2029,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
-          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，未达45%或两侧差小于5%的入场边界" : "已记录受控动作";
+          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，所选方向获利概率未达45%的入场边界" : "已记录受控动作";
       completeWorkflow(task, "action", actionMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: actionMessage });
     }
