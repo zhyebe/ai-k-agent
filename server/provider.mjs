@@ -184,12 +184,18 @@ function providerRequestCandidates(provider) {
 
 function chatCompletionsBody(provider, messages, options = {}) {
   const officialDeepSeek = new URL(provider.baseUrl).hostname === "api.deepseek.com";
+  const fastStepFive = options.fastAnalysis === true && isOfficialStepFive(provider);
   return {
     model: provider.model,
     messages,
     // DeepSeek defaults to high-effort thinking; live decisions use its documented fast mode.
     ...(options.fastAnalysis === true && officialDeepSeek ? { thinking: { type: "disabled" } } : {}),
+    ...(fastStepFive ? { reasoning_effort: "low", max_tokens: Number(options.maxOutputTokens) || 8192 } : {}),
   };
+}
+
+function isOfficialStepFive(provider) {
+  return new URL(provider.baseUrl).hostname === "api.stepfun.com" && provider.model === "step-5-preview";
 }
 
 function responsesBody(provider, messages) {
@@ -205,9 +211,11 @@ function responsesBody(provider, messages) {
 
 function anthropicBody(provider, messages, options = {}) {
   const system = messages.filter((message) => message.role === "system").map((message) => String(message.content || "")).join("\n\n");
+  const fastStepFive = options.fastAnalysis === true && isOfficialStepFive(provider);
   return {
     model: provider.model,
-    max_tokens: Math.min(8192, Math.max(1, Number(options.maxOutputTokens) || 4096)),
+    max_tokens: Math.min(8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 8192 : 4096))),
+    ...(fastStepFive ? { output_config: { effort: "low" } } : {}),
     ...(system ? { system } : {}),
     messages: messages
       .filter((message) => message.role !== "system")
@@ -567,7 +575,7 @@ async function requestProviderJson(provider, messages, options = {}) {
     }
     if (response.ok) {
       const content = extractModelText(payload);
-      return { content, parsed: parseModelContent(content) };
+      return { content, parsed: parseModelContent(content), stopReason: payload.stop_reason || payload.choices?.[0]?.finish_reason || "" };
     }
     lastResponse = response;
     lastPayload = payload;
@@ -731,8 +739,14 @@ export async function requestDecision(provider, context, options = {}) {
     { role: "user", content: JSON.stringify(wireContext) },
   ];
   const response = await requestProviderJson(provider, messages, options);
-  if (!response?.content) return normalizeDecision({ action: "HOLD", risk_flags: ["EMPTY_MODEL_RESPONSE"] });
-  if (!response.parsed) return normalizeDecision({ action: "HOLD", risk_flags: ["INVALID_MODEL_JSON"] });
+  const outputLimitReached = ["max_tokens", "length"].includes(response?.stopReason);
+  if (!response?.content || !response.parsed) return normalizeDecision({
+    action: "HOLD",
+    risk_flags: [response?.content ? "INVALID_MODEL_JSON" : "EMPTY_MODEL_RESPONSE", ...(outputLimitReached ? ["MODEL_OUTPUT_LIMIT"] : [])],
+    invalidation: outputLimitReached
+      ? "模型达到输出额度上限，未返回完整结论；继续监控并重新分析"
+      : response?.content ? "模型返回内容不是有效的决策 JSON；继续监控并重新分析" : "模型接口未返回结论正文；继续监控并重新分析",
+  });
   let decision = normalizeDecision(response.parsed);
   const inconsistent = (value) => value.action === "HOLD"
     && (Boolean(value.exitType) || (!value.orderAssessments.length && !value.cancelOrderIds.length && Math.max(value.bullishProfitProbability, value.bearishProfitProbability) >= 0.45));

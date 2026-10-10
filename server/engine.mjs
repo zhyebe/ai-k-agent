@@ -2043,13 +2043,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
     task.decision = { ...decision, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
-    completeWorkflow(task, "analyze", `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%`);
+    completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`);
     appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
       kind: "decision",
-      message: `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%`,
+      level: providerSucceeded ? "info" : "error",
+      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`,
       data: { action: decision.action, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
     });
 

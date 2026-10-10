@@ -46,6 +46,48 @@ test("live fast analysis disables official DeepSeek thinking without changing th
   assert.equal(bodies.length, 2);
 });
 
+test("Step 5 fast analysis sends the official low effort and reserves output for the final JSON", async (t) => {
+  const requests = [];
+  const final = { action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: "SYNTHETIC" };
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    const body = JSON.parse(options.body);
+    requests.push(body);
+    return new Response(JSON.stringify(body.messages[0].role === "system"
+      ? { choices: [{ message: { content: JSON.stringify(final) } }] }
+      : { content: [{ type: "thinking", thinking: "synthetic reasoning" }, { type: "text", text: JSON.stringify(final) }], stop_reason: "end_turn" }));
+  });
+  const provider = { apiKey: "test", model: "step-5-preview", fullUrlMode: true };
+  for (const apiFormat of ["chat", "anthropic"]) {
+    const baseUrl = `https://api.stepfun.com/step_plan/v1/${apiFormat === "chat" ? "chat/completions" : "messages"}`;
+    const result = await requestDecision({ ...provider, baseUrl, apiFormat }, {}, { fastAnalysis: true });
+    assert.equal(result.action, "BUY");
+    assert.equal(result.bullishProfitProbability, 0.6);
+  }
+  assert.equal(requests[0].reasoning_effort, "low");
+  assert.deepEqual(requests[1].output_config, { effort: "low" });
+  assert.equal(requests[0].max_tokens, 8192);
+  assert.equal(requests[1].max_tokens, 8192);
+  await requestDecision({ ...provider, baseUrl: "https://api.stepfun.com/step_plan/v1/messages", apiFormat: "anthropic" }, {}, { fastAnalysis: true, maxOutputTokens: 6000 });
+  assert.equal(requests[2].max_tokens, 6000);
+  for (const baseUrl of ["https://api.stepfun.com/step_plan/v1/messages", "https://gateway.example.test/messages"]) {
+    await requestDecision({ ...provider, baseUrl, apiFormat: "anthropic" }, {}, { fastAnalysis: baseUrl.includes("gateway") });
+    assert.equal(requests.at(-1).output_config, undefined);
+    assert.equal(requests.at(-1).max_tokens, 4096);
+  }
+});
+
+test("thinking-only token exhaustion reports the failure instead of presenting it as an AI HOLD", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+    content: [{ type: "thinking", thinking: '{"action":"BUY"}' }],
+    stop_reason: "max_tokens", usage: { output_tokens: 4096 },
+  })));
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://api.stepfun.com/step_plan/v1/messages", apiFormat: "anthropic", fullUrlMode: true, model: "step-5-preview" }, {});
+  assert.equal(result.action, "HOLD");
+  assert.equal(result.confidence, 0);
+  assert.deepEqual(result.riskFlags, ["EMPTY_MODEL_RESPONSE", "MODEL_OUTPUT_LIMIT"]);
+  assert.match(result.invalidation, /输出额度上限/);
+});
+
 test("provider verification performs a real inference with the configured model", async () => {
   const server = http.createServer(async (request, response) => {
     assert.equal(request.url, "/v1/chat/completions");
