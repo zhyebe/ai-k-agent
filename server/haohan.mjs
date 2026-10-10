@@ -465,7 +465,7 @@ export function parseHaohanPositions(tables = []) {
       orderTime: indexOf([/订立时间/, /开仓时间/]),
       positionOrderId: indexOf([/持仓单号/, /订单号/]),
     };
-    if (indexes.positionOrderId < 0 && indexes.symbolName < 0) continue;
+    if (indexes.quantity < 0 || header.some((cell) => /委托单号/.test(String(cell)))) continue;
     const headerIndex = rows.indexOf(header);
     for (const row of rows.slice(headerIndex + 1)) {
       if (!Array.isArray(row) || !row.length) continue;
@@ -496,6 +496,28 @@ export function parseHaohanPositions(tables = []) {
   return positions.filter((position, index) => !position.positionOrderId || positions.findIndex((item) => item.positionOrderId === position.positionOrderId) === index);
 }
 
+export function parseHaohanOpenOrders(tables = []) {
+  const orders = [];
+  for (const table of tables.filter((item) => item.kind === "currentOrders" && !item.loading)) {
+    const header = table.rows?.find((row) => row.some((cell) => String(cell).trim() === "委托单号"));
+    if (!header) continue;
+    const at = (row, label) => String(row[header.findIndex((cell) => String(cell).trim() === label)] ?? "").trim();
+    for (const row of table.rows.slice(table.rows.indexOf(header) + 1)) {
+      if (/暂无数据|合计/.test(row.join(" "))) continue;
+      const orderId = at(row, "委托单号");
+      const status = at(row, "状态");
+      const remainingQuantity = tableNumber(at(row, "未成交数量"));
+      if (!orderId || /已成交|已撤单|部分成交后撤单/.test(status) || remainingQuantity === 0) continue;
+      const symbolName = at(row, "商品名称");
+      orders.push({ orderId, symbol: at(row, "商品代码") || symbolName.match(/^([A-Z][A-Z0-9_.-]{1,24})(?:\s+|$)/)?.[1] || "", symbolName,
+        side: at(row, "买 | 卖") || at(row, "买|卖"), orderPrice: tableNumber(at(row, "委托价格")),
+        orderKind: at(row, "订立 | 转让"), quantity: tableNumber(at(row, "委托数量")),
+        filledQuantity: tableNumber(at(row, "已成交数量")), remainingQuantity, status, orderTime: at(row, "委托时间") });
+    }
+  }
+  return orders.filter((order, index) => orders.findIndex((item) => item.orderId === order.orderId) === index);
+}
+
 export function parseHaohanAccount(visibleText, tables = []) {
   const availableFunds = labeledValue(visibleText, ["可用资金"]);
   const equity = labeledValue(visibleText, ["账户权益", "客户权益", "动态权益"]) ?? availableFunds;
@@ -507,6 +529,11 @@ export function parseHaohanAccount(visibleText, tables = []) {
   const positionTables = tables.filter((table) => !table.loading && table.rows?.some((row) => row.some((cell) => /持仓单号/.test(String(cell)))));
   const positionEmpty = positions.length === 0 && positionTables.some((table) => /暂无数据/.test(table.emptyText || "") || table.rows.some((row) => row.some((cell) => /暂无数据/.test(String(cell)))));
   const positionsVerified = positionEmpty || (positions.length > 0 && positions.every((item) => item.positionOrderId && Number.isFinite(item.quantity) && item.quantity > 0 && /买|卖|多|空|long|short/i.test(item.side)));
+  const orderTables = tables.filter((table) => table.kind === "currentOrders");
+  const openOrders = parseHaohanOpenOrders(tables);
+  const openOrdersEmpty = openOrders.length === 0 && orderTables.some((table) => /暂无数据/.test(table.emptyText || "") || table.rows?.some((row) => /暂无数据/.test(row.join(" "))));
+  const openOrdersVerified = orderTables.length > 0 && orderTables.every((table) => !table.loading)
+    && (openOrdersEmpty || (openOrders.length > 0 && openOrders.every((order) => order.orderId && order.remainingQuantity > 0 && order.orderPrice > 0 && /^(已委托|部分成交)$/.test(order.status))));
   return {
     availableFunds: round(availableFunds, 2),
     equity: round(equity, 2),
@@ -519,6 +546,9 @@ export function parseHaohanAccount(visibleText, tables = []) {
     positionEmpty,
     positionsVerified,
     positions,
+    openOrders,
+    openOrdersEmpty,
+    openOrdersVerified,
     exposurePct: positionEmpty ? 0 : null,
   };
 }

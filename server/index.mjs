@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
+import { DEFAULT_ENTRY_QUANTITY, parseEntryQuantity } from "./order-quantity.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
@@ -554,6 +555,7 @@ app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAcc
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
+  if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const targetType = body.targetType === "app" ? "app" : "website";
   const targetInput = { type: targetType, name: body.targetName, url: body.url, installPath: body.installPath, appId: body.appId };
   let profile = null;
@@ -596,6 +598,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
     autoDecisionEnabled: body.autoDecisionEnabled === true,
+    entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     providerId: request.auth?.type === "user" ? resolveDefaultProviderId(request.auth.user.id) : "",
     pendingAction: null,
@@ -665,7 +668,9 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
     return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
   }
   const body = request.body || {};
-  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, updatedAt: task.updatedAt };
+  if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
+  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, updatedAt: task.updatedAt };
+  if (body.entryQuantity !== undefined) task.entryQuantity = parseEntryQuantity(body.entryQuantity);
   task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
   task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;

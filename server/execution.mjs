@@ -1,9 +1,9 @@
 import { addEvent } from "./store.mjs";
+import { entryQuantityForTask } from "./order-quantity.mjs";
 
 export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValuePct: 8 });
 export const tradingExecutionPolicy = Object.freeze({ enabled: true, mode: "CONFIRM_THEN_SUBMIT" });
 export const DEFAULT_AUTO_DECISION_COUNTDOWN_SEC = 30;
-export const MAX_LIVE_ENTRY_QUANTITY = 1;
 
 export function isTradingSwitchOn() {
   return process.env.AXIOM_TRADING_ENABLED !== "0";
@@ -84,8 +84,10 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
   } else if (!decision?.exitType && hasPrice) {
     suggestedQty = 1;
   }
-  const quantityLimitApplied = enforceQuantityLimit && !decision?.exitType && suggestedQty !== null && suggestedQty > MAX_LIVE_ENTRY_QUANTITY;
-  if (quantityLimitApplied) suggestedQty = MAX_LIVE_ENTRY_QUANTITY;
+  const configuredQuantity = entryQuantityForTask(task);
+  const useConfiguredQuantity = (isLiveTask(task) || enforceQuantityLimit) && !decision?.exitType && hasPrice;
+  const quantityLimitApplied = useConfiguredQuantity && suggestedQty !== configuredQuantity;
+  if (useConfiguredQuantity) suggestedQty = configuredQuantity;
   return {
     action: decision?.action === "SELL" ? "SELL" : decision?.action === "BUY" ? "BUY" : "HOLD",
     exitType: decision?.exitType || null,

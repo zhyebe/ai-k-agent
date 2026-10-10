@@ -3,6 +3,15 @@ import test from "node:test";
 import { executeDecision, shouldSubmitLiveOrder, suggestOrderPreview } from "../server/execution.mjs";
 import { state } from "../server/store.mjs";
 
+test("configured entry quantity is exact for manual/auto and never caps exits", () => {
+  for (const autoDecisionEnabled of [false, true]) {
+    const task = { mode: "LIVE", autoDecisionEnabled, entryQuantity: 3, market: { latest: { price: 100 }, account: { positions: [{ positionOrderId: "P-1", quantity: 7 }] } }, metrics: { equity: 10000 } };
+    assert.equal(suggestOrderPreview(task, { action: "BUY", targetPositionPct: 10 }).suggestedQty, 3);
+    assert.equal(suggestOrderPreview({ ...task, entryQuantity: undefined }, { action: "SELL" }).suggestedQty, 1);
+    assert.equal(suggestOrderPreview(task, { action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"] }).suggestedQty, 7);
+  }
+});
+
 test("buy and sell stay suggestions until the LIVE engine submits them", () => {
   const task = {
     id: `test-task-${Date.now()}`,

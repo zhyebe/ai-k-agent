@@ -146,7 +146,7 @@ export async function clickPositionTransfer(page, input) {
   return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity };
 }
 
-export async function completeTradeDialogs(page, { exitType, orderType, price, baselineToken = "", finished = () => false } = {}) {
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
@@ -157,7 +157,7 @@ export async function completeTradeDialogs(page, { exitType, orderType, price, b
       const box = boxes.nth(index);
       if (!await box.isVisible()) continue;
       const text = (await box.innerText()).replace(/\s+/g, "");
-      if (!(exitType ? /转让/.test(text) : /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text)) || /止盈.*止损/.test(text)) continue;
+      if (!(cancelOrder ? /撤单|撤销.*委托/.test(text) : exitType ? /转让/.test(text) : /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text)) || /止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
       if (/转让价格/.test(text)) {
         // The production dialog initializes counterparty price after 200 ms.
         await page.waitForTimeout(300);

@@ -7,6 +7,7 @@ import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
 import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
+import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -354,10 +355,10 @@ export function isTradeWriteResponse(url, method) {
   }
 }
 
-function watchTradeResponse(page) {
+function watchTradeResponse(page, matches = isTradeWriteResponse) {
   let matched = null;
   const listener = (response) => {
-    if (matched || !isTradeWriteResponse(response.url(), response.request?.().method?.())) return;
+    if (matched || !matches(response.url(), response.request?.().method?.())) return;
     matched = response;
   };
   page.on("response", listener);
@@ -540,6 +541,48 @@ export async function continueManualEntry({ sessionId = "default", action } = {}
   if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
   const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page) });
   return { ok: result.ok, continued: result.confirmed === true };
+}
+
+export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } = {}) {
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", results: [] };
+  const results = [];
+  for (const orderId of [...new Set(orderIds.map(String).map((id) => id.trim()).filter(Boolean))]) {
+    const baselineToken = await markTradePageHints(page);
+    const response = watchTradeResponse(page, (url, method) => {
+      try { return method === "POST" && new URL(url).pathname === "/intraday-trade/trade/cancel"; } catch { return false; }
+    });
+    const nativeDialog = (dialog) => {
+      if (/撤单|撤销.*委托/.test(dialog.message()) && !/所有|全撤/.test(dialog.message())) dialog.accept().catch(() => {});
+    };
+    page.on("dialog", nativeDialog);
+    try {
+      const clicked = await clickOrderCancellation(page, orderId);
+      if (!clicked.clicked) {
+        results.push({ orderId, ok: false, cancelled: false, code: clicked.code });
+        continue;
+      }
+      await completeTradeDialogs(page, { cancelOrder: true, baselineToken, finished: () => Boolean(response.peek()) });
+      const hint = await readTradePageHint(page, baselineToken);
+      if (tradePageHintKind(hint) === "rejected") {
+        results.push({ orderId, ok: false, cancelled: false, code: "ORDER_CANCEL_REJECTED", message: hint });
+      } else if (/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted") {
+        results.push({ orderId, ok: true, cancelled: true, code: "ORDER_CANCELLED", message: hint });
+      } else {
+        // A vanished live row may have filled while cancellation was pending. Verify history.
+        const status = await readHistoricalOrderStatus(page, orderId);
+        const cancelled = /^(已撤单|部分成交后撤单)$/.test(status);
+        results.push({ orderId, ok: cancelled, cancelled, code: cancelled ? "ORDER_CANCELLED" : status === "已成交" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCEL_UNVERIFIED", status });
+      }
+    } catch (error) {
+      results.push({ orderId, ok: false, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message });
+    } finally {
+      response.dispose();
+      page.off("dialog", nativeDialog);
+    }
+  }
+  await activateCurrentOrders(page);
+  return { ok: results.length > 0 && results.every((item) => item.cancelled), results };
 }
 
 export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [] } = {}) {

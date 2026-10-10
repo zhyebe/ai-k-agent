@@ -1202,7 +1202,8 @@ export async function observeMarket(task, connector) {
   if (!pageSnapshot.ok) {
     const opened = await openMarketBrowser(task, connector);
     if (!opened.ok) return opened;
-    pageSnapshot = opened;
+    pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+    if (!pageSnapshot.ok) return pageSnapshot;
   }
   if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
   const configuredSymbol = String(task.symbol || "").trim();
@@ -1217,7 +1218,7 @@ export async function observeMarket(task, connector) {
     if (!samePageInstrument(currentInstrument, selectedTarget)) {
       const switched = await selectPageBoardInstrument(sessionId, selectedTarget);
       if (switched) {
-        const switchedSnapshot = await readVisiblePage(sessionId);
+        const switchedSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
         if (switchedSnapshot?.ok) pageSnapshot = switchedSnapshot;
       }
     }

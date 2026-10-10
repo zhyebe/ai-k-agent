@@ -3,7 +3,7 @@ import test, { after, before } from "node:test";
 import { chromium } from "playwright";
 import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSessionFactory } from "../server/browser.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
-import { continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
+import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 
@@ -21,6 +21,101 @@ after(async () => {
   await closeAllBrowserSessions();
   setBrowserSessionFactory(null);
   await browser?.close();
+});
+
+test("collection reads current orders and restores holdings without mixing history", async () => {
+  await page.reload();
+  const snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true });
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positions.length, 3);
+  assert.equal(account.openOrdersVerified, true);
+  assert.deepEqual(account.openOrders.map((order) => order.orderId), ["O-10", "O-1", "O-2"]);
+  assert.equal(account.openOrders[1].remainingQuantity, 2);
+  assert.equal(await page.locator("#positions").isVisible(), true);
+});
+
+test("empty current orders verify emptiness while loading orders stay unverified", async () => {
+  await page.reload();
+  await page.locator("#orders tbody").evaluate((node) => { node.innerHTML = '<tr><td colspan="11">暂无数据</td></tr>'; });
+  let snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true });
+  let account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.openOrdersVerified, true);
+  assert.equal(account.openOrdersEmpty, true);
+  await page.evaluate(() => {
+    const mask = document.createElement("div");
+    mask.className = "el-loading-mask";
+    mask.style.height = "30px";
+    mask.textContent = "loading";
+    document.querySelector("#orders").append(mask);
+  });
+  snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true });
+  account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.openOrdersVerified, false);
+  assert.equal(account.openOrdersEmpty, false);
+  assert.equal(account.positionsVerified, true);
+});
+
+test("selected-order toolbar cancels exact IDs and partial remainder, never other orders or positions", async () => {
+  await page.reload();
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1", "O-10"] });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }, { id: "O-10", remaining: 1 }]);
+  assert.deepEqual(await page.evaluate(() => window.exits), []);
+  assert.equal(await page.evaluate(() => window.wrongCancelAll), 0);
+  assert.equal(await page.locator("#orders tbody tr").count(), 1);
+});
+
+for (const scenario of ["cancelRejected", "fillDuringCancel", "silentCancellation"]) {
+  test(`cancellation truthfully verifies ${scenario}`, async () => {
+    await page.reload();
+    await page.evaluate((name) => { window[name] = true; }, scenario);
+    const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+    assert.equal(result.results[0].code, scenario === "cancelRejected" ? "ORDER_CANCEL_REJECTED" : scenario === "fillDuringCancel" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCELLED", JSON.stringify(result));
+    assert.equal(result.results[0].cancelled, scenario === "silentCancellation");
+  });
+}
+
+test("missing exact order never cancels an order with a similar ID", async () => {
+  await page.reload();
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-100"] });
+  assert.equal(result.results[0].code, "ORDER_NO_LONGER_OPEN");
+  assert.deepEqual(await page.evaluate(() => window.cancelled), []);
+});
+
+test("current-order pagination collects every page and locates cancellation by ID", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const root = document.querySelector("#orders");
+    const rows = [...root.querySelectorAll("tbody tr")];
+    const pagination = document.createElement("div");
+    pagination.className = "el-pagination";
+    pagination.innerHTML = '<button class="btn-prev">previous</button><ul class="el-pager"><li class="number active">1</li><li class="number">2</li><li class="number">3</li></ul><button class="btn-next">next</button>';
+    root.append(pagination);
+    let current = 3;
+    const render = () => {
+      root.querySelector("tbody").replaceChildren(rows[current - 1]);
+      pagination.querySelector(".btn-prev").disabled = current === 1;
+      pagination.querySelector(".btn-next").disabled = current === 3;
+      [...pagination.querySelectorAll("li")].forEach((node, index) => node.classList.toggle("active", index === current - 1));
+    };
+    pagination.querySelector(".btn-prev").onclick = () => { current -= 1; render(); };
+    pagination.querySelector(".btn-next").onclick = () => { current += 1; render(); };
+    render();
+  });
+  const snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true });
+  assert.deepEqual(parseHaohanAccount(snapshot.visibleText, snapshot.tables).openOrders.map((order) => order.orderId), ["O-10", "O-1", "O-2"]);
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-2"] });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-2", remaining: 1 }]);
+});
+
+test("configured quantity is filled and submitted as entered", async () => {
+  await page.reload();
+  await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 20, quantity: 3 });
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 20, quantity: 3 });
+  assert.equal(result.ok, true);
+  assert.equal((await page.evaluate(() => window.entries))[0].quantity, "3");
 });
 
 test("visible input buttons and position span controls are collected", async () => {

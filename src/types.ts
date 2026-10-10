@@ -337,6 +337,7 @@ export interface Task {
   monitorAllBoards?: boolean;
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
+  entryQuantity?: number;
   autoDecisionCountdownSec?: number;
   providerId?: string;
   pendingAction?: PendingAction | null;

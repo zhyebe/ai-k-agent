@@ -2,6 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persistence.mjs";
 
+test("MySQL runtime retains configured quantity and cancellation evidence", () => {
+  const task = { entryQuantity: 3, decision: { action: "HOLD", orderAssessments: [{ orderId: "O-1", decision: "CANCEL" }], cancelOrderIds: ["O-1"], orderCancellation: { results: [{ orderId: "O-1", cancelled: true }] } } };
+  const stored = JSON.parse(JSON.stringify(compactTaskRuntime(task)));
+  const restored = compactTaskRuntime(stored);
+  assert.equal(restored.entryQuantity, 3);
+  assert.equal(compactTaskRuntime({}).entryQuantity, 1);
+  assert.deepEqual(restored.decision.orderCancellation, task.decision.orderCancellation);
+  assert.deepEqual(restored.decision.cancelOrderIds, ["O-1"]);
+});
+
 test("LIVE persistence preserves the selected entry mode", () => {
   for (const enabled of [false, true]) {
     assert.equal(compactTaskRuntime({ mode: "LIVE", autoDecisionEnabled: enabled }).autoDecisionEnabled, enabled);

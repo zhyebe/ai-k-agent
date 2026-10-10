@@ -2,7 +2,8 @@ import { callProviderMethod, desktopAiRequired, hasDesktopAi } from "./desktop-a
 import { callBrowserMethod, desktopBrowserRequired } from "./desktop-browser.mjs";
 import { analysisTimeoutMs, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, compactCollectedMarket, compactSegmentReview, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, nextCandleTarget, shouldUseSegmentedAnalysis, summarizeMarketForDecision } from "./analysis-context.mjs";
 import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedExperiencePrompt } from "./rag.mjs";
-import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, MAX_LIVE_ENTRY_QUANTITY, executeDecision, isAutomaticAction, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, isAutomaticAction, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
+import { entryQuantityForTask } from "./order-quantity.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
@@ -76,6 +77,7 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
     fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
     continueManualEntry: use("continueManualEntry", (input) => callBrowserMethod("continueManualEntry", userId, input)),
     submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, input, options)),
+    cancelOpenOrders: use("cancelOpenOrders", (input, options) => callBrowserMethod("cancelOpenOrders", userId, input, options)),
   };
 }
 
@@ -302,7 +304,7 @@ export function attachPositionExit(decision, market = {}) {
 }
 
 function shouldUseRecentMonitoring(monitorRecentOnly, market) {
-  return monitorRecentOnly === true && openPositionCount(market) === 0;
+  return monitorRecentOnly === true && openPositionCount(market) === 0 && !market.account?.openOrders?.length;
 }
 
 export function profitSignalTier(value) {
@@ -406,10 +408,13 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     status: "WAITING",
     source: null,
     suggestedQty: preview.suggestedQty,
+    entryQuantity: entryQuantityForTask(task),
     suggestedPrice: preview.suggestedPrice,
     baselinePositionQty: pendingPositionQuantity(task.market, { ...decision, action }),
     baselinePositions: decision.exitType ? null : Object.fromEntries(pendingPositions(task.market, { ...decision, action }).filter((item) => item.positionOrderId).map((item) => [item.positionOrderId, Number(item.quantity)])),
     baselinePositionsVerified: task.market?.account?.positionsVerified !== false,
+    baselineOpenOrderIds: (task.market?.account?.openOrders || []).map((order) => order.orderId),
+    entrustedOrderIds: [],
     quantityLimitApplied: preview.quantityLimitApplied === true,
     formFilled: false,
     formSubmitBlocked: true,
@@ -418,7 +423,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     deadlineAt: null,
     countdownSec: 0,
     resolvedAt: null,
-    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${preview.quantityLimitApplied ? ` 实盘单笔入场数量上限为 ${MAX_LIVE_ENTRY_QUANTITY}` : ""}`,
+    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${!decision.exitType && isLiveTask(task) ? ` 单笔入场数量 ${entryQuantityForTask(task)}` : ""}`,
   };
 }
 
@@ -669,6 +674,7 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
 function reconcilePositionAction(task, market, pending) {
   if (!pending || !["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || task.mode !== "LIVE" || market.account?.positionsVerified === false || pending.baselinePositionsVerified === false) return pending;
   if (!pending.source && (pending.exitType || task.autoDecisionEnabled === true)) return pending;
+  if (pending.entrustedOrderIds?.some((id) => market.account?.openOrders?.some((order) => order.orderId === id && order.remainingQuantity > 0))) return pending;
   const baseline = Number(pending.baselinePositionQty || 0);
   const quantity = Number(pending.suggestedQty || 0);
   if (quantity <= 0) return pending;
@@ -716,6 +722,22 @@ function reconcilePositionAction(task, market, pending) {
 }
 
 function reconcilePendingPosition(task, market) {
+  if (market.account?.openOrdersVerified) {
+    const claimed = new Set([task.pendingAction, ...(task.unsettledActions || [])].flatMap((pending) => pending?.entrustedOrderIds || []));
+    for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean)) {
+      if (!["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || pending.entrustedOrderIds?.length || !Array.isArray(pending.baselineOpenOrderIds)) continue;
+      const targets = [pending.targetSymbol, pending.targetSymbolName, pending.targetInstrumentId].filter(Boolean);
+      const candidates = market.account.openOrders.filter((order) => !claimed.has(order.orderId) && !pending.baselineOpenOrderIds.includes(order.orderId)
+        && targets.some((target) => [order.symbol, order.symbolName, order.instrumentId].includes(target))
+        && (pending.action === "BUY" ? /买|多|long/i.test(order.side) : /卖|空|short/i.test(order.side))
+        && (pending.exitType ? /转让/.test(order.orderKind) : /订立/.test(order.orderKind))
+        && Number(order.quantity) === Number(pending.suggestedQty) && Number(order.orderPrice) === Number(pending.suggestedPrice));
+      if (candidates.length === 1) {
+        pending.entrustedOrderIds = [candidates[0].orderId];
+        claimed.add(candidates[0].orderId);
+      }
+    }
+  }
   task.unsettledActions = (task.unsettledActions || []).map((pending) => reconcilePositionAction(task, market, pending)).filter((pending) => pending.status !== "CONFIRMED");
   const reconciled = reconcilePositionAction(task, market, task.pendingAction);
   if (reconciled !== task.pendingAction) {
@@ -731,7 +753,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("BELOW_ENTRY_THRESHOLD");
-  if (isLiveTask(task) && !task.pendingAction.exitType && (!Number.isInteger(Number(task.pendingAction.suggestedQty)) || Number(task.pendingAction.suggestedQty) < 1 || Number(task.pendingAction.suggestedQty) > MAX_LIVE_ENTRY_QUANTITY)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
+  if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
   pendingConfirmLocks.add(taskId);
@@ -1579,7 +1601,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       positionContext,
     },
     rules: task.rules,
-    strategy: LIVE_BOARD_STRATEGY,
+    strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
     approvedSkills: approvedSkillsForContext(evidence),
     experiencePrompt: buildApprovedExperiencePrompt(evidence),
     evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash })),
@@ -1822,7 +1844,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     });
     const currentKWindow = nextCandleTarget({}, Date.now()).closeTime;
     const lastAnalyzedKWindow = task.lastAnalysisAt ? nextCandleTarget({}, new Date(task.lastAnalysisAt).getTime()).closeTime : null;
-    const marketUnchanged = Boolean(skipIfUnchanged && openPositionCount(market) === 0 && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task) && lastAnalyzedKWindow === currentKWindow);
+    const marketUnchanged = Boolean(skipIfUnchanged && openPositionCount(market) === 0 && !market.account?.openOrders?.length && market.account?.openOrdersVerified !== false && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task) && lastAnalyzedKWindow === currentKWindow);
     if (marketUnchanged) {
       const pendingRule = task.rules.some((rule) => rule.status === "pending");
       task.status = monitoringIntent(task)
@@ -1913,7 +1935,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           positions: positionContext,
           rawPositions: market.account?.positions || [],
           rules: task.rules,
-          strategy: LIVE_BOARD_STRATEGY,
+          strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
           approvedSkills: approvedSkillsForContext(knowledge),
           evidence,
           experiencePrompt,
@@ -2071,7 +2093,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
             : task.decision.action === "HOLD"
               ? "模型建议观望，当前轮次无需动作"
               : riskLimitExceeded
-                ? `${targetedActionLabel}建议已保留；仓位参数按 AI 结果执行，入场数量仍限制为 1`
+                ? `${targetedActionLabel}建议已保留；单笔入场数量使用配置值 ${entryQuantityForTask(task)}`
                 : `${targetedActionLabel}建议已保留；数据标记已记录，继续按 AI 决策执行`;
       completeWorkflow(task, "rules", ruleMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: ruleMessage });
@@ -2088,9 +2110,37 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
       : (isLiveTask(task) ? "准备入场表单，等待用户点击入场按钮" : "路由最终建议，等待确认后决定是否下单"));
     assertCurrent();
+    const liveOrderIds = new Set((market.account?.openOrders || []).filter((order) => order.remainingQuantity > 0).map((order) => String(order.orderId)));
+    const keepOrderIds = new Set((task.decision.orderAssessments || []).filter((item) => item.decision === "KEEP").map((item) => item.orderId));
+    const cancelOrderIds = [...new Set([...(task.decision.cancelOrderIds || []), ...(task.decision.orderAssessments || []).filter((item) => item.decision === "CANCEL").map((item) => item.orderId)])]
+      .filter((id) => liveOrderIds.has(id) && !keepOrderIds.has(id));
+    if (liveExecution && isTradingSwitchOn() && cancelOrderIds.length) {
+      const cancellationAbort = new AbortController();
+      pendingSubmissionCancels.set(task.id, cancellationAbort);
+      try {
+        task.decision.orderCancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds: cancelOrderIds }, { signal: cancellationAbort.signal });
+      } catch (error) {
+        task.decision.orderCancellation = { ok: false, results: cancelOrderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message })) };
+      } finally {
+        if (pendingSubmissionCancels.get(task.id) === cancellationAbort) pendingSubmissionCancels.delete(task.id);
+      }
+      assertCurrent();
+      for (const result of task.decision.orderCancellation.results || []) {
+        appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "order", message: result.cancelled ? `委托 ${result.orderId} 已撤销剩余未成交数量` : `委托 ${result.orderId} 撤销结果：${result.message || result.code}，继续监控`, data: result });
+      }
+      const cancelledIds = new Set((task.decision.orderCancellation.results || []).filter((result) => result.cancelled).map((result) => result.orderId));
+      for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean)) {
+        if (!["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || !pending.entrustedOrderIds?.length || !pending.entrustedOrderIds.every((id) => cancelledIds.has(id))) continue;
+        pending.status = "CANCELLED";
+        pending.resolvedAt = new Date().toISOString();
+        pending.message = "AI 已撤销委托剩余数量；已成交部分继续按持仓监控";
+        recordConfirmedOrder(task, pending, { status: "cancelled_remainder", submitted: true, source: "ai_cancel", message: pending.message });
+      }
+      task.unsettledActions = (task.unsettledActions || []).filter((pending) => pending.status !== "CANCELLED");
+    }
     const duplicateExit = Boolean(task.decision.exitType) && task.decision.targetPositionIds.length === 0;
     const previousEntryKWindow = task.pendingAction && !task.pendingAction.exitType
-      ? (["CANCELLED", "REJECTED"].includes(task.pendingAction.status) ? null : task.pendingAction.entryKWindow || (task.pendingAction.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null))
+      ? (["CANCELLED", "REJECTED"].includes(task.pendingAction.status) ? (task.pendingAction.entrustedOrderIds?.length ? task.lastEntryKWindow : null) : task.pendingAction.entryKWindow || (task.pendingAction.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null))
       : task.lastEntryKWindow;
     const sameKEntry = !task.decision.exitType && previousEntryKWindow === nextCandleTarget({}, Date.now()).closeTime;
     const executionBlocked = !liveExecution && (rulePaused || holdRequired);

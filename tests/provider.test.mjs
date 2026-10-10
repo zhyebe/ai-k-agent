@@ -8,6 +8,26 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
+test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profit/configured quantity", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    calls += 1;
+    const body = JSON.parse(options.body);
+    const prompt = body.messages[0].content;
+    assert.match(prompt, /Every round inspect every account.openOrders/);
+    assert.match(prompt, /Do not label a flat or negative net result TAKE_PROFIT/);
+    assert.match(prompt, /User-configured entry quantity: 3/);
+    assert.equal(JSON.parse(body.messages.at(-1).content).account.openOrders[0].orderId, "O-1");
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
+      order_assessments: [{ order_id: "O-1", decision: "CANCEL", reason: "entry price no longer favorable" }, { order_id: "O-2", decision: "KEEP" }] }) } }] }));
+  });
+  const decision = await requestDecision({ apiKey: "test", baseUrl: "https://example.test", model: "fast" }, { account: { openOrders: [{ orderId: "O-1" }] }, strategy: { entryQuantity: 3 } }, { fastAnalysis: true });
+  assert.deepEqual(decision.cancelOrderIds, ["O-1"]);
+  assert.equal(decision.orderAssessments[1].decision, "KEEP");
+  assert.equal(calls, 1);
+  assert.deepEqual(buildConversationMessages({ recentRounds: [{ decision }] })[1] && JSON.parse(buildConversationMessages({ recentRounds: [{ decision }] })[1].content).cancelOrderIds, ["O-1"]);
+});
+
 test("live fast analysis disables official DeepSeek thinking without changing the model or custom gateways", async (t) => {
   const bodies = [];
   t.mock.method(globalThis, "fetch", async (_url, options) => {
@@ -181,7 +201,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(seen[0].body.system, /another K can produce another entry/);
     assert.match(seen[0].body.system, /never HOLD merely because an earlier position exists/);
     assert.match(seen[0].body.system, /profit_probability equals the selected direction/);
-    assert.match(seen[0].body.system, /one unit per order/);
+    assert.match(seen[0].body.system, /User-configured entry quantity: 1 per new order/);
     assert.match(seen[0].body.system, /Never leave an AI-identified maximum-profit or minimum-loss exit as HOLD/);
     assert.match(seen[0].body.system, /BROWSER_PLAN/);
     assert.match(seen[0].body.system, /host only fills the target form/);

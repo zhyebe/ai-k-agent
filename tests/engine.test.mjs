@@ -343,7 +343,7 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
-test("实盘入场自动与手动都限制为 1，观察模式不填实盘数量", () => {
+test("实盘入场自动与手动默认数量为 1，观察模式不填实盘数量", () => {
   const base = { id: "quantity-limit", mode: "LIVE", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
   const decision = { action: "BUY", targetSymbol: "A", profitProbability: 0.8, targetPositionPct: 30, maxOrderValuePct: 8 };
   const automated = buildPendingAction(base, decision);
@@ -749,6 +749,76 @@ function testMarketSnapshot(fingerprint, price) {
     raw: { source: "test", timeline: { ticks: [{ timestamp: now, price }] } },
   };
 }
+
+for (const autoDecisionEnabled of [false, true]) {
+  test(`委托撤销独立于${autoDecisionEnabled ? "自动" : "手动"}入场、HOLD和同K限制，未变行情继续分析`, async () => {
+    const task = insertNorthstarTask(`pending_orders_${autoDecisionEnabled}_${Date.now()}`);
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled, entryQuantity: 3, status: "MONITORING", monitoringEnabled: true, lastEntryKWindow: Date.now() });
+    const market = testMarketSnapshot("pending-orders-unchanged", 103);
+    market.account = { positions: [], positionsVerified: true, openOrdersVerified: true, openOrders: [
+      { orderId: "O-1", symbol: "BTC/USDT", side: "买", orderKind: "订立", orderPrice: 100, quantity: 3, filledQuantity: 1, remainingQuantity: 2 },
+      { orderId: "O-2", symbol: "BTC/USDT", side: "卖", orderPrice: 104, quantity: 1, remainingQuantity: 1 },
+    ] };
+    task.market = { ...market, account: { ...market.account, openOrders: [] } };
+    task.pendingAction = { ...buildPendingAction(task, { action: "BUY", targetSymbol: "BTC/USDT", orderType: "LIMIT", targetPrice: 100, bullishProfitProbability: 0.6 }), status: "AWAITING_FILL", source: "auto_timeout" };
+    const cancelled = [];
+    let rounds = 0;
+    const runtime = {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async (_provider, context) => {
+        rounds += 1;
+        assert.equal(context.account.openOrders[0].remainingQuantity, 2);
+        assert.equal(context.strategy.entryQuantity, 3);
+        return { action: "HOLD", bullishProfitProbability: 0.2, bearishProfitProbability: 0.3, cancelOrderIds: ["O-1", "unknown"], orderAssessments: [{ orderId: "O-2", decision: "KEEP", reason: "still profitable" }], evidenceIds: [context.evidenceIds[0]], riskFlags: [] };
+      },
+      cancelOpenOrders: async (input) => { cancelled.push(input.orderIds); return { ok: true, results: input.orderIds.map((orderId) => ({ orderId, cancelled: true })) }; },
+      submitSuggestionForm: async () => assert.fail("HOLD cannot create an entry"),
+    };
+    try {
+      await runMonitoringCycle(task.id, { runtime });
+      assert.equal(task.pendingAction?.status === "CONFIRMED", false);
+      assert.deepEqual(cancelled, [["O-1"]]);
+      assert.equal(state.orders.find((order) => order.taskId === task.id)?.status, "cancelled_remainder");
+      await runMonitoringCycle(task.id, { runtime });
+      assert.equal(rounds, 2);
+      assert.equal(task.status, "MONITORING");
+    } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+  });
+}
+
+test("AI KEEP does not invoke cancellation", async () => {
+  const task = insertNorthstarTask(`keep_order_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("keep-order", 101);
+  market.account.openOrders = [{ orderId: "O-keep", remainingQuantity: 1 }];
+  try {
+    await runMonitoringCycle(task.id, { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async () => ({ action: "HOLD", orderAssessments: [{ orderId: "O-keep", decision: "KEEP" }], riskFlags: [] }),
+      cancelOpenOrders: async () => assert.fail("KEEP must preserve the order"),
+    } });
+    assert.equal(task.status, "MONITORING");
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
+
+test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场量", async () => {
+  const task = insertNorthstarTask(`cancel_and_exit_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", entryQuantity: 3, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("cancel-and-exit", 99);
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 5, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1 }] };
+  let submitted = 0;
+  try {
+    await runMonitoringCycle(task.id, { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-1"], bullishProfitProbability: 0.1, bearishProfitProbability: 0.1, riskFlags: [] }),
+      cancelOpenOrders: async () => ({ ok: false, results: [{ orderId: "O-1", cancelled: false, code: "ORDER_CANCEL_REJECTED" }] }),
+      submitSuggestionForm: async (input) => { submitted += 1; assert.equal(input.quantity, 5); return { ok: true, submitted: true }; },
+    } });
+    assert.equal(submitted, 1);
+    assert.equal(task.status, "MONITORING");
+    assert.equal(task.decision.orderCancellation.ok, false);
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
 
 test("待核实离场不阻挡立即入场，旧单继续独立核实且自动流程不重复填表", async () => {
   const task = insertNorthstarTask(`unsettled_entry_${Date.now()}`);

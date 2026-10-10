@@ -86,6 +86,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
       if (message.method === "fillSuggestionForm") return await tools.fillSuggestionForm(input);
       if (message.method === "continueManualEntry") return await tools.continueManualEntry(input);
       if (message.method === "readTradeControls") return await tools.readTradeControls(input);
+      if (message.method === "cancelOpenOrders") return await tools.cancelOpenOrders(input);
       if (message.method === "closeBrowserSession") return await browser.closeBrowserSession(sessionId);
       if (message.method === "submitSuggestionForm") {
         if (!input.confirmationId) throw new Error("TRADE_CONFIRMATION_REQUIRED");

@@ -41,7 +41,7 @@ test("direct analysis sends full approved owner experience and both order books 
   assert.equal(approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content: "too-small-budget" }], "owner", 10).length, 0);
   const now = Date.now();
   const makeBook = (symbol, price) => ({ symbol, timeframe: "1m", dataAt: new Date(now).toISOString(), history: [{ timestamp: now - 60000, open: price, high: price + 1, low: price - 1, close: price, volume: 10 }], orderBook: summarizeOrderBook({ bids: [{ level: 1, price, volume: 100 }], asks: [{ level: 1, price: price + 1, volume: 40 }] }), raw: { duplicate: "x".repeat(300000) } });
-  const market = { ...makeBook("A", 100), books: [makeBook("A", 100), makeBook("B", 200)], fingerprint: "snapshot" };
+  const market = { ...makeBook("A", 100), books: [makeBook("A", 100), makeBook("B", 200)], fingerprint: "snapshot", account: { openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1, orderPrice: 99 }] } };
   let calls = 0;
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     calls++;
@@ -56,6 +56,7 @@ test("direct analysis sends full approved owner experience and both order books 
     assert.ok(payload.messages.some((message) => message.content.includes(experiencePrompt)));
     assert.equal(context.strategy.kline.printSecond, 50);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
+    assert.equal(context.market.account.openOrders[0].orderId, "O-1");
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);
     assert.equal(context.market.books[1].raw, undefined);

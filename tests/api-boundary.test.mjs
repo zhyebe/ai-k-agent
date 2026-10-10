@@ -147,6 +147,14 @@ test("connector test enforces task binding and clears credentials on target chan
     const first = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-a", targetType: "website", url: "https://example.com" }) });
     const second = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-b", targetType: "website", url: "https://example.org" }) });
     assert.equal(first.status, 201);
+    assert.equal(first.body.task.entryQuantity, 1);
+    const quantityUpdate = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ entryQuantity: 3 }) });
+    assert.equal(quantityUpdate.status, 200);
+    assert.equal(quantityUpdate.body.task.entryQuantity, 3);
+    for (const entryQuantity of [0, -1, 1.5, "bad", true]) {
+      const invalidQuantity = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ entryQuantity }) });
+      assert.equal(invalidQuantity.status, 400);
+    }
     assert.equal(second.status, 201);
     assert.equal(first.body.task.providerId, userProvider.body.provider.id);
     assert.equal(first.body.task.target.credentialStatus, "未配置");

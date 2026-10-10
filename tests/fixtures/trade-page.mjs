@@ -18,7 +18,16 @@ export const tradeFixture = `<!doctype html><html><head><title>Trade controls fi
   </div>
 </section>
 <section id="transfer" style="display:none"><li><span>转让价</span><input></li><li><span>转让量</span><input></li><input type="button" value="卖出转让" onclick="window.wrongGlobalExit++"></section>
-<div class="header_l_item" onclick="document.querySelector('#positions').style.display=''">持仓明细</div>
+<div class="header_l_item" onclick="orderPane('positions')">持仓明细</div>
+<div class="head_l_btns" onclick="orderPane('orders')">当前委托</div>
+<div class="head_l_btns" onclick="orderPane('history')">历史委托</div>
+<section id="orders" style="display:none"><div class="head_l_btns" onclick="cancelSelected()">撤单</div><div onclick="window.wrongCancelAll++">全撤</div>
+<table><thead><tr><th></th><th>委托单号</th><th>商品名称</th><th>买 | 卖</th><th>委托价格</th><th>订立 | 转让</th><th>委托数量</th><th>已成交数量</th><th>未成交数量</th><th>状态</th><th>委托时间</th></tr></thead><tbody>
+<tr><td><input type="checkbox"></td><td>O-10</td><td>测试商品</td><td>卖出</td><td>20</td><td>订立</td><td>1</td><td>0</td><td>1</td><td>已委托</td><td>2026-10-10 10:00:00</td></tr>
+<tr><td><input type="checkbox"></td><td>O-1</td><td>测试商品</td><td>买入</td><td>20</td><td>订立</td><td>3</td><td>1</td><td>2</td><td>部分成交</td><td>2026-10-10 10:00:00</td></tr>
+<tr><td><input type="checkbox" checked></td><td>O-2</td><td>测试商品</td><td>买入</td><td>21</td><td>订立</td><td>1</td><td>0</td><td>1</td><td>已委托</td><td>2026-10-10 10:01:00</td></tr>
+</tbody></table></section>
+<section id="history" style="display:none"><table><thead><tr><th></th><th>委托单号</th><th>商品名称</th><th>买 | 卖</th><th>委托价格</th><th>订立 | 转让</th><th>委托数量</th><th>已成交数量</th><th>未成交数量</th><th>状态</th><th>委托时间</th></tr></thead><tbody></tbody></table></section>
 <table id="positions"><thead><tr><th>商品名称</th><th>买 | 卖</th><th>存货数量</th><th>持仓单号</th><th>转让</th><th>止盈 | 止损</th></tr></thead><tbody>
 <tr><td>测试商品</td><td>卖出</td><td>1</td><td>P-10</td><td><span class="spotS" onclick="transfer('P-10',1)">转让</span></td><td><span class="spotS" onclick="window.wrongStopDialog++">止盈止损</span></td></tr>
 <tr><td>测试商品</td><td>买入</td><td>2</td><td>P-1</td><td><span class="spotS" onclick="transfer('P-1',2)">转让</span></td><td><span class="spotS" onclick="window.wrongStopDialog++">止盈止损</span></td></tr>
@@ -26,6 +35,9 @@ export const tradeFixture = `<!doctype html><html><head><title>Trade controls fi
 </tbody></table>
 <script>
 window.entries=[];window.exits=[];window.agreementChanges=0;window.wrongStopDialog=0;window.wrongGlobalExit=0;
+window.cancelled=[];window.wrongCancelAll=0;
+function orderPane(name){for(const id of ['positions','orders','history'])document.querySelector('#'+id).style.display=id===name?'':'none'}
+function cancelSelected(){const selected=[...document.querySelectorAll('#orders tbody tr')].filter(row=>row.querySelector('input').checked);if(selected.length!==1){notice('撤单失败，选单错误');return}const row=selected[0];const box=document.createElement('div');box.className='el-dialog';box.innerHTML='您确定要撤单吗?<button>确认</button><button>取消</button>';box.querySelector('button').onclick=()=>{box.remove();if(window.cancelRejected){notice('撤单失败');return}if(window.fillDuringCancel){row.cells[9].textContent='已成交';row.cells[8].textContent='0';document.querySelector('#history tbody').append(row);notice('委托已成交');return}window.cancelled.push({id:row.cells[1].textContent,remaining:Number(row.cells[8].textContent)});row.cells[9].textContent=Number(row.cells[7].textContent)>0?'部分成交后撤单':'已撤单';document.querySelector('#history tbody').append(row);if(!window.silentCancellation)notice('撤单成功')};document.body.append(box)}
 function direction(side){document.querySelector('#buy').style.display=side==='BUY'?'':'none';document.querySelector('#sell').style.display=side==='SELL'?'':'none'}
 function pane(name){document.querySelector('#entry').style.display=name==='entry'?'':'none';document.querySelector('#transfer').style.display=name==='transfer'?'':'none'}
 function notice(text){document.querySelector('.el-message')?.remove();const div=document.createElement('div');div.className='el-message';div.textContent=text;document.body.append(div)}

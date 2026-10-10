@@ -1,3 +1,5 @@
+import { entryQuantityForTask } from "./order-quantity.mjs";
+
 function json(value) {
   return JSON.stringify(value ?? {});
 }
@@ -72,6 +74,10 @@ function compactPersistedDecision(decision) {
   if (!decision || typeof decision !== "object") return decision;
   return {
     action: decision.action || "HOLD",
+    orderAssessments: decision.orderAssessments || [],
+    cancelOrderIds: decision.cancelOrderIds || [],
+    orderCancellation: decision.orderCancellation || null,
+    targetPositionIds: decision.targetPositionIds || [],
     confidence: Number(decision.confidence || 0),
     profitProbability: Number(decision.profitProbability || 0),
     bullishProfitProbability: Number(decision.bullishProfitProbability || 0),
@@ -147,6 +153,7 @@ export function compactTaskRuntime(task = {}) {
     lastCycleAt: task.lastCycleAt || null,
     nextPollAt: task.nextPollAt || null,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
+    entryQuantity: entryQuantityForTask(task),
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
@@ -651,6 +658,7 @@ async function createMySqlAdapter() {
             nextPollAt: runtime.nextPollAt || null,
             analysisCoverage: runtime.analysisCoverage || null,
             autoDecisionEnabled: runtime.autoDecisionEnabled === true,
+            entryQuantity: entryQuantityForTask(runtime),
             autoDecisionCountdownSec: Number(runtime.autoDecisionCountdownSec || 30),
             providerId: String(runtime.providerId || ""),
             pendingAction: runtime.pendingAction || null,

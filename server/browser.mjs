@@ -5,6 +5,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 import { activateTradeControl } from "./trade-controls.mjs";
+import { collectCurrentOrderTables } from "./order-controls.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -179,7 +180,7 @@ async function getSession(sessionId = "default", allowRecreate = true) {
   return { ...session, sessionId: key };
 }
 
-async function collectTables(page) {
+export async function collectTables(page) {
   return page.evaluate(() => {
     const visible = (element) => {
       const style = window.getComputedStyle(element);
@@ -467,6 +468,7 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
+    const orderTables = inspectPositions ? await collectCurrentOrderTables(session.page, collectTables) : [];
     if (inspectPositions) {
       await activateTradeControl(session.page, "持仓明细");
       await session.page.waitForFunction(() => [...document.querySelectorAll("th")].some((node) => /持仓单号/.test(node.textContent) && node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).catch(() => {});
@@ -476,7 +478,7 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
       title: document.title,
       visibleText: document.body?.innerText || "",
     }));
-    const tables = await collectTables(session.page);
+    const tables = [...await collectTables(session.page), ...orderTables];
     const chart = await collectHqChart(session.page);
     const chartSamples = (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
     const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });
