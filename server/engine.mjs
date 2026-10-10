@@ -108,6 +108,105 @@ function openPositionsFromMarket(market) {
   return positions.filter((item) => Number(item?.quantity) > 0);
 }
 
+function positionDirection(position) {
+  const side = String(position?.side || "");
+  if (/卖|空|short/i.test(side)) return "SHORT";
+  if (/买|多|long/i.test(side)) return "LONG";
+  return "UNKNOWN";
+}
+
+function parsePositionTimestamp(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const direct = new Date(raw).getTime();
+  if (Number.isFinite(direct)) return direct;
+  const normalized = raw
+    .replace(/年/g, "-")
+    .replace(/月/g, "-")
+    .replace(/日/g, " ")
+    .replace(/[时点]/g, ":")
+    .replace(/分/g, ":")
+    .replace(/秒/g, "")
+    .replace(/:\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const parsed = new Date(normalized).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function positionMarketPrice(market, position) {
+  const symbol = String(position?.symbol || "").trim().toLowerCase();
+  const instrumentId = String(position?.instrumentId || "").trim().toLowerCase();
+  const book = (Array.isArray(market?.books) ? market.books : []).find((item) => {
+    const itemSymbol = String(item?.symbol || "").trim().toLowerCase();
+    const itemInstrumentId = String(item?.instrumentId || "").trim().toLowerCase();
+    return (symbol && itemSymbol === symbol) || (instrumentId && itemInstrumentId === instrumentId);
+  });
+  const primarySymbol = String(market?.symbol || "").trim().toLowerCase();
+  const primaryInstrumentId = String(market?.instrumentId || "").trim().toLowerCase();
+  const matchesPrimary = (!symbol && !instrumentId)
+    || (symbol && primarySymbol === symbol)
+    || (instrumentId && primaryInstrumentId === instrumentId);
+  const value = Number(book?.latest?.price ?? book?.quote?.price ?? (matchesPrimary ? market?.latest?.price ?? market?.quote?.price : null));
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function positionTrackingKey(position, index) {
+  return String(position?.positionOrderId || `${position?.symbol || position?.symbolName || "position"}:${position?.side || "UNKNOWN"}:${index}`);
+}
+
+function updatePositionTracking(task, market, now = Date.now()) {
+  const positions = openPositionsFromMarket(market);
+  const previous = task.positionTracking && typeof task.positionTracking === "object" ? task.positionTracking : {};
+  const next = {};
+  const contexts = positions.map((position, index) => {
+    const key = positionTrackingKey(position, index);
+    const direction = positionDirection(position);
+    const entryPrice = Number(position?.orderPrice);
+    const currentPrice = positionMarketPrice(market, position);
+    const prior = previous[key] || {};
+    const orderTimeMs = parsePositionTimestamp(position?.orderTime);
+    const firstObservedAt = prior.firstObservedAt || (orderTimeMs ? new Date(orderTimeMs).toISOString() : new Date(now).toISOString());
+    const bestPrice = Number.isFinite(Number(prior.bestPrice)) && Number(prior.bestPrice) > 0
+      ? Number(prior.bestPrice) : currentPrice;
+    const worstPrice = Number.isFinite(Number(prior.worstPrice)) && Number(prior.worstPrice) > 0
+      ? Number(prior.worstPrice) : currentPrice;
+    const updatedBest = currentPrice === null ? bestPrice : direction === "SHORT" ? Math.min(bestPrice || currentPrice, currentPrice) : Math.max(bestPrice || currentPrice, currentPrice);
+    const updatedWorst = currentPrice === null ? worstPrice : direction === "SHORT" ? Math.max(worstPrice || currentPrice, currentPrice) : Math.min(worstPrice || currentPrice, currentPrice);
+    const validPrices = entryPrice > 0 && currentPrice > 0;
+    const knownDirection = direction === "LONG" || direction === "SHORT";
+    const unrealizedPnlPct = validPrices && knownDirection ? (direction === "SHORT" ? (entryPrice - currentPrice) : (currentPrice - entryPrice)) / entryPrice * 100 : null;
+    const maxFavorableExcursionPct = knownDirection && entryPrice > 0 && updatedBest > 0 && updatedWorst > 0
+      ? (direction === "SHORT" ? (entryPrice - updatedWorst) : (updatedBest - entryPrice)) / entryPrice * 100 : null;
+    const maxAdverseExcursionPct = knownDirection && entryPrice > 0 && updatedBest > 0 && updatedWorst > 0
+      ? Math.min(0, (direction === "SHORT" ? (entryPrice - updatedBest) : (updatedWorst - entryPrice)) / entryPrice * 100) : null;
+    const pullbackFromBestPct = validPrices && knownDirection && updatedBest > 0
+      ? (direction === "SHORT" ? (currentPrice - updatedBest) : (updatedBest - currentPrice)) / entryPrice * 100 : null;
+    const firstObservedMs = new Date(firstObservedAt).getTime();
+    const holdingDurationSec = Number.isFinite(firstObservedMs) ? Math.max(0, Math.round((now - firstObservedMs) / 1000)) : 0;
+    const context = {
+      positionId: String(position?.positionOrderId || ""),
+      symbol: String(position?.symbol || ""),
+      symbolName: String(position?.symbolName || ""),
+      side: direction,
+      quantity: Number(position?.quantity || 0),
+      entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
+      currentPrice,
+      orderTime: position?.orderTime || null,
+      firstObservedAt,
+      holdingDurationSec,
+      unrealizedPnlPct: unrealizedPnlPct === null ? null : Number(unrealizedPnlPct.toFixed(4)),
+      maxFavorableExcursionPct: maxFavorableExcursionPct === null ? null : Number(maxFavorableExcursionPct.toFixed(4)),
+      maxAdverseExcursionPct: maxAdverseExcursionPct === null ? null : Number(maxAdverseExcursionPct.toFixed(4)),
+      pullbackFromBestPct: pullbackFromBestPct === null ? null : Number(pullbackFromBestPct.toFixed(4)),
+    };
+    next[key] = { firstObservedAt, bestPrice: updatedBest || null, worstPrice: updatedWorst || null, lastPrice: currentPrice };
+    return context;
+  });
+  task.positionTracking = next;
+  return contexts;
+}
+
 function pendingPositions(market, pending) {
   const ids = new Set((pending?.targetPositionIds || []).map(String).filter(Boolean));
   const targets = [pending?.targetSymbol, pending?.targetSymbolName, pending?.targetInstrumentId]
@@ -1432,6 +1531,7 @@ function recentAnalysisRounds(taskId, limit = 8) {
 
 export function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
   const layered = analysisMarket?.analysisLayers ? analysisMarket : buildLayeredAnalysisMarket(analysisMarket || task.market);
+  const positionContext = updatePositionTracking(task, market, Date.now());
   return {
     market: {
       symbol: market.symbol,
@@ -1467,13 +1567,16 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       boardCoverage: layered.boardCoverage || null,
       page: layered.page ?? task.market.page,
       pageView: layered.pageView ?? task.market.pageView ?? task.market.page?.view ?? null,
-      positions: Array.isArray(layered.positions) ? layered.positions : Array.isArray(market.account?.positions) ? market.account.positions : [],
+      positions: positionContext,
+      rawPositions: Array.isArray(layered.positions) ? layered.positions : Array.isArray(market.account?.positions) ? market.account.positions : [],
+      positionContext,
       orderBook: layered.orderBook || null,
       raw: layered.raw,
     },
     account: {
       ...task.metrics,
       ...(market.account || {}),
+      positionContext,
     },
     rules: task.rules,
     strategy: LIVE_BOARD_STRATEGY,
@@ -1802,10 +1905,13 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     try {
       assertCurrent();
       if (clientAnalysis) {
+        const positionContext = updatePositionTracking(task, market, Date.now());
         appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位、出K策略和已审核 Skill 交给 AI 分析" });
         const result = await runtime.requestMarketAnalysis(provider, {
           marketRef: { sessionId: task.target.browserSessionId || `task:${task.id}`, fingerprint: task.market.fingerprint },
-          account: { ...task.metrics, ...(market.account || {}) },
+          account: { ...task.metrics, ...(market.account || {}), positionContext },
+          positions: positionContext,
+          rawPositions: market.account?.positions || [],
           rules: task.rules,
           strategy: LIVE_BOARD_STRATEGY,
           approvedSkills: approvedSkillsForContext(knowledge),

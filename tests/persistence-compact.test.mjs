@@ -27,6 +27,7 @@ test("compactTaskRuntime does not persist market snapshots", () => {
       history: Array.from({ length: 200 }, (_, i) => ({ t: i, c: i })),
       books: [{ symbol: "DGKZ", history: [{ c: 1 }], historyCount: 88, latest: { c: 12 } }],
     },
+    positionTracking: { "P-1": { firstObservedAt: "2026-10-10T00:00:00.000Z", bestPrice: 123, worstPrice: 120 } },
   });
   assert.equal(runtime.market, null);
   assert.deepEqual(runtime.decision.evidenceIds, []);
@@ -35,6 +36,19 @@ test("compactTaskRuntime does not persist market snapshots", () => {
   assert.equal(runtime.decision.bullishProfitProbability, 0.52);
   assert.equal(runtime.decision.bearishProfitProbability, 0.31);
   assert.equal(runtime.decision.boardAssessments[0].bullishProfitProbability, 0.52);
+  assert.equal(runtime.positionTracking["P-1"].bestPrice, 123);
+});
+
+test("compactTaskRuntime preserves AI forecast horizons and holding plan", () => {
+  const runtime = compactTaskRuntime({
+    decision: {
+      action: "HOLD",
+      forecastHorizon: { nextK: { direction: "DOWN" }, next10K: { direction: "UP" } },
+      holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", maxHoldK: 10, maxHoldMinutes: 10, rationale: "recover" },
+    },
+  });
+  assert.equal(runtime.decision.forecastHorizon.next10K.direction, "UP");
+  assert.equal(runtime.decision.holdingPlan.maxHoldK, 10);
 });
 
 test("only login and account events persist to audit logs", () => {

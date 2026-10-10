@@ -407,6 +407,42 @@ test("最终决策上下文包含当前页面、账户、时间戳和全部盘�
   assert.deepEqual(context.approvedSkills, []);
 });
 
+test("持仓上下文提供持仓时长、浮动收益、峰值波动和回撤给AI", () => {
+  const orderTime = new Date(Date.now() - 120000).toISOString();
+  const market = {
+    symbol: "DGKZ",
+    symbolName: "第一个盘口",
+    source: "browser-dom",
+    latest: { price: 123 },
+    account: {
+      positions: [{ positionOrderId: "P-1", symbol: "DGKZ", symbolName: "第一个盘口", side: "买", orderPrice: 120, quantity: 1, orderTime }],
+    },
+    books: [{ symbol: "DGKZ", latest: { price: 123 } }],
+    history: [],
+    timeframes: {},
+    analysisLayers: { timezone: "Asia/Shanghai", layers: [] },
+  };
+  const task = { id: "position-context-task", market, metrics: {}, rules: [], decision: { action: "HOLD" }, positionTracking: {} };
+  const context = buildDecisionContext(task, market, [], "monitor", market);
+  const position = context.market.positions[0];
+  assert.equal(position.positionId, "P-1");
+  assert.equal(position.side, "LONG");
+  assert.equal(position.entryPrice, 120);
+  assert.equal(position.currentPrice, 123);
+  assert.ok(position.holdingDurationSec >= 120);
+  assert.ok(position.unrealizedPnlPct > 2.4);
+  assert.ok(position.maxFavorableExcursionPct > 2.4);
+  assert.equal(position.maxAdverseExcursionPct, 0);
+  assert.equal(context.account.positionContext[0].positionId, "P-1");
+  assert.ok(task.positionTracking["P-1"]);
+
+  const pullbackMarket = { ...market, latest: { price: 121 }, books: [{ symbol: "DGKZ", latest: { price: 121 } }] };
+  const pullbackContext = buildDecisionContext(task, pullbackMarket, [], "monitor", pullbackMarket);
+  assert.equal(pullbackContext.market.positions[0].currentPrice, 121);
+  assert.ok(pullbackContext.market.positions[0].pullbackFromBestPct > 1.5);
+  assert.ok(pullbackContext.market.positions[0].maxFavorableExcursionPct > 2.4);
+});
+
 test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   const market = {
     books: [

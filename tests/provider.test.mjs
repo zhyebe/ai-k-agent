@@ -468,6 +468,41 @@ test("provider decision preserves target board identity and per-board assessment
   }
 });
 
+test("provider decision preserves next-K, ten-K and AI holding-duration forecasts", async () => {
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    assert.match(payload.messages[0].content, /holding_plan/);
+    assert.match(payload.messages[0].content, /max_hold_k/);
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      action: "HOLD",
+      bullish_profit_probability: 0.44,
+      bearish_profit_probability: 0.31,
+      forecast_horizon: {
+        next_k: { direction: "DOWN", probability: "42%", expected_move_pct: "-0.8", path: "先回撤", invalidation: "跌破支撑" },
+        next_10k: { direction: "UP", probability: 0.67, expected_move_pct: 2.1, path: "回撤后反弹", invalidation: "失守长期支撑" },
+      },
+      holding_plan: { decision: "HOLD_THROUGH_PULLBACK", max_hold_k: 10, max_hold_minutes: 10, rationale: "多K恢复路径更优", invalidation: "多周期转弱" },
+    }) } }] }));
+  });
+  const port = await listen(server);
+  try {
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "forecast-model", apiKey: "key" });
+    const result = await requestDecision(provider, { evidenceIds: [] });
+    assert.equal(result.forecastHorizon.nextK.direction, "DOWN");
+    assert.equal(result.forecastHorizon.nextK.probability, 0.42);
+    assert.equal(result.forecastHorizon.next10K.direction, "UP");
+    assert.equal(result.forecastHorizon.next10K.probability, 0.67);
+    assert.equal(result.holdingPlan.decision, "HOLD_THROUGH_PULLBACK");
+    assert.equal(result.holdingPlan.maxHoldK, 10);
+    assert.equal(result.holdingPlan.maxHoldMinutes, 10);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("continuous monitoring sends prior rounds as bounded conversation context", async () => {
   let received;
   const server = http.createServer(async (request, response) => {
