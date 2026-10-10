@@ -118,7 +118,7 @@ for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]
     assert.equal(await page.locator(".review-callout").count(), 0);
     assert.equal(await page.getByText("手动入场", { exact: true }).count(), 1);
     assert.match(await page.locator(".decision-safe").innerText(), /请在目标页点击买入订立入场按钮/);
-    assert.equal(await page.getByText("自动单笔上限 1").count(), 1);
+    assert.equal(await page.getByText("单笔下单量 1").count(), 1);
     assert.equal(await page.getByText(/测试数量/).count(), 0);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     const panel = page.locator(".decision-panel");
@@ -137,6 +137,30 @@ for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]
     await panel.locator(".decision-details > summary").click();
     await page.evaluate(() => { document.querySelector(".content-scroll").scrollTop = 0; window.scrollTo(0, 0); });
     await capture(page, `live-analysis-${width}-${height}`);
+  });
+}
+
+for (const [riskFlags, label, invalidation] of [
+  [["PROVIDER_NOT_READY"], "模型配置未就绪", "模型配置未就绪"],
+  [["EMPTY_MODEL_RESPONSE", "MODEL_OUTPUT_LIMIT"], "模型未返回结论", "模型达到输出额度上限，未返回完整结论；继续监控并重新分析"],
+  [["INVALID_MODEL_JSON"], "模型结果格式无效", "模型返回内容不是有效的决策 JSON；继续监控并重新分析"],
+  [["ANALYSIS_INCOMPLETE"], "模型分析未完成", "模型分析未完成"],
+]) {
+  test(`failed analysis shows ${label} without inventing probabilities`, async (t) => {
+    const { page, navigate } = await openPage(t);
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true, pendingAction: null });
+    Object.assign(task.decision, { action: "HOLD", confidence: 0, bullishProfitProbability: 0, bearishProfitProbability: 0, riskFlags, invalidation });
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await navigate();
+    await page.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+    const panel = page.locator(".decision-panel");
+    assert.equal(await panel.locator(".decision-action strong").innerText(), label);
+    assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["--", "--"]);
+    assert.equal(await panel.locator(".invalidation").innerText(), `失效条件：${invalidation}`);
+    assert.match(await panel.locator(".decision-action").innerText(), /未获得有效模型结果/);
+    assert.equal(await page.getByRole("alertdialog").count(), 0);
   });
 }
 
