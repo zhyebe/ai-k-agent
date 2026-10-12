@@ -19,11 +19,12 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
     assert.match(prompt, /User-configured entry quantity: 3/);
     assert.equal(JSON.parse(body.messages.at(-1).content).account.openOrders[0].orderId, "O-1");
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
-      order_assessments: [{ order_id: "O-1", decision: "CANCEL", reason: "entry price no longer favorable" }, { order_id: "O-2", decision: "KEEP" }] }) } }] }));
+      order_assessments: [{ order_id: "O-1", decision: "CANCEL", reason: "entry price no longer favorable", target_position_ids: ["P-1"] }, { order_id: "O-2", decision: "KEEP" }] }) } }] }));
   });
   const decision = await requestDecision({ apiKey: "test", baseUrl: "https://example.test", model: "fast" }, { account: { openOrders: [{ orderId: "O-1" }] }, strategy: { entryQuantity: 3 } }, { fastAnalysis: true });
   assert.deepEqual(decision.cancelOrderIds, ["O-1"]);
   assert.equal(decision.orderAssessments[1].decision, "KEEP");
+  assert.deepEqual(decision.orderAssessments[0].targetPositionIds, ["P-1"]);
   assert.equal(calls, 1);
   assert.deepEqual(buildConversationMessages({ recentRounds: [{ decision }] })[1] && JSON.parse(buildConversationMessages({ recentRounds: [{ decision }] })[1].content).cancelOrderIds, ["O-1"]);
 });
@@ -374,6 +375,37 @@ for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
     }
   });
 }
+
+test("AI EXIT_NOW缺少可执行离场动作时交还AI补全，不作为新入场执行", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    calls += 1;
+    const payload = JSON.parse(options.body);
+    if (calls === 2) assert.match(payload.messages.at(-1).content, /EXIT_NOW/);
+    const result = calls === 1
+      ? { action: "BUY", bullish_profit_probability: 0.6, holding_plan: { decision: "EXIT_NOW" } }
+      : { action: "SELL", exit_type: "STOP_LOSS", target_position_ids: ["P-1"], holding_plan: { decision: "EXIT_NOW" } };
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+  });
+  const result = await requestDecision(createProvider({ apiKey: "test", baseUrl: "https://provider.example.test", model: "demo" }), { account: { positions: [{ positionOrderId: "P-1", side: "买", quantity: 1 }] } });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "SELL");
+  assert.equal(result.exitType, "STOP_LOSS");
+});
+
+test("AI未补全EXIT_NOW时保留未完成证据，不把离场误作入场", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, holding_plan: { decision: "EXIT_NOW" } }) } }] }));
+  });
+  const result = await requestDecision(createProvider({ apiKey: "test", baseUrl: "https://provider.example.test", model: "demo" }), { account: { positions: [{ positionOrderId: "P-1", side: "买", quantity: 1 }] } });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "HOLD");
+  assert.equal(result.bullishProfitProbability, 0.6);
+  assert.ok(result.riskFlags.includes("INCOMPLETE_EXIT_PLAN"));
+  assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
+});
 
 test("owned providers with the same name, model and URL share an identity", () => {
   const first = { ownerUserId: "user_1", name: "gateway", model: "your-model", baseUrl: "https://gateway.example.test/" };

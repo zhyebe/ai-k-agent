@@ -443,6 +443,46 @@ test("持仓上下文提供持仓时长、浮动收益、峰值波动和回撤�
   assert.ok(pullbackContext.market.positions[0].maxFavorableExcursionPct > 2.4);
 });
 
+test("空仓回撤和峰值浮盈浮亏按真实方向提供给AI", () => {
+  const task = { market: {}, metrics: {}, rules: [], decision: { action: "HOLD" } };
+  const snapshot = (price) => ({ symbol: "A", latest: { price }, account: { positions: [{ positionOrderId: "P-short", symbol: "A", side: "卖", orderPrice: 100, quantity: 1 }] }, books: [{ symbol: "A", latest: { price } }], analysisLayers: { layers: [] } });
+  const contextAt = (price) => {
+    task.market = snapshot(price);
+    return buildDecisionContext(task, task.market, [], "monitor", task.market).account.positionContext[0];
+  };
+  assert.equal(contextAt(95).maxFavorableExcursionPct, 5);
+  const rebound = contextAt(97);
+  assert.equal(rebound.maxFavorableExcursionPct, 5);
+  assert.equal(rebound.maxAdverseExcursionPct, 0);
+  assert.equal(rebound.pullbackFromBestPct, 2);
+  const loss = contextAt(103);
+  assert.equal(loss.maxFavorableExcursionPct, 5);
+  assert.equal(loss.maxAdverseExcursionPct, -3);
+  assert.equal(loss.unrealizedPnlPct, -3);
+});
+
+test("中文持仓使用本盘报价，缺失本盘报价不混用其他盘价格", () => {
+  const market = { symbol: "A", symbolName: "甲商品", latest: { price: 200 }, account: { positions: [
+    { positionOrderId: "P-B", symbolName: "乙商品", side: "买", orderPrice: 100, quantity: 1 },
+    { positionOrderId: "P-C", symbolName: "丙商品", side: "卖", orderPrice: 100, quantity: 1 },
+    { positionOrderId: "P-B-short", symbolName: "乙商品", side: "卖", orderPrice: 100, quantity: 1 },
+  ] }, books: [{ symbol: "B", symbolName: "乙商品", latest: { price: 101 }, orderBook: { bids: [{ price: 99, volume: 2 }], asks: [{ price: 102, volume: 3 }] } }], analysisLayers: { layers: [] } };
+  const task = { market, metrics: {}, rules: [], decision: { action: "HOLD" } };
+  const context = buildDecisionContext(task, market, [], "monitor", market);
+  assert.equal(context.account.positionContext[0].currentPrice, 101);
+  assert.equal(context.account.positionContext[0].exitQuotePrice, 99);
+  assert.equal(context.account.positionContext[0].exitQuotePnlPct, -1);
+  assert.equal(context.account.positionContext[1].currentPrice, null);
+  assert.equal(context.account.positionContext[1].unrealizedPnlPct, null);
+  assert.equal(context.account.positionContext[1].exitQuotePrice, null);
+  assert.equal(context.account.positionContext[2].exitQuotePrice, 102);
+  assert.equal(context.account.positionContext[2].exitQuotePnlPct, -2);
+  market.books[0].orderBook.bids[0].price = 103;
+  const crossed = buildDecisionContext(task, market, [], "monitor", market);
+  assert.equal(crossed.account.positionContext[0].exitQuotePrice, null);
+  assert.equal(crossed.account.positionContext[2].exitQuotePrice, null);
+});
+
 test("多盘口方向性决策必须绑定一个受监控盘口", () => {
   const market = {
     books: [
@@ -817,6 +857,99 @@ test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场
     assert.equal(submitted, 1);
     assert.equal(task.status, "MONITORING");
     assert.equal(task.decision.orderCancellation.ok, false);
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
+
+test("AI立即离场先于无关撤单执行，慢撤单不拖延离场", async () => {
+  const task = insertNorthstarTask(`exit_first_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("exit-first", 99);
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-1", orderKind: "订立", remainingQuantity: 1 }] };
+  const actions = [];
+  try {
+    await runMonitoringCycle(task.id, { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-1"], riskFlags: [] }),
+      submitSuggestionForm: async () => { actions.push("exit"); return { ok: true, submitted: true }; },
+      cancelOpenOrders: async () => { actions.push("cancel"); assert.deepEqual(actions, ["exit", "cancel"]); return { ok: true, results: [{ orderId: "O-1", cancelled: true }] }; },
+    } });
+    assert.deepEqual(actions, ["exit", "cancel"]);
+    assert.equal(task.status, "MONITORING");
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
+
+for (const cancelled of [true, false]) {
+test(`AI${cancelled ? "撤销" : "未能撤销"}旧离场委托后${cancelled ? "立即提交新离场" : "保留原委托，不重复离场"}`, async () => {
+  const task = insertNorthstarTask(`replace_exit_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("replace-exit", 99);
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 2, frozenQuantity: 2, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-old", orderKind: "转让", remainingQuantity: 2, positionOrderId: "P-1" }] };
+  task.market = market;
+  task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], targetSymbol: "BTC/USDT", orderType: "LIMIT", targetPrice: 110 }), status: "AWAITING_FILL", source: "auto_timeout", entrustedOrderIds: ["O-old"] };
+  const actions = [];
+  try {
+    await runMonitoringCycle(task.id, { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-old"], riskFlags: [] }),
+      cancelOpenOrders: async () => { actions.push("cancel"); return { ok: cancelled, results: [{ orderId: "O-old", cancelled }] }; },
+      submitSuggestionForm: async (input) => { actions.push("exit"); assert.deepEqual(input.targetPositionIds, ["P-1"]); return { ok: true, submitted: true }; },
+    } });
+    assert.deepEqual(actions, cancelled ? ["cancel", "exit"] : ["cancel"]);
+    assert.equal(task.pendingAction.exitType, cancelled ? "STOP_LOSS" : "TAKE_PROFIT");
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
+}
+
+for (const autoDecisionEnabled of [false, true]) {
+test(`撤单失败后${autoDecisionEnabled ? "自动" : "手动"}模式持续交给AI分析并自动重试`, async () => {
+  const task = insertNorthstarTask(`retry_cancel_${autoDecisionEnabled}_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("retry-cancel", 100);
+  market.account = { availableFunds: 100, frozenFunds: 3000, openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1, frozenMargin: 3000 }] };
+  let rounds = 0;
+  let attempts = 0;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+    requestDecision: async (_provider, context) => {
+      rounds += 1;
+      assert.equal(context.account.frozenFunds, 3000);
+      return { action: "HOLD", orderAssessments: [{ orderId: "O-1", decision: "CANCEL", reason: "释放保证金更有利" }], riskFlags: [] };
+    },
+    cancelOpenOrders: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("page temporarily busy");
+      return { ok: true, results: [{ orderId: "O-1", cancelled: true }] };
+    },
+    submitSuggestionForm: async () => assert.fail("cancellation cannot submit an entry"),
+  };
+  try {
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(task.status, "MONITORING");
+    assert.equal(task.decision.orderCancellation.ok, false);
+    await runMonitoringCycle(task.id, { runtime });
+    assert.equal(rounds, 2);
+    assert.equal(attempts, 2);
+    assert.equal(task.decision.orderCancellation.ok, true);
+    assert.equal(task.status, "MONITORING");
+    assert.notEqual(task.pendingAction?.status, "WAITING");
+  } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+});
+}
+
+test("启动时已有转让委托，按AI关联的持仓先撤单再离场", async () => {
+  const task = insertNorthstarTask(`startup_transfer_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("startup-transfer", 99);
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, frozenQuantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-old", orderKind: "转让", remainingQuantity: 1 }] };
+  const actions = [];
+  try {
+    await runMonitoringCycle(task.id, { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], orderAssessments: [{ orderId: "O-old", decision: "CANCEL", targetPositionIds: ["P-1"] }], riskFlags: [] }),
+      cancelOpenOrders: async () => { actions.push("cancel"); return { ok: true, results: [{ orderId: "O-old", cancelled: true }] }; },
+      submitSuggestionForm: async () => { actions.push("exit"); return { ok: true, submitted: true }; },
+    } });
+    assert.deepEqual(actions, ["cancel", "exit"]);
   } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
 });
 

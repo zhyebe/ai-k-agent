@@ -70,9 +70,8 @@ async function findOrderRow(page, orderId) {
   return found ? page.locator(`[data-axiom-cancel-order='${token}']`) : null;
 }
 
-export async function clickOrderCancellation(page, orderId) {
-  if (!await activateCurrentOrders(page)) return { clicked: false, code: "ORDER_TABLE_UNVERIFIED" };
-  // Search all current-order pages before concluding the order already filled/disappeared.
+async function findOrderOnAllPages(page, orderId) {
+  // Search from page one before concluding an order filled/disappeared.
   const previousPages = new Set();
   while (true) {
     const marker = await paginationText(page);
@@ -88,6 +87,12 @@ export async function clickOrderCancellation(page, orderId) {
     row = await findOrderRow(page, orderId);
     if (row) break;
   } while (await turnOrderPage(page, "next"));
+  return row;
+}
+
+export async function clickOrderCancellation(page, orderId) {
+  if (!await activateCurrentOrders(page)) return { clicked: false, code: "ORDER_TABLE_UNVERIFIED" };
+  let row = await findOrderOnAllPages(page, orderId);
   if (!row) return { clicked: false, code: "ORDER_NO_LONGER_OPEN" };
   const active = await row.evaluate((node) => {
     const table = node.closest(".el-table") || node.closest("table, [role='table']");
@@ -115,7 +120,7 @@ export async function clickOrderCancellation(page, orderId) {
 export async function readHistoricalOrderStatus(page, orderId) {
   if (!await activateTradeControl(page, "历史委托")) return "";
   await page.waitForFunction(() => [...document.querySelectorAll("th")].some((node) => node.textContent.trim() === "委托单号" && node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).catch(() => {});
-  const row = await findOrderRow(page, orderId);
+  const row = await findOrderOnAllPages(page, orderId);
   if (!row) return "";
   return row.evaluate((node) => {
     const table = node.closest(".el-table") || node.closest("table, [role='table']");

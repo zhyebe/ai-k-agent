@@ -31,9 +31,9 @@ function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function labeledValue(text, labels) {
+function labeledValue(text, labels, standalone = false) {
   for (const label of labels) {
-    const match = String(text || "").match(new RegExp(`${escapeRegExp(label)}\\s*[:：]?\\s*(--|[-+]?\\d[\\d,]*(?:\\.\\d+)?)\\s*(万|元|%)?`, "i"));
+    const match = String(text || "").match(new RegExp(`${standalone ? "(?:^|\\s)" : ""}${escapeRegExp(label)}\\s*[:：]?\\s*(--|[-+]?\\d[\\d,]*(?:\\.\\d+)?)\\s*(万|元|%)?`, "i"));
     if (!match || match[1] === "--") continue;
     const parsed = finiteNumber(match[1]);
     if (parsed === null) continue;
@@ -502,6 +502,13 @@ export function parseHaohanOpenOrders(tables = []) {
     const header = table.rows?.find((row) => row.some((cell) => String(cell).trim() === "委托单号"));
     if (!header) continue;
     const at = (row, label) => String(row[header.findIndex((cell) => String(cell).trim() === label)] ?? "").trim();
+    const amountAt = (row, labels) => {
+      for (const label of labels) {
+        const amount = tableNumber(at(row, label));
+        if (amount !== null) return amount;
+      }
+      return null;
+    };
     for (const row of table.rows.slice(table.rows.indexOf(header) + 1)) {
       if (/暂无数据|合计/.test(row.join(" "))) continue;
       const orderId = at(row, "委托单号");
@@ -512,7 +519,11 @@ export function parseHaohanOpenOrders(tables = []) {
       orders.push({ orderId, symbol: at(row, "商品代码") || symbolName.match(/^([A-Z][A-Z0-9_.-]{1,24})(?:\s+|$)/)?.[1] || "", symbolName,
         side: at(row, "买 | 卖") || at(row, "买|卖"), orderPrice: tableNumber(at(row, "委托价格")),
         orderKind: at(row, "订立 | 转让"), quantity: tableNumber(at(row, "委托数量")),
-        filledQuantity: tableNumber(at(row, "已成交数量")), remainingQuantity, status, orderTime: at(row, "委托时间") });
+        filledQuantity: tableNumber(at(row, "已成交数量")), remainingQuantity, status, orderTime: at(row, "委托时间"),
+        positionOrderId: at(row, "持仓单号"),
+        frozenFunds: amountAt(row, ["冻结资金"]),
+        frozenMargin: amountAt(row, ["冻结保证金", "冻结订金"]),
+        orderDeposit: amountAt(row, ["委托订金", "委托保证金", "订金", "保证金"]) });
     }
   }
   return orders.filter((order, index) => orders.findIndex((item) => item.orderId === order.orderId) === index);
@@ -542,7 +553,10 @@ export function parseHaohanAccount(visibleText, tables = []) {
     realtimeValueChange: round(realtimeValueChange, 2),
     valueChange: round(valueChange, 2),
     maxOrderQty: round(labeledValue(visibleText, ["最大下单量"]), 4),
-    deposit: round(labeledValue(visibleText, ["订金"]), 2),
+    deposit: round(labeledValue(visibleText, ["订金"], true), 2),
+    frozenFunds: round(labeledValue(visibleText, ["冻结资金"]), 2),
+    frozenMargin: round(labeledValue(visibleText, ["冻结保证金", "冻结订金"]), 2),
+    positionDeposit: round(labeledValue(visibleText, ["持仓订金", "存货订金", "持仓保证金"]), 2),
     positionEmpty,
     positionsVerified,
     positions,

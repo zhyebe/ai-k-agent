@@ -82,6 +82,53 @@ test("missing exact order never cancels an order with a similar ID", async () =>
   assert.deepEqual(await page.evaluate(() => window.cancelled), []);
 });
 
+test("unfinished cancellation dialog is dismissed automatically and a later attempt can complete", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    window.cancelObserver = new MutationObserver(() => {
+      const box = document.querySelector(".el-dialog");
+      if (!box || box.dataset.testDisabled) return;
+      box.dataset.testDisabled = "1";
+      box.querySelector("button").disabled = true;
+      box.querySelectorAll("button")[1].onclick = () => box.remove();
+    });
+    window.cancelObserver.observe(document.body, { childList: true });
+  });
+  const first = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(first.results[0].cancelled, false);
+  assert.equal(await page.locator(".el-dialog:visible").count(), 0);
+  assert.deepEqual(await page.evaluate(() => window.cancelled), []);
+  await page.evaluate(() => window.cancelObserver.disconnect());
+  const second = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(second.results[0].cancelled, true);
+});
+
+test("silent cancellation is verified across historical-order pages", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    window.silentCancellation = true;
+    const history = document.querySelector("#history");
+    const pagination = document.createElement("div");
+    pagination.className = "el-pagination";
+    pagination.innerHTML = '<button class="btn-prev" disabled>previous</button><ul class="el-pager"><li class="number active">1</li><li class="number">2</li></ul><button class="btn-next">next</button>';
+    history.append(pagination);
+    const storage = document.createElement("tbody");
+    let current = 1;
+    const render = () => {
+      if (current === 1) storage.append(...history.querySelectorAll("tbody tr"));
+      else history.querySelector("tbody").append(...storage.children);
+      pagination.querySelector(".btn-prev").disabled = current === 1;
+      pagination.querySelector(".btn-next").disabled = current === 2;
+      [...pagination.querySelectorAll("li")].forEach((node, index) => node.classList.toggle("active", index === current - 1));
+    };
+    new MutationObserver(() => { if (current === 1 && history.querySelector("tbody tr")) render(); }).observe(history.querySelector("tbody"), { childList: true });
+    pagination.querySelector(".btn-next").onclick = () => { current = 2; render(); };
+    pagination.querySelector(".btn-prev").onclick = () => { current = 1; render(); };
+  });
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+});
+
 test("current-order pagination collects every page and locates cancellation by ID", async () => {
   await page.reload();
   await page.evaluate(() => {

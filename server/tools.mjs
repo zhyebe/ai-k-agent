@@ -6,7 +6,7 @@ import { URL } from "node:url";
 import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
 import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
 import { getCredential, initVault } from "./vault.mjs";
-import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
+import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 
 function valuesFromEnv(name, fallback) {
@@ -579,6 +579,8 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
     } finally {
       response.dispose();
       page.off("dialog", nativeDialog);
+      // A failed confirmation must not leave a modal blocking the next automatic round.
+      await dismissOrderCancellationDialogs(page).catch(() => {});
     }
   }
   await activateCurrentOrders(page);

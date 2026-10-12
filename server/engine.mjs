@@ -10,6 +10,7 @@ import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getCo
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities } from "./entry-policy.mjs";
+import { summarizeOrderBook } from "./order-book.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -136,21 +137,11 @@ function parsePositionTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function positionMarketPrice(market, position) {
-  const symbol = String(position?.symbol || "").trim().toLowerCase();
-  const instrumentId = String(position?.instrumentId || "").trim().toLowerCase();
-  const book = (Array.isArray(market?.books) ? market.books : []).find((item) => {
-    const itemSymbol = String(item?.symbol || "").trim().toLowerCase();
-    const itemInstrumentId = String(item?.instrumentId || "").trim().toLowerCase();
-    return (symbol && itemSymbol === symbol) || (instrumentId && itemInstrumentId === instrumentId);
-  });
-  const primarySymbol = String(market?.symbol || "").trim().toLowerCase();
-  const primaryInstrumentId = String(market?.instrumentId || "").trim().toLowerCase();
-  const matchesPrimary = (!symbol && !instrumentId)
-    || (symbol && primarySymbol === symbol)
-    || (instrumentId && primaryInstrumentId === instrumentId);
-  const value = Number(book?.latest?.price ?? book?.quote?.price ?? (matchesPrimary ? market?.latest?.price ?? market?.quote?.price : null));
-  return Number.isFinite(value) && value > 0 ? value : null;
+function positionMarketSnapshot(market, position) {
+  const targets = normalizedInstrumentValues(position);
+  const matches = (book) => normalizedInstrumentValues(book).some((value) => targets.includes(value));
+  return (Array.isArray(market?.books) ? market.books : []).find(matches)
+    || (matches(market) ? market : null);
 }
 
 function positionTrackingKey(position, index) {
@@ -165,7 +156,12 @@ function updatePositionTracking(task, market, now = Date.now()) {
     const key = positionTrackingKey(position, index);
     const direction = positionDirection(position);
     const entryPrice = Number(position?.orderPrice);
-    const currentPrice = positionMarketPrice(market, position);
+    const snapshot = positionMarketSnapshot(market, position);
+    const price = Number(snapshot?.latest?.price ?? snapshot?.quote?.price);
+    const currentPrice = Number.isFinite(price) && price > 0 ? price : null;
+    const orderBook = summarizeOrderBook(snapshot?.orderBook || snapshot?.pageView?.orderBook);
+    const exitQuote = orderBook.status === "CROSSED" ? null : direction === "LONG" ? orderBook.bids[0] : direction === "SHORT" ? orderBook.asks[0] : null;
+    const exitQuotePrice = exitQuote?.volume > 0 ? exitQuote.price : null;
     const prior = previous[key] || {};
     const orderTimeMs = parsePositionTimestamp(position?.orderTime);
     const firstObservedAt = prior.firstObservedAt || (orderTimeMs ? new Date(orderTimeMs).toISOString() : new Date(now).toISOString());
@@ -179,9 +175,9 @@ function updatePositionTracking(task, market, now = Date.now()) {
     const knownDirection = direction === "LONG" || direction === "SHORT";
     const unrealizedPnlPct = validPrices && knownDirection ? (direction === "SHORT" ? (entryPrice - currentPrice) : (currentPrice - entryPrice)) / entryPrice * 100 : null;
     const maxFavorableExcursionPct = knownDirection && entryPrice > 0 && updatedBest > 0 && updatedWorst > 0
-      ? (direction === "SHORT" ? (entryPrice - updatedWorst) : (updatedBest - entryPrice)) / entryPrice * 100 : null;
+      ? Math.max(0, direction === "SHORT" ? (entryPrice - updatedBest) : (updatedBest - entryPrice)) / entryPrice * 100 : null;
     const maxAdverseExcursionPct = knownDirection && entryPrice > 0 && updatedBest > 0 && updatedWorst > 0
-      ? Math.min(0, (direction === "SHORT" ? (entryPrice - updatedBest) : (updatedWorst - entryPrice)) / entryPrice * 100) : null;
+      ? Math.min(0, (direction === "SHORT" ? (entryPrice - updatedWorst) : (updatedWorst - entryPrice)) / entryPrice * 100) : null;
     const pullbackFromBestPct = validPrices && knownDirection && updatedBest > 0
       ? (direction === "SHORT" ? (currentPrice - updatedBest) : (updatedBest - currentPrice)) / entryPrice * 100 : null;
     const firstObservedMs = new Date(firstObservedAt).getTime();
@@ -194,6 +190,10 @@ function updatePositionTracking(task, market, now = Date.now()) {
       quantity: Number(position?.quantity || 0),
       entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
       currentPrice,
+      exitQuotePrice,
+      exitQuoteQuantity: exitQuotePrice === null ? null : exitQuote.volume,
+      exitQuotePnlPct: entryPrice > 0 && exitQuotePrice > 0
+        ? Number(((direction === "SHORT" ? entryPrice - exitQuotePrice : exitQuotePrice - entryPrice) / entryPrice * 100).toFixed(4)) : null,
       orderTime: position?.orderTime || null,
       firstObservedAt,
       holdingDurationSec,
@@ -2027,7 +2027,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
     decision = bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(applyEntryBoundary(enforceProfitProbability(decision), market), market)), market);
-    decision = executableExitDecision(task, decision);
     const targetBook = decisionTargetBook(decision, market);
     if (targetBook) qualityIssues = marketQualityIssues(targetBook);
     if (market.boardCoverage?.complete === false) qualityIssues = [...new Set([...qualityIssues, "BOARD_COVERAGE_INCOMPLETE"])];
@@ -2115,21 +2114,27 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const keepOrderIds = new Set((task.decision.orderAssessments || []).filter((item) => item.decision === "KEEP").map((item) => item.orderId));
     const cancelOrderIds = [...new Set([...(task.decision.cancelOrderIds || []), ...(task.decision.orderAssessments || []).filter((item) => item.decision === "CANCEL").map((item) => item.orderId)])]
       .filter((id) => liveOrderIds.has(id) && !keepOrderIds.has(id));
-    if (liveExecution && isTradingSwitchOn() && cancelOrderIds.length) {
+    const cancelAssessedOrders = async (orderIds) => {
+      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length) return;
       const cancellationAbort = new AbortController();
-      pendingSubmissionCancels.set(task.id, cancellationAbort);
+      const cancelSubmission = () => cancellationAbort.abort(new Error("ORDER_CANCEL_ABORTED"));
+      pendingSubmissionCancels.set(task.id, cancelSubmission);
+      let cancellation;
       try {
-        task.decision.orderCancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds: cancelOrderIds }, { signal: cancellationAbort.signal });
+        cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: cancellationAbort.signal });
       } catch (error) {
-        task.decision.orderCancellation = { ok: false, results: cancelOrderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message })) };
+        cancellation = { ok: false, results: orderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message })) };
       } finally {
-        if (pendingSubmissionCancels.get(task.id) === cancellationAbort) pendingSubmissionCancels.delete(task.id);
+        if (pendingSubmissionCancels.get(task.id) === cancelSubmission) pendingSubmissionCancels.delete(task.id);
       }
       assertCurrent();
-      for (const result of task.decision.orderCancellation.results || []) {
+      const results = cancellation.results || [];
+      const allResults = [...(task.decision.orderCancellation?.results || []), ...results];
+      task.decision.orderCancellation = { ...cancellation, results: allResults, ok: allResults.length > 0 && allResults.every((result) => result.cancelled) };
+      for (const result of results) {
         appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "order", message: result.cancelled ? `委托 ${result.orderId} 已撤销剩余未成交数量` : `委托 ${result.orderId} 撤销结果：${result.message || result.code}，继续监控`, data: result });
       }
-      const cancelledIds = new Set((task.decision.orderCancellation.results || []).filter((result) => result.cancelled).map((result) => result.orderId));
+      const cancelledIds = new Set(allResults.filter((result) => result.cancelled).map((result) => result.orderId));
       for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean)) {
         if (!["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || !pending.entrustedOrderIds?.length || !pending.entrustedOrderIds.every((id) => cancelledIds.has(id))) continue;
         pending.status = "CANCELLED";
@@ -2138,7 +2143,16 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         recordConfirmedOrder(task, pending, { status: "cancelled_remainder", submitted: true, source: "ai_cancel", message: pending.message });
       }
       task.unsettledActions = (task.unsettledActions || []).filter((pending) => pending.status !== "CANCELLED");
-    }
+    };
+    // Only AI-selected cancellations needed to release this exit's frozen quantity go first.
+    // All other cancellations follow the urgent exit; never operate the same browser in parallel.
+    const exitTargets = new Set(task.decision.exitType ? task.decision.targetPositionIds : []);
+    const priorExitOrderIds = new Set(unsettledActions(task).filter((pending) => pending.exitType && pending.targetPositionIds?.some((id) => exitTargets.has(id))).flatMap((pending) => pending.entrustedOrderIds || []));
+    const prerequisiteCancels = cancelOrderIds.filter((id) => priorExitOrderIds.has(id)
+      || market.account?.openOrders?.some((order) => order.orderId === id && /转让/.test(order.orderKind)
+        && (exitTargets.has(order.positionOrderId) || task.decision.orderAssessments?.some((assessment) => assessment.orderId === id && assessment.targetPositionIds?.some((positionId) => exitTargets.has(positionId))))));
+    await cancelAssessedOrders(task.decision.exitType ? prerequisiteCancels : cancelOrderIds);
+    task.decision = executableExitDecision(task, task.decision);
     const duplicateExit = Boolean(task.decision.exitType) && task.decision.targetPositionIds.length === 0;
     const previousEntryKWindow = task.pendingAction && !task.pendingAction.exitType
       ? (["CANCELLED", "REJECTED"].includes(task.pendingAction.status) ? (task.pendingAction.entrustedOrderIds?.length ? task.lastEntryKWindow : null) : task.pendingAction.entryKWindow || (task.pendingAction.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null))
@@ -2162,6 +2176,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     } else if (!duplicateExit && !sameKEntry) {
       clearPendingAction(task, { persist: false });
     }
+    if (task.decision.exitType) await cancelAssessedOrders(cancelOrderIds.filter((id) => !prerequisiteCancels.includes(id)));
     if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const waiting = task.pendingAction?.status === "WAITING";

@@ -16,7 +16,32 @@ import {
   resolveBoardInstruments,
   resolveObservedHaohanSymbol,
 } from "../server/market.mjs";
-import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanPageSnapshot, parseHaohanPositions, uniqueBoardAssessments, uniquePageInstruments } from "../server/haohan.mjs";
+import { extractHaohanPageInstrument, instrumentFromMarketDetail, normalizeHqChartCandle, parseHaohanAccount, parseHaohanPageSnapshot, parseHaohanPositions, uniqueBoardAssessments, uniquePageInstruments } from "../server/haohan.mjs";
+
+test("账户和委托保证金保持独立，部分成交只报告已知冻结资金", () => {
+  const tables = [{ kind: "currentOrders", rows: [
+    ["委托单号", "商品名称", "委托价格", "委托数量", "已成交数量", "未成交数量", "状态", "冻结保证金", "委托订金", "持仓单号"],
+    ["O-1", "甲商品", "100", "3", "1", "2", "部分成交", "2,000元", "3000", "P-1"],
+    ["O-2", "乙商品", "200", "1", "0", "1", "已委托", "--", "--", ""],
+  ] }];
+  const account = parseHaohanAccount("可用资金 500元\n冻结资金 2500元\n冻结保证金 2000元\n持仓订金 1000元", tables);
+  assert.equal(account.availableFunds, 500);
+  assert.equal(account.frozenFunds, 2500);
+  assert.equal(account.frozenMargin, 2000);
+  assert.equal(account.positionDeposit, 1000);
+  assert.equal(account.deposit, null);
+  assert.equal(account.openOrders[0].frozenMargin, 2000);
+  assert.equal(account.openOrders[0].orderDeposit, 3000);
+  assert.equal(account.openOrders[0].positionOrderId, "P-1");
+  assert.equal(account.openOrders[1].frozenMargin, null);
+  const unknown = parseHaohanAccount("可用资金 500元\n存货订金 3000元");
+  assert.equal(unknown.deposit, null);
+  assert.equal(unknown.frozenFunds, null);
+  assert.equal(unknown.frozenMargin, null);
+  assert.equal(parseHaohanAccount("订金：3000元").deposit, 3000);
+  const snapshot = { symbol: "A", account };
+  assert.notEqual(marketDataFingerprint(snapshot), marketDataFingerprint({ ...snapshot, account: { ...account, frozenFunds: 2600 } }));
+});
 
 test("持仓明细解析止盈止损价和持仓单号", () => {
   const positions = parseHaohanPositions([{ rows: [

@@ -181,6 +181,11 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       await page.waitForTimeout(150);
     }
     if (finished()) return { ok: true, confirmed };
+    if (cancelOrder && confirmed) {
+      const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
+      // History/current orders verify the outcome; do not wait for a toast after the modal closes.
+      if (!dialogs.some((text) => /撤单|撤销.*委托/.test(text))) return { ok: true, confirmed };
+    }
     const hint = await page.locator(".el-message:visible, .el-notification__content:visible").evaluateAll((nodes, token) => nodes
       .filter((node) => !token || node.dataset.axiomNoticeBaseline !== token || node.dataset.axiomNoticeText !== String(node.textContent || "").trim())
       .map((node) => node.textContent || ""), baselineToken);
@@ -188,4 +193,13 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   return { ok: !exitType || confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : "TRADE_DIALOG_NOT_CONFIRMED" };
+}
+
+export async function dismissOrderCancellationDialogs(page) {
+  for (const box of await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").all()) {
+    const text = (await box.innerText()).replace(/\s+/g, "");
+    if (!/撤单|撤销.*委托/.test(text) || /所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
+    const control = await findControl(box, ["取消", "关闭"]);
+    if (control && !await control.isDisabled()) await control.click({ timeout: 1500 });
+  }
 }
