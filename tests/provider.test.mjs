@@ -46,7 +46,7 @@ test("live fast analysis disables official DeepSeek thinking without changing th
   assert.equal(bodies.length, 2);
 });
 
-test("Step 5 fast analysis sends the official low effort and reserves output for the final JSON", async (t) => {
+test("Step 5 live analysis uses high effort and the model's full output allowance", async (t) => {
   const requests = [];
   const final = { action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: "SYNTHETIC" };
   t.mock.method(globalThis, "fetch", async (_url, options) => {
@@ -63,16 +63,32 @@ test("Step 5 fast analysis sends the official low effort and reserves output for
     assert.equal(result.action, "BUY");
     assert.equal(result.bullishProfitProbability, 0.6);
   }
-  assert.equal(requests[0].reasoning_effort, "low");
-  assert.deepEqual(requests[1].output_config, { effort: "low" });
-  assert.equal(requests[0].max_tokens, 8192);
-  assert.equal(requests[1].max_tokens, 8192);
+  assert.equal(requests[0].reasoning_effort, "high");
+  assert.deepEqual(requests[1].output_config, { effort: "high" });
+  assert.equal(requests[0].max_tokens, 65536);
+  assert.equal(requests[1].max_tokens, 65536);
   await requestDecision({ ...provider, baseUrl: "https://api.stepfun.com/step_plan/v1/messages", apiFormat: "anthropic" }, {}, { fastAnalysis: true, maxOutputTokens: 6000 });
   assert.equal(requests[2].max_tokens, 6000);
   for (const baseUrl of ["https://api.stepfun.com/step_plan/v1/messages", "https://gateway.example.test/messages"]) {
     await requestDecision({ ...provider, baseUrl, apiFormat: "anthropic" }, {}, { fastAnalysis: baseUrl.includes("gateway") });
     assert.equal(requests.at(-1).output_config, undefined);
     assert.equal(requests.at(-1).max_tokens, 4096);
+  }
+});
+
+test("Step 5 output overrides above 8192 survive both APIs and respect the model limit", async (t) => {
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3 }) }], stop_reason: "end_turn" }));
+  });
+  for (const apiFormat of ["chat", "anthropic"]) {
+    const provider = { apiKey: "test", model: "step-5-preview", fullUrlMode: true, apiFormat,
+      baseUrl: `https://api.stepfun.com/step_plan/v1/${apiFormat === "chat" ? "chat/completions" : "messages"}` };
+    for (const [maxOutputTokens, expected] of [[32768, 32768], [100000, 65536], [-1, 1]]) {
+      await requestDecision(provider, {}, { fastAnalysis: true, maxOutputTokens });
+      assert.equal(requests.at(-1).max_tokens, expected);
+    }
   }
 });
 

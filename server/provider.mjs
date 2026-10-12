@@ -190,7 +190,7 @@ function chatCompletionsBody(provider, messages, options = {}) {
     messages,
     // DeepSeek defaults to high-effort thinking; live decisions use its documented fast mode.
     ...(options.fastAnalysis === true && officialDeepSeek ? { thinking: { type: "disabled" } } : {}),
-    ...(fastStepFive ? { reasoning_effort: "low", max_tokens: Number(options.maxOutputTokens) || 8192 } : {}),
+    ...(fastStepFive ? { reasoning_effort: "high", max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 65536)) } : {}),
   };
 }
 
@@ -214,8 +214,8 @@ function anthropicBody(provider, messages, options = {}) {
   const fastStepFive = options.fastAnalysis === true && isOfficialStepFive(provider);
   return {
     model: provider.model,
-    max_tokens: Math.min(8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 8192 : 4096))),
-    ...(fastStepFive ? { output_config: { effort: "low" } } : {}),
+    max_tokens: Math.min(fastStepFive ? 65536 : 8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 65536 : 4096))),
+    ...(fastStepFive ? { output_config: { effort: "high" } } : {}),
     ...(system ? { system } : {}),
     messages: messages
       .filter((message) => message.role !== "system")
