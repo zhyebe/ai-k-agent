@@ -887,8 +887,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
         assert.equal(task.pendingAction.status, "AWAITING_FILL");
         assert.ok(task.nextPollAt);
         assert.equal(state.agentOutput.find((line) => line.runId === failure.run.id && line.kind === "decision").data.modelDiagnostics.jsonStatus, "INVALID_JSON");
+        assert.equal(task.lastModelFailure.runId, failure.run.id);
+        assert.equal(task.lastModelFailure.recovered, false);
+        assert.equal(task.lastModelFailure.modelDiagnostics.jsonError, "TRUNCATED_JSON");
         phase = 1;
         await runMonitoringCycle(task.id, { runtime });
+        assert.equal(task.lastModelFailure.runId, failure.run.id);
         assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
         assert.equal(task.pendingAction.decisionRunId, task.decision.runId);
         assert.equal(filled.length, autoDecisionEnabled ? 0 : 1);
@@ -902,13 +906,42 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
         phase = 3;
         await runMonitoringCycle(task.id, { runtime });
         assert.deepEqual(cancelled, [["O-cancel"]]);
-        assert.equal(requests, 4);
+        assert.equal(requests, 5);
         assert.equal(task.status, "MONITORING");
         assert.equal(task.decision.riskFlags.includes("HUMAN_REVIEW_REQUIRED"), false);
       } finally { stopController(task.id); state.tasks = state.tasks.filter((item) => item.id !== task.id); }
     });
   }
 }
+
+test("JSON格式纠正成功后只执行纠正决策一次，并记录恢复诊断", async (t) => {
+  const task = insertNorthstarTask(`json_correction_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("json-correction", 103);
+  market.account = { positionsVerified: true, openOrdersVerified: true, positions: [], openOrders: [] };
+  const provider = { apiKey: "synthetic-key", baseUrl: "https://provider.example.test", model: "same-model", apiFormat: "anthropic" };
+  let requests = 0;
+  const submitted = [];
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ content: [{ type: "text", text: requests++ === 0
+    ? '{"action":"SELL","cancel_order_ids":["untrusted-order"],'
+    : JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol }) }], stop_reason: "end_turn" })));
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => market,
+    requestDecision: async (_provider, context, options) => requestDecision(provider, context, options),
+    submitSuggestionForm: async (input) => { submitted.push(input); return { ok: true, filled: true, submitted: true }; },
+    cancelOpenOrders: async () => assert.fail("partial invalid cancellation must never execute"),
+  };
+  try {
+    const result = await runMonitoringCycle(task.id, { runtime });
+    assert.equal(result.run.status, "completed");
+    assert.equal(requests, 2);
+    assert.equal(submitted.length, 1);
+    assert.equal(submitted[0].action, "BUY");
+    assert.equal(task.lastModelFailure.recovered, true);
+    assert.deepEqual(task.lastModelFailure.modelDiagnostics.attempts.map(item => item.jsonStatus), ["INVALID_JSON", "COMPLETE_JSON"]);
+  } finally { stopController(task.id); state.tasks = state.tasks.filter(item => item.id !== task.id); }
+});
 
 test("AI KEEP does not invoke cancellation", async () => {
   const task = insertNorthstarTask(`keep_order_${Date.now()}`);

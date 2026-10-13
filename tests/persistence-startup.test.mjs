@@ -48,6 +48,22 @@ test("MongoDB startup keeps stored experience including legacy identifiers", asy
   await adapter.close();
 });
 
+test("MySQL loads the last model failure independently of a later successful decision", async (t) => {
+  databaseMode(t, "mysql");
+  const lastModelFailure = { runId: "failed-run", code: "INVALID_MODEL_JSON", recovered: false, modelDiagnostics: { jsonStatus: "INVALID_JSON", jsonError: "TRUNCATED_JSON" } };
+  const runtime = { decision: { action: "BUY" }, lastModelFailure };
+  mysqlPool = {
+    query: async sql => [/^SELECT \* FROM tasks$/.test(sql) ? [{ id: "task", runtime_json: JSON.stringify(runtime), target_json: "{}" }] : []],
+    execute: async () => [[]],
+    end: async () => {},
+  };
+  const adapter = await createPersistence();
+  const snapshot = await adapter.loadState();
+  assert.equal(snapshot.tasks[0].decision.action, "BUY");
+  assert.deepEqual(snapshot.tasks[0].lastModelFailure, lastModelFailure);
+  await adapter.close();
+});
+
 test("MySQL removes the legacy skill-owner cascade and keeps knowledge when deleting an account", async (t) => {
   databaseMode(t, "mysql");
   const statements = [];

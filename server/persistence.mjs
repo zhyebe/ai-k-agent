@@ -70,19 +70,27 @@ function compactPersistedMarket(market) {
   };
 }
 
+function compactModelDiagnostics(value, includeAttempts = true) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    wireApi: value.wireApi,
+    jsonStatus: value.jsonStatus,
+    contentTypes: value.contentTypes,
+    stopReason: value.stopReason,
+    textLength: value.textLength,
+    contentHash: value.contentHash,
+    ...(value.jsonError !== undefined ? { jsonError: value.jsonError } : {}),
+    ...(value.retryError ? { retryError: value.retryError } : {}),
+    ...(includeAttempts && Array.isArray(value.attempts) ? { attempts: value.attempts.slice(0, 2).map(item => compactModelDiagnostics(item, false)) } : {}),
+  };
+}
+
 function compactPersistedDecision(decision) {
   if (!decision || typeof decision !== "object") return decision;
   return {
     action: decision.action || "HOLD",
     runId: decision.runId || null,
-    modelDiagnostics: decision.modelDiagnostics ? {
-      wireApi: decision.modelDiagnostics.wireApi,
-      jsonStatus: decision.modelDiagnostics.jsonStatus,
-      contentTypes: decision.modelDiagnostics.contentTypes,
-      stopReason: decision.modelDiagnostics.stopReason,
-      textLength: decision.modelDiagnostics.textLength,
-      contentHash: decision.modelDiagnostics.contentHash,
-    } : null,
+    modelDiagnostics: compactModelDiagnostics(decision.modelDiagnostics),
     orderAssessments: decision.orderAssessments || [],
     cancelOrderIds: decision.cancelOrderIds || [],
     orderCancellation: decision.orderCancellation || null,
@@ -147,6 +155,14 @@ export function compactTaskRuntime(task = {}) {
     metrics: task.metrics || null,
     nextTrigger: task.nextTrigger || "",
     lastAnalysisAt: task.lastAnalysisAt || null,
+    lastModelFailure: task.lastModelFailure ? {
+      runId: task.lastModelFailure.runId,
+      providerId: task.lastModelFailure.providerId,
+      createdAt: task.lastModelFailure.createdAt,
+      code: task.lastModelFailure.code,
+      recovered: task.lastModelFailure.recovered === true,
+      modelDiagnostics: compactModelDiagnostics(task.lastModelFailure.modelDiagnostics),
+    } : null,
     heartbeatAt: task.heartbeatAt || null,
     leaseExpiresAt: task.leaseExpiresAt || null,
     monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : task.monitoringEnabled === true,
@@ -658,6 +674,7 @@ async function createMySqlAdapter() {
             metrics: runtime.metrics || { equity: 0, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
             nextTrigger: runtime.nextTrigger || "等待触发",
             lastAnalysisAt: runtime.lastAnalysisAt || null,
+            lastModelFailure: runtime.lastModelFailure || null,
             lastHeartbeatEventAt: runtime.lastHeartbeatEventAt || null,
             heartbeatAt: runtime.heartbeatAt,
             leaseExpiresAt: runtime.leaseExpiresAt,

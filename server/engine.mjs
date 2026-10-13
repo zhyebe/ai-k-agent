@@ -2052,6 +2052,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
     task.decision = { ...decision, runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
+    const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && item.jsonStatus !== "COMPLETE_JSON");
+    if (modelFailure) task.lastModelFailure = {
+      runId: run.id, providerId: provider?.id || task.providerId || "", createdAt: task.decision.createdAt,
+      code: modelFailure.jsonStatus === "EMPTY_TEXT" ? "EMPTY_MODEL_RESPONSE" : "INVALID_MODEL_JSON",
+      recovered: providerSucceeded, modelDiagnostics: decision.modelDiagnostics,
+    };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
     completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`);
     appendAgentOutput({

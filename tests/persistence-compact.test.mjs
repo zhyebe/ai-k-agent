@@ -24,6 +24,21 @@ test("MySQL runtime retains configured quantity and cancellation evidence", () =
   assert.deepEqual(restored.decision.cancelOrderIds, ["O-1"]);
 });
 
+test("last model failure survives successful rounds and restart with both sanitized attempts", () => {
+  const failed = { wireApi: "anthropic", jsonStatus: "INVALID_JSON", jsonError: "TRUNCATED_JSON", contentTypes: ["text"], stopReason: "end_turn", textLength: 22, contentHash: "a".repeat(64) };
+  const complete = { ...failed, jsonStatus: "COMPLETE_JSON", jsonError: "", contentHash: "b".repeat(64) };
+  const runtime = compactTaskRuntime({
+    decision: { action: "SELL", modelDiagnostics: complete },
+    lastModelFailure: { runId: "failure-run", providerId: "same-provider", createdAt: "2026-10-13T06:44:44Z", code: "INVALID_MODEL_JSON", recovered: true, modelDiagnostics: { ...complete, rawOutput: "private final text", attempts: [{ ...failed, reasoning: "private reasoning" }, { ...complete, rawOutput: "private corrected text" }] } },
+  });
+  const restored = compactTaskRuntime(JSON.parse(JSON.stringify(runtime)));
+  assert.equal(restored.lastModelFailure.runId, "failure-run");
+  assert.equal(restored.lastModelFailure.recovered, true);
+  assert.deepEqual(restored.lastModelFailure.modelDiagnostics.attempts, [failed, complete]);
+  assert.equal(restored.decision.modelDiagnostics.jsonStatus, "COMPLETE_JSON");
+  assert.doesNotMatch(JSON.stringify(restored), /private/);
+});
+
 test("LIVE persistence preserves the selected entry mode", () => {
   for (const enabled of [false, true]) {
     assert.equal(compactTaskRuntime({ mode: "LIVE", autoDecisionEnabled: enabled }).autoDecisionEnabled, enabled);

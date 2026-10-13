@@ -540,8 +540,11 @@ function normalizeDecision(value) {
 
 function parseModelContent(content) {
   const text = String(content || "").trim();
-  if (!text) return null;
-  try { return JSON.parse(text); } catch {}
+  const result = (parsed, jsonError = "") => ({ parsed, jsonError });
+  const objectResult = (value) => value && typeof value === "object" && !Array.isArray(value)
+    ? result(value) : result(null, "NON_OBJECT_JSON");
+  if (!text) return result(null, "EMPTY_TEXT");
+  try { return objectResult(JSON.parse(text)); } catch {}
   // Locate complete top-level JSON values. Never repair a fragment or choose between conflicting outputs.
   const candidates = [];
   let start = -1;
@@ -565,22 +568,25 @@ function parseModelContent(content) {
     if (char === '"') { quoted = true; continue; }
     if (char === "{" || char === "[") stack.push(char);
     if (char !== "}" && char !== "]") continue;
-    if (stack.at(-1) !== (char === "}" ? "{" : "[")) return null;
+    if (stack.at(-1) !== (char === "}" ? "{" : "[")) return result(null, "MISMATCHED_JSON_BRACKETS");
     stack.pop();
     if (stack.length) continue;
     try { candidates.push(JSON.parse(text.slice(start, index + 1))); } catch {}
     start = -1;
   }
-  return start < 0 && candidates.length === 1 ? candidates[0] : null;
+  if (start >= 0) return result(null, "TRUNCATED_JSON");
+  if (candidates.length > 1) return result(null, "MULTIPLE_JSON_VALUES");
+  if (candidates.length === 1) return objectResult(candidates[0]);
+  return result(null, /[\[{]/.test(text) ? "INVALID_JSON_SYNTAX" : "NO_JSON_OBJECT");
 }
 
-function modelDiagnostics(payload, content, parsed, wireApi) {
+function modelDiagnostics(payload, content, parsed, wireApi, jsonError) {
   const knownTypes = new Set(["text", "output_text", "input_text", "thinking", "reasoning", "analysis", "redacted_thinking", "message", "tool_use", "tool_result", "refusal"]);
   const parts = payload.content || payload.output || payload.choices?.[0]?.message?.content || payload.candidates?.[0]?.content?.parts;
   const contentTypes = Array.isArray(parts) ? [...new Set(parts.map((part) => part?.thought ? "thinking" : knownTypes.has(part?.type) ? part.type : typeof part?.text === "string" ? "text" : "unknown"))] : typeof parts === "string" ? ["text"] : [];
   const reason = payload.stop_reason || payload.choices?.[0]?.finish_reason || payload.candidates?.[0]?.finishReason || payload.incomplete_details?.reason || payload.status || "";
   const stopReason = ["end_turn", "stop", "max_tokens", "length", "tool_use", "stop_sequence", "content_filter", "STOP", "MAX_TOKENS", "completed", "incomplete", "max_output_tokens"].includes(reason) ? reason : reason ? "unknown" : "";
-  return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex") };
+  return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", jsonError, contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex") };
 }
 
 function providerReady(provider) {
@@ -613,8 +619,8 @@ async function requestProviderJson(provider, messages, options = {}) {
     }
     if (response.ok) {
       const content = extractModelText(payload);
-      const parsed = parseModelContent(content);
-      const diagnostics = modelDiagnostics(payload, content, parsed, resolveProviderWireApi(candidate.provider));
+      const { parsed, jsonError } = parseModelContent(content);
+      const diagnostics = modelDiagnostics(payload, content, parsed, resolveProviderWireApi(candidate.provider), jsonError);
       return { content, parsed, stopReason: diagnostics.stopReason, modelDiagnostics: diagnostics };
     }
     lastResponse = response;
@@ -779,31 +785,66 @@ export async function requestDecision(provider, context, options = {}) {
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),
     { role: "user", content: JSON.stringify(wireContext) },
   ];
-  const response = await requestProviderJson(provider, messages, options);
-  const outputLimitReached = ["max_tokens", "length", "MAX_TOKENS", "max_output_tokens"].includes(response?.stopReason);
+  // One shared deadline covers the original response and its single correction.
+  const requestOptions = { ...options, signal: requestSignal(options.timeoutMs, options.signal) };
+  const attempts = [];
+  const request = async (requestMessages) => {
+    requestOptions.signal?.throwIfAborted();
+    const response = await requestProviderJson(provider, requestMessages, requestOptions);
+    requestOptions.signal?.throwIfAborted();
+    if (response?.parsed && !["BUY", "SELL", "HOLD"].includes(response.parsed.action)) {
+      response.parsed = null;
+      response.modelDiagnostics = { ...response.modelDiagnostics, jsonStatus: "INVALID_JSON", jsonError: "INVALID_DECISION_ACTION" };
+    }
+    if (response?.modelDiagnostics) attempts.push(response.modelDiagnostics);
+    return response;
+  };
+  const diagnostics = (response, retryError) => ({ ...response?.modelDiagnostics,
+    ...(attempts.length > 1 ? { attempts: [...attempts] } : {}), ...(retryError ? { retryError } : {}) });
+  const outputLimited = (response) => ["max_tokens", "length", "MAX_TOKENS", "max_output_tokens"].includes(response?.stopReason);
+  let response = await request(messages);
+  let correctionUsed = false;
+  let retryError = "";
+  if (options.fastAnalysis === true && response?.content && !response.parsed && !outputLimited(response)
+    && !["content_filter", "tool_use"].includes(response.stopReason)) {
+    correctionUsed = true;
+    try {
+      response = await request([
+        ...messages,
+        { role: "assistant", content: response.content },
+        { role: "user", content: `Your previous response failed decision JSON validation: ${response.modelDiagnostics.jsonError}. It is invalid and no action has been executed from it. Return one complete JSON object with action BUY, SELL or HOLD, using the original supplied market, account, strategy and approved Skills. Correct the output format yourself; no markdown, prose outside JSON, multiple alternatives, or truncated fields. Preserve exact supplied IDs and honest probabilities, assess entry/exit and order KEEP/CANCEL consistently in this same response, and do not invent prices, evidence or a trade. If evidence is insufficient, explicitly return a complete HOLD decision with the missing evidence.` },
+      ]);
+    } catch (error) {
+      requestOptions.signal?.throwIfAborted();
+      retryError = "REQUEST_FAILED";
+    }
+  }
+  const outputLimitReached = outputLimited(response);
   if (!response?.content || !response.parsed) return { ...normalizeDecision({
     action: "HOLD",
     risk_flags: [response?.content ? "INVALID_MODEL_JSON" : "EMPTY_MODEL_RESPONSE", ...(outputLimitReached ? ["MODEL_OUTPUT_LIMIT"] : [])],
     invalidation: outputLimitReached
       ? "模型达到输出额度上限，未返回完整结论；继续监控并重新分析"
       : response?.content ? "模型返回内容不是有效的决策 JSON；继续监控并重新分析" : "模型接口未返回结论正文；继续监控并重新分析",
-  }), modelDiagnostics: response?.modelDiagnostics };
-  let decision = { ...normalizeDecision(response.parsed), modelDiagnostics: response.modelDiagnostics };
+  }), modelDiagnostics: diagnostics(response, retryError) };
+  let decision = { ...normalizeDecision(response.parsed), modelDiagnostics: diagnostics(response) };
   const missingExitAction = (value) => value.holdingPlan.decision === "EXIT_NOW" && (!value.exitType || value.action === "HOLD");
   const inconsistent = (value) => missingExitAction(value) || (value.action === "HOLD"
     && (Boolean(value.exitType) || (!value.orderAssessments.length && !value.cancelOrderIds.length && Math.max(value.bullishProfitProbability, value.bearishProfitProbability) >= 0.45)));
   if (inconsistent(decision)) {
     let corrected = null;
     try {
-      corrected = await requestProviderJson(provider, [
+      if (!correctionUsed) corrected = await request([
         ...messages,
         { role: "assistant", content: JSON.stringify(response.parsed) },
         { role: "user", content: "Your output is inconsistent: holding_plan EXIT_NOW requires a closing BUY/SELL action, exit_type TAKE_PROFIT or STOP_LOSS and exact target_position_ids; never return EXIT_NOW as HOLD or as an entry missing exit_type. Entry requires the selected direction's profit probability >= 0.45. BUY requires bullish_profit_probability >= 0.45; SELL requires bearish_profit_probability >= 0.45. There is no probability-gap trigger, and the other side's probability cannot authorize the selected direction. Do not return HOLD when a qualifying direction has fresh data and an executable plan. For each open position, compare exiting now with holding through the next relevant move. TAKE_PROFIT means exiting now is forecast to maximize expected net profit; STOP_LOSS means holding is forecast to worsen or deepen loss. A positive current mark alone does not require an exit. Once you explicitly decide exit now is optimal, execute the closing SELL for a long or BUY for a short immediately with exact position IDs, regardless of entry probabilities. Reassess entry and exit plans, including whether another configured-size order can enter this K while earlier positions remain open. Return corrected JSON with your own qualifying BUY or SELL if executable; if required data or an executable plan is unavailable, identify exactly what is missing. Keep honest probabilities unchanged unless new evidence warrants reassessment; never lower them to justify HOLD or inflate them to trigger entry. Preserve every order_assessments KEEP/CANCEL decision and exact order ID. Do not invent prices, evidence, or a trade." },
-      ], options);
+      ]);
     } catch (error) {
-      if (options.signal?.aborted) throw error;
+      requestOptions.signal?.throwIfAborted();
+      retryError = "REQUEST_FAILED";
     }
-    if (corrected?.parsed) decision = { ...normalizeDecision(corrected.parsed), modelDiagnostics: corrected.modelDiagnostics };
+    if (corrected?.parsed) decision = normalizeDecision(corrected.parsed);
+    decision.modelDiagnostics = diagnostics(corrected || response, retryError);
     if (inconsistent(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"])];
     if (missingExitAction(decision)) {
       // An incomplete closing plan cannot be routed as a new opening order.

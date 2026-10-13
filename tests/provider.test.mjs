@@ -33,7 +33,7 @@ test("a single complete decision inside prose braces is parsed without repairing
 test("malformed output keeps failure diagnostics and the following valid decision still works", async (t) => {
   const malformed = '{"action":"BUY","bullish_profit_probability":0.9';
   let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: calls++ === 0 ? malformed : '{"action":"SELL","bullish_profit_probability":0.3,"bearish_profit_probability":0.6}' }], stop_reason: "end_turn", usage: { input_tokens: 32000, output_tokens: 2500 } })));
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: calls++ < 2 ? malformed : '{"action":"SELL","bullish_profit_probability":0.3,"bearish_profit_probability":0.6}' }], stop_reason: "end_turn", usage: { input_tokens: 32000, output_tokens: 2500 } })));
   const provider = { apiKey: "secret-test-key", apiFormat: "anthropic", baseUrl: "https://api.stepfun.com/step_plan/v1/messages", fullUrlMode: true, model: "step-5-preview" };
   const failure = await requestDecision(provider, {}, { fastAnalysis: true });
   assert.deepEqual(failure.riskFlags, ["INVALID_MODEL_JSON"]);
@@ -42,10 +42,116 @@ test("malformed output keeps failure diagnostics and the following valid decisio
   assert.equal(failure.modelDiagnostics.stopReason, "end_turn");
   assert.deepEqual(failure.modelDiagnostics.contentTypes, ["thinking", "text"]);
   assert.equal(failure.modelDiagnostics.textLength, malformed.length);
+  assert.equal(failure.modelDiagnostics.jsonError, "TRUNCATED_JSON");
+  assert.equal(failure.modelDiagnostics.attempts.length, 2);
   assert.doesNotMatch(JSON.stringify(failure.modelDiagnostics), /secret-test-key|private reasoning|bullish_profit_probability/);
   const next = await requestDecision(provider, {}, { fastAnalysis: true });
   assert.equal(next.action, "SELL");
   assert.equal(next.bearishProfitProbability, 0.6);
+  assert.equal(calls, 3);
+});
+
+for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
+  test(`${apiFormat} live analysis gives invalid final text and its error back to the same model once`, async (t) => {
+    const malformed = '{"action":"SELL",';
+    const bodies = [];
+    const envelope = (text) => apiFormat === "anthropic" ? { content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text }], stop_reason: "end_turn" }
+      : apiFormat === "responses" ? { output: [{ type: "message", content: [{ type: "output_text", text }] }], status: "completed" }
+        : apiFormat === "gemini" ? { candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }] }
+          : { choices: [{ message: { content: text }, finish_reason: "stop" }] };
+    t.mock.method(globalThis, "fetch", async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return new Response(JSON.stringify(envelope(bodies.length === 1 ? malformed : JSON.stringify({ action: "SELL", exit_type: "STOP_LOSS", target_position_ids: ["P-1"], bullish_profit_probability: 0.2, bearish_profit_probability: 0.3 }))));
+    });
+    const result = await requestDecision({ apiKey: "test-key", baseUrl: "https://provider.example.test", apiFormat, model: "same-model" }, { market: { fingerprint: "same-snapshot" }, experiencePrompt: "approved Skill full text", account: { positions: [{ positionOrderId: "P-1" }] } }, { fastAnalysis: true });
+    assert.equal(bodies.length, 2);
+    const retry = JSON.stringify(bodies[1]);
+    assert.match(retry, /TRUNCATED_JSON/);
+    assert.ok(retry.includes(JSON.stringify(malformed)));
+    assert.match(retry, /same-snapshot/);
+    assert.match(retry, /approved Skill full text/);
+    assert.match(retry, /P-1/);
+    assert.doesNotMatch(retry, /private reasoning/);
+    if (apiFormat !== "gemini") assert.equal(bodies[1].model, "same-model");
+    assert.equal(result.action, "SELL");
+    assert.deepEqual(result.targetPositionIds, ["P-1"]);
+    assert.deepEqual(result.modelDiagnostics.attempts.map(item => item.jsonStatus), ["INVALID_JSON", "COMPLETE_JSON"]);
+  });
+}
+
+test("live format retry is bounded even when the corrected decision is inconsistent", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: calls++ === 0 ? '{"action":' : '{"action":"HOLD","bullish_profit_probability":0.6,"bearish_profit_probability":0.3}' }, finish_reason: "stop" }] })));
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {}, { fastAnalysis: true });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "HOLD");
+  assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
+});
+
+test("format retry never runs on output exhaustion or after cancellation", async (t) => {
+  let calls = 0;
+  let abort = false;
+  const controller = new AbortController();
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    if (abort) controller.abort(new Error("USER_LOGOUT"));
+    return new Response(JSON.stringify({ content: [{ type: "text", text: '{"action":"BUY",' }], stop_reason: abort ? "end_turn" : "max_tokens" }));
+  });
+  const provider = { apiKey: "test", baseUrl: "https://provider.example.test", apiFormat: "anthropic" };
+  const exhausted = await requestDecision(provider, {}, { fastAnalysis: true });
+  assert.equal(calls, 1);
+  assert.ok(exhausted.riskFlags.includes("MODEL_OUTPUT_LIMIT"));
+  abort = true;
+  await assert.rejects(requestDecision(provider, {}, { fastAnalysis: true, signal: controller.signal }), /USER_LOGOUT/);
+  assert.equal(calls, 2);
+});
+
+test("invalid decision shapes and conflicting JSON cannot become a successful HOLD or trade", async (t) => {
+  let content;
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: "stop" }] })));
+  for (const [text, error] of [["[]", "NON_OBJECT_JSON"], ['"BUY"', "NON_OBJECT_JSON"], ['{"summary":"no action"}', "INVALID_DECISION_ACTION"], ['{"action":"UNKNOWN"}', "INVALID_DECISION_ACTION"], ['{"action":"BUY"}\n{"action":"SELL"}', "MULTIPLE_JSON_VALUES"], ['{"action":"BUY",}', "INVALID_JSON_SYNTAX"]]) {
+    content = text;
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {});
+    assert.deepEqual(result.riskFlags, ["INVALID_MODEL_JSON"]);
+    assert.equal(result.action, "HOLD");
+    assert.equal(result.modelDiagnostics.jsonError, error);
+  }
+});
+
+test("failed format correction preserves diagnostics and cannot expose or execute the partial plan", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    if (calls++ > 0) throw new Error("private transport detail");
+    return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"SELL","cancel_order_ids":["O-1"],' }, finish_reason: "stop" }] }));
+  });
+  const result = await requestDecision({ apiKey: "private-key", baseUrl: "https://provider.example.test" }, {}, { fastAnalysis: true });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "HOLD");
+  assert.deepEqual(result.cancelOrderIds, []);
+  assert.deepEqual(result.targetPositionIds, []);
+  assert.deepEqual(result.riskFlags, ["INVALID_MODEL_JSON"]);
+  assert.equal(result.modelDiagnostics.retryError, "REQUEST_FAILED");
+  assert.doesNotMatch(JSON.stringify(result.modelDiagnostics), /private|O-1/);
+});
+
+test("format correction shares the original timeout rather than starting a new deadline", async (t) => {
+  let firstSignal;
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    if (calls++ === 0) {
+      firstSignal = options.signal;
+      await new Promise(resolve => setTimeout(resolve, 30));
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"action":' }, finish_reason: "stop" }] }));
+    }
+    // Keep the event loop alive while AbortSignal.timeout uses an unref'ed timer.
+    const keepAlive = setInterval(() => {}, 50);
+    try {
+      await new Promise(resolve => firstSignal.addEventListener("abort", resolve, { once: true }));
+      assert.equal(options.signal.aborted, true);
+      options.signal.throwIfAborted();
+    } finally { clearInterval(keepAlive); }
+  });
+  await assert.rejects(requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {}, { fastAnalysis: true, timeoutMs: 1000 }), { name: "TimeoutError" });
   assert.equal(calls, 2);
 });
 
