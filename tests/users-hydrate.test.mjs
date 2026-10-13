@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hydrateUsers, listUsers } from "../server/users.mjs";
+import { createUser, createUserSession, getUserSession, hydrateUsers, listUsers, revokeUserSession, setUserPersistence } from "../server/users.mjs";
 
 test("hydrateUsers restores task assignments from persistence", () => {
   hydrateUsers(
@@ -39,4 +39,16 @@ test("hydrateUsers does not drop users when assignment list is empty", () => {
   const [user] = listUsers();
   assert.equal(user.username, "keeper");
   assert.deepEqual(user.assignedTaskIds, []);
+});
+
+test("logout rejects the token immediately while durable session revocation is pending", async (t) => {
+  await createUser({ username: "revocation-user", password: "revocation-pass" });
+  const session = await createUserSession("revocation-user", "revocation-pass");
+  let finish;
+  setUserPersistence({ deleteUserSession: () => new Promise((resolve) => { finish = resolve; }) });
+  t.after(() => setUserPersistence(null));
+  const logout = revokeUserSession(session.token);
+  assert.equal(getUserSession(session.token), null);
+  finish();
+  assert.equal(await logout, true);
 });

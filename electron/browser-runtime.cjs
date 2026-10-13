@@ -71,6 +71,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
       if (message.method === "openMarketBrowser" || message.method === "observeMarket") {
         const task = { ...input.task, target: { ...input.task?.target, browserSessionId: sessionId } };
         const result = await market[message.method](task, input.connector);
+        signal.throwIfAborted();
         // The public session ID stays stable across desktop installs and reconnects.
         if (result.sessionId) result.sessionId = input.task?.target?.browserSessionId || `task:${input.task?.id}`;
         if (input.show && activeSessions.has(sessionId)) {
@@ -96,7 +97,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
         if (confirmations.has(key)) throw new Error("TRADE_CONFIRMATION_ALREADY_USED");
         if (confirmations.size >= 10000) throw new Error("TRADE_CONFIRMATION_LIMIT");
         const result = await tools.submitSuggestionForm(input);
-        if (result?.ok && result?.submitted) confirmations.add(key);
+        if (!signal.aborted && result?.ok && result?.submitted) confirmations.add(key);
         return result;
       }
       throw new Error("BROWSER_METHOD_UNKNOWN");
@@ -111,13 +112,17 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
 }
 
 async function closeBrowserRuntime() {
-  if (modulesPromise) {
-    const { browser } = await modulesPromise;
-    await browser.closeAllBrowserSessions();
-    modulesPromise = null;
+  try {
+    if (modulesPromise) {
+      const { browser } = await modulesPromise;
+      await browser.closeAllBrowserSessions();
+      modulesPromise = null;
+    }
+  } finally {
+    queues.clear();
+    collectedMarkets.clear();
+    confirmations.clear();
   }
-  queues.clear();
-  collectedMarkets.clear();
 }
 
 function getCollectedMarket(marketRef, apiBaseUrl, userId) {

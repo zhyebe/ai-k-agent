@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import test from "node:test";
+import WebSocket from "ws";
 
 const root = new URL("..", import.meta.url).pathname;
 
@@ -113,17 +114,24 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(foreignProviderModels.status, 404);
     const secondSkills = await request(baseUrl, "/api/skills", { headers: secondHeaders });
     assert.equal(secondSkills.status, 200);
-    assert.equal(secondSkills.body.skills.some((skill) => skill.title === "boundary skill"), false);
+    const sharedSkill = secondSkills.body.skills.find((skill) => skill.title === "boundary skill");
+    assert.equal(sharedSkill.content, "boundaryonlytoken 只读观察规则");
+    assert.equal(sharedSkill.owned, false);
+    const sharedWorkspace = await request(baseUrl, "/api/workspace", { headers: secondHeaders });
+    assert.ok(sharedWorkspace.body.skills.some((skill) => skill.id === sharedSkill.id));
     const firstRag = await request(baseUrl, "/api/rag/search?q=boundaryonlytoken", { headers });
     const secondRag = await request(baseUrl, "/api/rag/search?q=boundaryonlytoken", { headers: secondHeaders });
     assert.ok(firstRag.body.results.some((result) => result.title === "boundary skill"));
-    assert.equal(secondRag.body.results.some((result) => result.title === "boundary skill"), false);
+    assert.ok(secondRag.body.results.some((result) => result.title === "boundary skill"));
+    assert.deepEqual(firstRag.body.stats, secondRag.body.stats);
     const deniedDelete = await request(baseUrl, `/api/skills/${userSkill.body.skill.id}`, { method: "DELETE", headers: secondHeaders });
     assert.equal(deniedDelete.status, 404);
     const deletedSkill = await request(baseUrl, `/api/skills/${userSkill.body.skill.id}`, { method: "DELETE", headers });
     assert.equal(deletedSkill.status, 200);
     const afterDeleteRag = await request(baseUrl, "/api/rag/search?q=boundaryonlytoken", { headers });
     assert.equal(afterDeleteRag.body.results.some((result) => result.title === "boundary skill"), false);
+    const secondAfterDelete = await request(baseUrl, "/api/skills", { headers: secondHeaders });
+    assert.equal(secondAfterDelete.body.skills.some((skill) => skill.id === sharedSkill.id), false);
     const adminSummary = await request(baseUrl, "/api/admin/summary", { headers: adminHeaders });
     assert.equal(adminSummary.status, 200);
     assert.equal(adminSummary.body.scope, "accounts_audit");
@@ -285,7 +293,7 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(oldPasswordLogin.status, 401);
     const newPasswordLogin = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) });
     assert.equal(newPasswordLogin.status, 200);
-    const reloginHeaders = { "x-user-token": newPasswordLogin.body.token };
+    let reloginHeaders = { "x-user-token": newPasswordLogin.body.token };
     const reloginProviders = await request(baseUrl, "/api/providers", { headers: reloginHeaders });
     assert.ok(reloginProviders.body.providers.some((provider) => provider.name === "Boundary Provider"));
     const reloginCreds = await request(baseUrl, "/api/credentials", { headers: reloginHeaders });
@@ -301,12 +309,20 @@ test("connector test enforces task binding and clears credentials on target chan
     const enabled = await request(baseUrl, `/api/admin/users/${managedUser.id}`, { method: "PATCH", headers: adminHeaders, body: JSON.stringify({ status: "ACTIVE" }) });
     assert.equal(enabled.status, 200);
     assert.equal(enabled.body.user.status, "ACTIVE");
-    assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) })).status, 200);
+    const enabledLogin = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-user", password: "boundary-user-new-pass" }) });
+    assert.equal(enabledLogin.status, 200);
+    reloginHeaders = { "x-user-token": enabledLogin.body.token };
 
     const secondProvider = await request(baseUrl, "/api/providers", { method: "POST", headers: secondHeaders, body: JSON.stringify({ name: "Second Provider", baseUrl: "https://second.invalid/v1", model: "second", apiKey: "second-key" }) });
     assert.equal(secondProvider.status, 201);
     const secondSkill = await request(baseUrl, "/api/skills", { method: "POST", headers: secondHeaders, body: JSON.stringify({ title: "second skill", content: "tenant-specific content" }) });
     assert.equal(secondSkill.status, 201);
+    const visibleDraft = await request(baseUrl, "/api/skills", { headers: reloginHeaders });
+    assert.ok(visibleDraft.body.skills.some((skill) => skill.id === secondSkill.body.skill.id && skill.status === "REVIEW" && !skill.owned));
+    const forbiddenApproval = await request(baseUrl, `/api/skills/${secondSkill.body.skill.id}/approve`, { method: "POST", headers: reloginHeaders, body: "{}" });
+    assert.equal(forbiddenApproval.status, 403);
+    const publishedSecondSkill = await request(baseUrl, `/api/skills/${secondSkill.body.skill.id}/approve`, { method: "POST", headers: secondHeaders, body: "{}" });
+    assert.equal(publishedSecondSkill.status, 200);
     const secondCredential = await request(baseUrl, "/api/connectors/test", { method: "POST", headers: secondHeaders, body: JSON.stringify({ taskId: secondTenantTask.body.task.id, connectorId: secondTenantTask.body.task.target.connectorId, username: "second-login", password: "second-password" }) });
     assert.equal(secondCredential.status, 200);
     const wrongDelete = await request(baseUrl, `/api/admin/users/${secondCreated.body.user.id}`, { method: "DELETE", headers: adminHeaders, body: JSON.stringify({ username: "wrong" }) });
@@ -318,7 +334,86 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-second", password: "boundary-second-pass" }) })).status, 401);
     const usersAfterDelete = await request(baseUrl, "/api/admin/users", { headers: adminHeaders });
     assert.equal(usersAfterDelete.body.users.some((item) => item.id === secondCreated.body.user.id), false);
+    const skillsAfterUserDelete = await request(baseUrl, "/api/skills", { headers: reloginHeaders });
+    assert.ok(skillsAfterUserDelete.body.skills.some((skill) => skill.id === secondSkill.body.skill.id && skill.status === "APPROVED" && !skill.owned));
+    const ragAfterUserDelete = await request(baseUrl, "/api/rag/search?q=tenant-specific", { headers: reloginHeaders });
+    assert.ok(ragAfterUserDelete.body.results.some((result) => result.skillId === secondSkill.body.skill.id));
   } finally {
+    child.kill("SIGTERM");
+    await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 2000))]);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("logout stops only the user's tasks, closes their desktop sockets and preserves saved configuration", async () => {
+  const port = await freePort();
+  const dataDir = `/tmp/axiom-agent-logout-${process.pid}-${Date.now()}`;
+  const child = spawn(process.execPath, ["server/index.mjs"], {
+    cwd: root,
+    env: {
+      ...process.env, PORT: String(port), DB_MODE: "memory", APP_SECRET: "logout-test-secret",
+      ADMIN_USERNAME: "logout-admin", ADMIN_PASSWORD: "logout-admin-pass",
+      AXIOM_DATA_DIR: dataDir, AXIOM_VAULT_FILE: `${dataDir}/credentials.vault.json`, AXIOM_SECRET_FILE: `${dataDir}/.axiom-secret`,
+      AXIOM_REQUIRE_DESKTOP_BROWSER: "1", AXIOM_REQUIRE_DESKTOP_AI: "1", AXIOM_DESKTOP_AI_WAIT_MS: "0",
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  const sockets = [];
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    await waitForApi(baseUrl, child);
+    const admin = await request(baseUrl, "/api/admin/login", { method: "POST", body: JSON.stringify({ username: "logout-admin", password: "logout-admin-pass" }) });
+    const accounts = [];
+    for (const username of ["logout-user-a", "logout-user-b"]) {
+      const created = await request(baseUrl, "/api/admin/users", { method: "POST", headers: { "x-admin-token": admin.body.token }, body: JSON.stringify({ username, password: "logout-user-pass" }) });
+      assert.equal(created.status, 201);
+      const login = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username, password: "logout-user-pass" }) });
+      const headers = { "x-user-token": login.body.token };
+      const socket = new WebSocket(`${baseUrl.replace("http:", "ws:")}/api/desktop-ai`, { headers });
+      sockets.push(socket);
+      await once(socket, "open");
+      accounts.push({ username, headers, socket });
+    }
+    const [first, second] = accounts;
+    const provider = await request(baseUrl, "/api/providers", { method: "POST", headers: first.headers, body: JSON.stringify({ name: "Saved Provider", baseUrl: "https://example.test", model: "model", apiKey: "test-key" }) });
+    assert.equal(provider.status, 201);
+    for (const [account, count] of [[first, 2], [second, 1]]) {
+      for (let index = 0; index < count; index++) {
+        const created = await request(baseUrl, "/api/tasks", { method: "POST", headers: account.headers, body: JSON.stringify({ name: `${account.username}-${index}`, targetType: "website", url: "https://smyw.haohandahan.cn/client/#/transcc" }) });
+        assert.equal(created.status, 201);
+        const started = await request(baseUrl, `/api/tasks/${created.body.task.id}/start`, { method: "POST", headers: account.headers, body: "{}" });
+        assert.equal(started.status, 200);
+        assert.equal(started.body.task.monitoringEnabled, true);
+      }
+    }
+    const aiCall = once(first.socket, "message");
+    const verification = request(baseUrl, `/api/providers/${provider.body.provider.id}/test`, { method: "POST", headers: first.headers, body: "{}" });
+    const [pendingCall] = await aiCall;
+    assert.equal(JSON.parse(String(pendingCall)).type, "ai.call");
+    const socketClosed = once(first.socket, "close");
+    const logout = await request(baseUrl, "/api/user/logout", { method: "POST", headers: first.headers, body: "{}" });
+    assert.equal(logout.status, 200);
+    await Promise.race([socketClosed, new Promise((_, reject) => setTimeout(() => reject(new Error("LOGOUT_SOCKET_NOT_CLOSED")), 3000))]);
+    assert.equal(second.socket.readyState, WebSocket.OPEN);
+    const interrupted = await verification;
+    assert.equal(interrupted.status, 400);
+    assert.match(interrupted.body.error, /DESKTOP_AI_DISCONNECTED|USER_LOGOUT/);
+    assert.equal((await request(baseUrl, "/api/workspace", { headers: first.headers })).status, 401);
+    const relogin = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: first.username, password: "logout-user-pass" }) });
+    const firstWorkspace = await request(baseUrl, "/api/workspace", { headers: { "x-user-token": relogin.body.token } });
+    assert.equal(firstWorkspace.body.tasks.length, 2);
+    for (const task of firstWorkspace.body.tasks) {
+      assert.equal(task.monitoringEnabled, false);
+      assert.equal(task.stopLocked, true);
+      assert.equal(task.status, "MANUAL_CONTROL");
+      assert.equal(task.pendingAction, null);
+    }
+    assert.ok(firstWorkspace.body.providers.some((item) => item.id === provider.body.provider.id));
+    const secondWorkspace = await request(baseUrl, "/api/workspace", { headers: second.headers });
+    assert.equal(secondWorkspace.body.tasks[0].monitoringEnabled, true);
+    assert.equal(secondWorkspace.body.tasks[0].stopLocked, false);
+  } finally {
+    for (const socket of sockets) socket.terminate();
     child.kill("SIGTERM");
     await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 2000))]);
     if (child.exitCode === null) child.kill("SIGKILL");

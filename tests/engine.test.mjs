@@ -1905,7 +1905,7 @@ test("等待确认时不拆掉监控循环，确认后立即继续", async () =>
   }
 });
 
-test("最终决策上下文包含已审核 Skill 和每分钟第50秒出K策略", async () => {
+test("最终决策上下文包含其他账号已审核的共享 Skill 和每分钟第50秒出K策略", async () => {
   const taskId = `task_skills_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.ownerUserId = "skill-owner";
@@ -1913,7 +1913,7 @@ test("最终决策上下文包含已审核 Skill 和每分钟第50秒出K策略"
     id: `skill_${Date.now()}`,
     title: "回撤经验",
     status: "APPROVED",
-    ownerUserId: "skill-owner",
+    ownerUserId: "another-skill-author",
     version: "v1",
     kind: "expert",
     tags: ["回撤"],
@@ -1935,7 +1935,7 @@ test("最终决策上下文包含已审核 Skill 和每分钟第50秒出K策略"
     assert.equal(captured.strategy.kline.printSecond, 50);
     assert.equal(captured.approvedSkills[0].title, "回撤经验");
     assert.match(captured.approvedSkills[0].content, /放量突破/);
-    assert.match(captured.experiencePrompt, /自己录入并审核通过的 Skill/);
+    assert.match(captured.experiencePrompt, /共享知识库中已审核发布的 Skill/);
     assert.match(captured.experiencePrompt, /回撤经验/);
   } finally {
     state.tasks = state.tasks.filter((item) => item.id !== taskId);

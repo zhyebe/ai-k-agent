@@ -362,10 +362,10 @@ function WindowResizeHandles() {
   return <>{["n", "s", "e", "w", "ne", "nw", "se", "sw"].map((edge) => <div key={edge} className={`window-resize-handle resize-${edge}`} onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); resizing.current = true; bridge.startResize(edge); }} />)}</>;
 }
 
-function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }) {
+function UserLogin({ onSignedIn, initialError = "" }: { onSignedIn: (user: WorkspaceUser) => void; initialError?: string }) {
   const [account, setAccount] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(initialError);
   const [busy, setBusy] = useState(false);
   const [serviceUrl, setServiceUrl] = useState(getApiBaseUrl() || (window.axiomDesktop ? DEFAULT_CLOUD_API_URL : "http://127.0.0.1:8787"));
   const [serviceSettingsOpen, setServiceSettingsOpen] = useState(false);
@@ -454,6 +454,31 @@ function UserLogin({ onSignedIn }: { onSignedIn: (user: WorkspaceUser) => void }
   );
 }
 function App() {
+  const [sessionKey, setSessionKey] = useState(0);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
+  const logoutLock = useRef(false);
+
+  async function handleLogout() {
+    if (logoutLock.current) return;
+    logoutLock.current = true;
+    const remoteLogout = userLogout();
+    setLoggingOut(true);
+    const results = await Promise.allSettled([remoteLogout, window.axiomDesktop?.ai?.disconnect()]);
+    const failures = results.flatMap((result, index) => result.status === "rejected"
+      ? [`${index === 0 ? "服务端任务停止未确认" : "桌面运行环境关闭失败"}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
+      : []);
+    setLogoutError(failures.join("；"));
+    setSessionKey((current) => current + 1);
+    setLoggingOut(false);
+    logoutLock.current = false;
+  }
+
+  if (loggingOut) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在退出并停止任务" /></div></div></>;
+  return <SessionApp key={sessionKey} onLogout={handleLogout} logoutError={logoutError} />;
+}
+
+function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; logoutError: string }) {
   const [workspace, setWorkspace] = useState<Workspace>(emptyWorkspace);
   const [view, setView] = useState<ViewKey>("console");
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -495,7 +520,7 @@ function App() {
         setUserToken(existing);
         setUser(session.user);
       })
-      .catch(() => { clearUserToken(); if (active) setUser(null); })
+      .catch(() => { if (active) { clearUserToken(); setUser(null); } })
       .finally(() => { if (active) setAuthChecked(true); });
     return () => { active = false; };
   }, []);
@@ -620,18 +645,6 @@ function App() {
       busyLock.current = false;
       setBusyAction(null);
     }
-  }
-
-  async function handleLogout() {
-    await userLogout().catch(() => {});
-    clearUserToken();
-    setUser(null);
-    setWorkspace(emptyWorkspace);
-    setWorkspaceReady(false);
-    setWorkspaceLoading(true);
-    setLoadError(null);
-    setStreamOpen(false);
-    setModal(null);
   }
 
   async function handleUpdateAction() {
@@ -985,7 +998,7 @@ function App() {
   }
 
   if (!authChecked) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在验证桌面会话" /></div></div></>;
-  if (!user) return <UserLogin onSignedIn={setUser} />;
+  if (!user) return <UserLogin onSignedIn={setUser} initialError={logoutError} />;
 
   return (
     <div className={["app-shell", window.axiomDesktop ? "is-desktop" : "", window.axiomDesktop?.platform ? `platform-${window.axiomDesktop.platform}` : ""].filter(Boolean).join(" ")}>
@@ -1005,7 +1018,7 @@ function App() {
         <button className="nav-item" onClick={() => { setView("connectors"); setSidebarOpen(false); }}><Settings2 size={17} /><span>连接器</span></button>
         <div className="sidebar-bottom">
           {(() => { const endpoint = serviceEndpointLabel(); return <div className="service-card"><span className="online-dot" /><div><b>{endpoint.title}</b><span>{endpoint.host}</span></div></div>; })()}
-          <button type="button" className="user-row user-logout" onClick={handleLogout}>
+          <button type="button" className="user-row user-logout" onClick={onLogout}>
             <div className="avatar avatar-small">{user.username.slice(0, 1).toUpperCase()}</div>
             <div><b>{user.displayName || user.username}</b><span>退出桌面端</span></div>
             <LogOut size={14} />
@@ -1395,11 +1408,11 @@ function SkillsView({ skills, rag, onCreate, onApprove, onDelete, busyAction }: 
   const filteredSkills = normalizedQuery
     ? skills.filter((skill) => [skill.title, skill.summary, skill.source, ...skill.tags].join(" ").toLocaleLowerCase().includes(normalizedQuery))
     : skills;
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>只有当前账号主动导入并审核的经验，才会作为 AI 分析的辅助证据。</p></div><button className="button button-primary" onClick={onCreate} disabled={busyAction !== null}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label={rag?.mode === "direct-ai" ? "经验传输" : "RAG 切片"} value={rag?.mode === "direct-ai" ? "直传 AI" : String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value={rag?.mode === "direct-ai" ? "分析提示词" : "当前用户"} icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>我的 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span><span>操作</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} onDelete={onDelete} busyAction={busyAction} directAi={rag?.mode === "direct-ai"} />) : <div className="empty-state"><CircleDashed size={16} />{normalizedQuery ? "没有匹配的经验" : "还没有导入经验；AI 会仅根据本轮实时实盘数据自主分析。"}</div>}</div></section></>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>所有用户均可读取共享经验与 Skills；已审核内容用于各账号的 AI 分析，审核和删除仅限创建者。</p></div><button className="button button-primary" onClick={onCreate} disabled={busyAction !== null}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label={rag?.mode === "direct-ai" ? "经验传输" : "RAG 切片"} value={rag?.mode === "direct-ai" ? "直传 AI" : String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value={rag?.mode === "direct-ai" ? "分析提示词" : "共享知识库"} icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>共享 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span><span>操作</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} onDelete={onDelete} busyAction={busyAction} directAi={rag?.mode === "direct-ai"} />) : <div className="empty-state"><CircleDashed size={16} />{normalizedQuery ? "没有匹配的经验" : "共享知识库还没有经验；AI 会仅根据本轮实时实盘数据自主分析。"}</div>}</div></section></>;
 }
 
 function SummaryTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: string }) { return <article className="summary-tile"><span className={`summary-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong className="tabular">{value}</strong></div></article>; }
-function SkillRow({ skill, onApprove, onDelete, busyAction, directAi }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null; directAi?: boolean }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{directAi ? "直传 AI" : `${skill.chunks} 个切片`}</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
+function SkillRow({ skill, onApprove, onDelete, busyAction, directAi }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null; directAi?: boolean }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{directAi ? "直传 AI" : `${skill.chunks} 个切片`}</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : skill.owned ? <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button> : <span className="approval-label"><CirclePause size={14} />待审核</span>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
 
 function ConnectorsView({ task, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderEdit, onProviderTest, onProviderModels, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderEdit: (provider: Provider) => void; onProviderTest: (provider: Provider) => void; onProviderModels: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
   return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>每个桌面账号独立管理自己的 Provider、连接器和目标凭据，账号之间完全隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />MySQL 账号级托管</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={Boolean(task) && selectedProviderId(task, providers) === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={Boolean(task)} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有 Provider。点右上角「添加 Provider」写入自己的接口。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>支持任意模型 ID、OpenAI Responses / Chat Completions、Anthropic Messages、Gemini 及完整请求 URL。配置和模型列表只保存到当前账号的服务端数据库。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "实盘自动入场" : "实盘手动入场") : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode !== "LIVE" ? "禁止" : task.autoDecisionEnabled ? "入场自动 · 离场自动" : "入场手动 · 离场自动"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
@@ -1529,7 +1542,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   );
 }
 
-function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后才会切片并进入 RAG 检索。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><BusyIcon busy={busy}><FileText size={15} /></BusyIcon>{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
+function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后，所有用户的 AI 分析均可使用该经验。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><BusyIcon busy={busy}><FileText size={15} /></BusyIcon>{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
 
 function ProviderModal({ provider, onClose, onSave }: { provider: Provider | null; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
   const [name, setName] = useState(provider?.name || "");

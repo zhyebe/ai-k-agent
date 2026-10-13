@@ -1895,7 +1895,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       data: { analysisLayers: analysisMarket.analysisLayers, nextCandle: analysisMarket.nextCandle || null },
     });
     const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
-    const knowledge = approvedKnowledgeForAnalysis(state.skills, resolvedUserId, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
+    const knowledge = approvedKnowledgeForAnalysis(state.skills, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
     const experiencePrompt = buildApprovedExperiencePrompt(knowledge, (Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES) + 4096);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
@@ -1906,8 +1906,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       runId: run.id,
       stage: "analyze",
       message: knowledge.length
-        ? `本轮喂入当前账号已审核的 ${knowledge.length} 条 Skill，与出K策略、K 线、各盘买卖档位一起分析`
-        : "当前账号没有已发布 Skill，本轮仅基于实时实盘数据和出K策略分析",
+        ? `本轮喂入共享知识库已审核的 ${knowledge.length} 条 Skill，与出K策略、K 线、各盘买卖档位一起分析`
+        : "共享知识库没有已发布 Skill，本轮仅基于实时实盘数据和出K策略分析",
     });
     const resolvedProviderId = resolveDefaultProviderId(resolvedUserId, providerId || task.providerId);
     const provider = findProviderForUser(resolvedProviderId, resolvedUserId);

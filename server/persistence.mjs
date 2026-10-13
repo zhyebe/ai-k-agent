@@ -397,7 +397,7 @@ async function createMySqlAdapter() {
     SET c.owner_user_id = t.owner_user_id
     WHERE c.owner_user_id = '' AND t.owner_user_id <> ''
   `).catch(() => {});
-  for (const table of ["providers", "skills", "credentials", "connectors"]) {
+  for (const table of ["providers", "credentials", "connectors"]) {
     await pool.query(`
       UPDATE ${table} item
       JOIN (SELECT MIN(id) AS user_id FROM users HAVING COUNT(*) = 1) only_user
@@ -405,11 +405,21 @@ async function createMySqlAdapter() {
       WHERE item.owner_user_id = ''
     `).catch(() => {});
   }
+  // Skills are shared knowledge. Keep the author's ID for management permissions,
+  // but never cascade-delete knowledge when that account is removed.
+  const [skillOwnerConstraints] = await pool.query(`
+    SELECT CONSTRAINT_NAME FROM information_schema.KEY_COLUMN_USAGE
+    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'skills'
+      AND COLUMN_NAME = 'owner_user_id' AND REFERENCED_TABLE_NAME = 'users'
+  `);
+  for (const { CONSTRAINT_NAME: constraintName } of skillOwnerConstraints) {
+    const quotedName = String(constraintName).replace(/`/g, "``");
+    await pool.query(`ALTER TABLE skills DROP FOREIGN KEY \`${quotedName}\``);
+  }
   // Unresolved legacy ownership must survive startup for explicit repair.
   const foreignKeys = [
     "ALTER TABLE tasks ADD CONSTRAINT fk_tasks_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE providers ADD CONSTRAINT fk_providers_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
-    "ALTER TABLE skills ADD CONSTRAINT fk_skills_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE credentials ADD CONSTRAINT fk_credentials_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE connectors ADD CONSTRAINT fk_connectors_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE CASCADE",
     "ALTER TABLE skill_chunks ADD CONSTRAINT fk_skill_chunks_skill FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE",
@@ -566,8 +576,6 @@ async function createMySqlAdapter() {
           await connection.execute(`DELETE FROM task_assignments WHERE task_id IN (${placeholders})`, ids);
           await connection.execute(`DELETE FROM tasks WHERE id IN (${placeholders})`, ids);
         }
-        await connection.execute("DELETE sc FROM skill_chunks sc JOIN skills s ON s.id = sc.skill_id WHERE s.owner_user_id = ?", [userId]);
-        await connection.execute("DELETE FROM skills WHERE owner_user_id = ?", [userId]);
         await connection.execute("DELETE FROM providers WHERE owner_user_id = ?", [userId]);
         await connection.execute("DELETE FROM credentials WHERE owner_user_id = ?", [userId]);
         await connection.execute("DELETE FROM user_sessions WHERE user_id = ?", [userId]);
@@ -771,7 +779,6 @@ async function createMongoAdapter() {
     async deleteUserData({ userId, taskIds = [] }) {
       const ids = [...new Set(taskIds.map(String).filter(Boolean))];
       await Promise.all([
-        collections.skills.deleteMany({ ownerUserId: userId }),
         collections.providers.deleteMany({ ownerUserId: userId }),
         collections.credentials.deleteMany({ ownerUserId: userId }),
         collections.connectors.deleteMany({ ownerUserId: userId }),

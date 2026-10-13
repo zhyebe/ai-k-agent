@@ -24,21 +24,22 @@ test("secondary order-book changes trigger analysis but sample time alone does n
   assert.notEqual(marketDataFingerprint(base), original);
 });
 
-test("direct analysis sends full approved owner experience and both order books in one model request", async (t) => {
+test("direct analysis sends shared approved experience and both order books in one model request", async (t) => {
   const content = "成交量与趋势存在分歧时结合买卖档位判断。".repeat(30);
   const evidence = approvedKnowledgeForAnalysis([
     { id: "one", title: "经验", status: "APPROVED", ownerUserId: "owner", version: "v1", content },
     { id: "draft", status: "REVIEW", ownerUserId: "owner", content: "draft" },
-    { id: "foreign", status: "APPROVED", ownerUserId: "other", content: "secret" },
-  ], "owner");
-  assert.equal(evidence.length, 1);
+    { id: "foreign", title: "共享经验", status: "APPROVED", ownerUserId: "other", version: "v1", content: "shared experience" },
+    { id: "legacy", title: "公共经验", status: "APPROVED", version: "v1", content: "legacy experience" },
+  ]);
+  assert.equal(evidence.length, 3);
   assert.equal(evidence[0].excerpt, content);
   const experiencePrompt = buildApprovedExperiencePrompt(evidence);
   assert.match(experiencePrompt, /标题：经验/);
   assert.match(experiencePrompt, /原文：/);
   assert.equal(evidence[0].excerpt, content);
-  assert.doesNotMatch(JSON.stringify(approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content: "too-small-budget" }], "owner", 10)), /too-small-budget/);
-  assert.equal(approvedKnowledgeForAnalysis([{ status: "APPROVED", ownerUserId: "owner", content: "too-small-budget" }], "owner", 10).length, 0);
+  assert.throws(() => approvedKnowledgeForAnalysis([{ status: "APPROVED", content: "too-small-budget" }], 10), /AI_KNOWLEDGE_TOO_LARGE/);
+  assert.throws(() => buildApprovedExperiencePrompt(evidence, 10), /AI_KNOWLEDGE_TOO_LARGE/);
   const now = Date.now();
   const makeBook = (symbol, price) => ({ symbol, timeframe: "1m", dataAt: new Date(now).toISOString(), history: [{ timestamp: now - 60000, open: price, high: price + 1, low: price - 1, close: price, volume: 10 }], orderBook: summarizeOrderBook({ bids: [{ level: 1, price, volume: 100 }], asks: [{ level: 1, price: price + 1, volume: 40 }] }), raw: { duplicate: "x".repeat(300000) } });
   const market = { ...makeBook("A", 100), books: [makeBook("A", 100), makeBook("B", 200)], fingerprint: "snapshot", account: { availableFunds: 500, frozenFunds: 2000, frozenMargin: 1800, positionDeposit: 1000, openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1, orderPrice: 99, frozenMargin: 1800, orderDeposit: 3600 }] } };
@@ -51,9 +52,12 @@ test("direct analysis sends full approved owner experience and both order books 
     assert.equal(context.evidence[0].excerpt, undefined);
     assert.equal(context.experiencePrompt, undefined);
     assert.equal(context.approvedSkills[0].title, "经验");
+    assert.deepEqual(context.approvedSkills.map((skill) => skill.title), ["经验", "共享经验", "公共经验"]);
     assert.equal(context.approvedSkills[0].content, undefined);
     assert.equal(payload.messages.filter((message) => message.content.includes(content)).length, 1);
     assert.ok(payload.messages.some((message) => message.content.includes(experiencePrompt)));
+    assert.ok(payload.messages.some((message) => message.content.includes("shared experience") && message.content.includes("legacy experience")));
+    assert.doesNotMatch(JSON.stringify(payload), /"draft"/);
     assert.equal(context.strategy.kline.printSecond, 50);
     assert.equal(context.market.books[1].orderBook.bestBid, 200);
     assert.equal(context.market.account.openOrders[0].orderId, "O-1");

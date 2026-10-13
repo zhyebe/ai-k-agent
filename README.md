@@ -63,7 +63,7 @@ MONGO_DB=axiom_agent
 
 ## RAG 与初始化 Skill
 
-用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿。生产环境中，审核后的经验全文携带版本和 evidence ID，与行情一起直接交给客户端 AI；不建立切片索引。草稿和其他账号的经验不会进入分析上下文。经验超出上下文上限时明确报错。
+用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿。生产环境中，审核后的经验全文携带版本和 evidence ID，与行情一起直接交给客户端 AI；不建立切片索引。Skills 与经验为共享知识库，所有登录用户均可读取（包括草稿）；已审核内容不按创建账号过滤，会进入各用户的 AI 分析上下文，草稿不参与分析。审核和删除仍限创建者；删除账号保留共享知识。经验超出上下文上限时明确返回 `AI_KNOWLEDGE_TOO_LARGE`，不会静默截断。
 
 项目内置 Skill：
 
@@ -83,7 +83,9 @@ npm run mcp
 
 暴露工具：浏览器导航/提取/连接器登录请求、白名单桌面 App 发现/启动、白名单 Shell 命令（包括 `bash` / `sh`）。Shell 和桌面动作没有明确 `approved: true` 时只返回审批要求；命令使用参数数组执行，不拼接自由格式 Shell 字符串。交易下单、提现、修改风控和扩大资金权限不在 MCP 工具列表中。
 
-管理接口（账号、任务分配、审计摘要）要求登录后由 `x-admin-token` 会话访问；管理令牌不能访问 `/api/workspace`、任务控制、连接器、凭据、Provider 或 Skills 接口。上述客户端能力只接受桌面用户的 `x-user-token`，Provider、凭据和用户上传的 Skills 按桌面账号隔离；API CORS 默认只允许本地页面和 Electron 的 `null` 来源，可用 `CORS_ALLOWED_ORIGINS` 增加明确来源。Provider、连接器和 Skills 的操作不在后台页面提供。
+管理接口（账号、任务分配、审计摘要）要求登录后由 `x-admin-token` 会话访问；管理令牌不能访问 `/api/workspace`、任务控制、连接器、凭据、Provider 或 Skills 接口。上述客户端能力只接受桌面用户的 `x-user-token`，Provider、凭据、连接器、任务及运行数据按桌面账号隔离；Skills 与经验供所有登录用户共享读取，已审核内容共享给 AI；API CORS 默认只允许本地页面和 Electron 的 `null` 来源，可用 `CORS_ALLOWED_ORIGINS` 增加明确来源。Provider、连接器和 Skills 的操作不在后台页面提供。
+
+退出桌面账号立即清除本机 token、工作区与表单状态，取消旧会话请求；服务端停止该用户全部任务并撤销会话，桌面端中止 AI/浏览器调用、断开实时连接并等待浏览器关闭。旧响应不能写入后续登录的工作区；退出失败时明确提示服务端任务停止未确认。已保存的个人配置保留供下次登录使用，共享 Skills 与经验保留。登录退出回归页面可用 `PLAYWRIGHT_CHANNEL=chrome node --test scripts/logout-ui.mjs` 验证。
 
 ## 当前适配边界
 

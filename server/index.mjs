@@ -270,7 +270,7 @@ function snapshot(auth = null) {
   return {
     ...publicState({ userId: currentUser?.id || null }),
     health: { db: persistence.mode, dbAvailable: persistence.available, persistentSecret: hasPersistentSecret(), vault: vaultStatus() },
-    rag: getRagStats(currentUser ? { ownerUserId: currentUser.id } : {}),
+    rag: getRagStats(),
     credentials: currentUser ? publicOwnedCredentials({ type: "user", user: currentUser }) : [],
     auth: currentUser ? { type: "user", user: currentUser } : auth ? { type: auth.type, username: auth.username } : null,
   };
@@ -462,7 +462,17 @@ app.post("/api/user/login", async (request, reply) => {
   return session;
 });
 app.get("/api/user/session", { preHandler: requireUser }, async (request) => ({ authenticated: true, ...request.userSession, config: userAuthStatus() }));
-app.post("/api/user/logout", { preHandler: requireUser }, async (request) => { await revokeUserSession(userTokenFromRequest(request)); return { ok: true }; });
+app.post("/api/user/logout", { preHandler: requireUser }, async (request, reply) => {
+  const userId = request.userSession.user.id;
+  const revocation = revokeUserSession(userTokenFromRequest(request));
+  const tasks = state.tasks.filter((task) => String(task.ownerUserId || "") === userId);
+  for (const task of tasks) stopTask(task.id);
+  disconnectUserConnections(userId, "USER_LOGOUT");
+  const results = await Promise.allSettled([revocation, ...tasks.map((task) => persistTask(task))]);
+  if (results.some((result) => result.status === "rejected")) return reply.code(503).send({ error: "USER_LOGOUT_FAILED" });
+  addEvent("user_logout", `桌面用户退出，已停止 ${tasks.length} 个任务`, { userId });
+  return { ok: true };
+});
 
 app.get("/api/admin/users", { preHandler: requireAdmin }, async () => ({ users: listUsers().map(adminAccount) }));
 app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply) => {
@@ -510,8 +520,6 @@ app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (requ
     console.error("deleteUserData failed", error);
     return reply.code(503).send({ error: "USER_DELETE_FAILED" });
   }
-  for (const skill of state.skills.filter((item) => String(item.ownerUserId || "") === String(user.id))) removeSkill(skill.id);
-  state.skills = state.skills.filter((item) => String(item.ownerUserId || "") !== String(user.id));
   state.providers = state.providers.filter((item) => String(item.ownerUserId || "") !== String(user.id));
   state.connectors = state.connectors.filter((item) => String(item.ownerUserId || "") !== String(user.id));
   for (const taskId of taskIds) removeTaskFromMemory(taskId);
@@ -1080,7 +1088,7 @@ app.post("/api/skills", { preHandler: requireWorkspaceAccess }, async (request, 
   state.skills.unshift(skill);
   addEvent("skill_ingested", `已解析专家经验，等待审核：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id, chunks: 0 });
   broadcast();
-  return reply.code(201).send({ skill: publicSkill(skill) });
+  return reply.code(201).send({ skill: publicSkill(skill, request.auth.user.id) });
 });
 app.post("/api/skills/:skillId/approve", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const skill = state.skills.find((item) => item.id === request.params.skillId);
@@ -1100,7 +1108,7 @@ app.post("/api/skills/:skillId/approve", { preHandler: requireWorkspaceAccess },
   }
   addEvent("skill_approved", `Skill 已审核发布：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id, version: skill.version, chunks: skill.chunks });
   broadcast();
-  return { skill: publicSkill(skill) };
+  return { skill: publicSkill(skill, request.auth.user.id) };
 });
 app.delete("/api/skills/:skillId", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const skill = state.skills.find((item) =>
@@ -1116,10 +1124,10 @@ app.delete("/api/skills/:skillId", { preHandler: requireWorkspaceAccess }, async
   state.skills = state.skills.filter((item) => item.id !== skill.id);
   removeSkill(skill.id);
   addEvent("skill_deleted", `已删除经验：${skill.title}`, { skillId: skill.id, userId: request.auth.user.id });
-  broadcast(request.auth.user.id);
+  broadcast();
   return { ok: true };
 });
-app.get("/api/rag/search", { preHandler: requireWorkspaceAccess }, async (request) => ({ query: request.query?.q || "", results: searchKnowledge(request.query?.q || "", { ownerUserId: request.auth.user.id }, 8), stats: getRagStats({ ownerUserId: request.auth.user.id }) }));
+app.get("/api/rag/search", { preHandler: requireWorkspaceAccess }, async (request) => ({ query: request.query?.q || "", results: searchKnowledge(request.query?.q || "", {}, 8), stats: getRagStats() }));
 
 app.get("/api/admin/summary", { preHandler: requireAdmin }, async () => {
   const accounts = listUsers().map(adminAccount);

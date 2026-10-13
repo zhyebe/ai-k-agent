@@ -184,8 +184,8 @@ export function getUserSession(token) {
 export async function revokeUserSession(token) {
   const key = tokenHash(token);
   const removed = sessions.has(key);
-  if (removed && persistence?.deleteUserSession) await persistence.deleteUserSession(key);
   if (removed) sessions.delete(key);
+  if (removed && persistence?.deleteUserSession) await persistence.deleteUserSession(key);
   return removed;
 }
 

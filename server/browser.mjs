@@ -622,7 +622,9 @@ export async function closeAllBrowserSessions() {
   browserClosing = true;
   await Promise.allSettled([...sessionLaunches.values()]);
   const keys = [...sessions.keys()];
-  await Promise.allSettled(keys.map((key) => closeBrowserSession(key)));
+  const results = await Promise.allSettled(keys.map((key) => closeBrowserSession(key)));
+  const errors = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
+  if (errors.length) throw new AggregateError(errors, "BROWSER_SESSION_CLOSE_FAILED");
   return keys.length;
 }
 

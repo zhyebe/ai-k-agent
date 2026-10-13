@@ -101,3 +101,47 @@ test("a trading call still cancels on disconnect and is never replayed", async (
   assert.ok(closes > 0);
   assert.equal(submitted, 1);
 });
+
+test("desktop logout IPC waits for browser cleanup and reports a cleanup failure", async () => {
+  const handlers = new Map();
+  const started = deferred();
+  const finish = deferred();
+  let fail = false;
+  const runtime = loadRuntime("ai-runtime.cjs", {
+    "./browser-runtime.cjs": {
+      closeBrowserRuntime: async () => {
+        started.resolve();
+        await finish.promise;
+        if (fail) throw new Error("BROWSER_SESSION_CLOSE_FAILED");
+      },
+    },
+  });
+  runtime.bindIpc({ handle: (name, fn) => handlers.set(name, fn) }, {});
+  let completed = false;
+  const logout = handlers.get("ai:disconnect")().then(() => { completed = true; });
+  await started.promise;
+  assert.equal(completed, false);
+  finish.resolve();
+  await logout;
+  assert.equal(completed, true);
+  fail = true;
+  await assert.rejects(handlers.get("ai:disconnect")(), /BROWSER_SESSION_CLOSE_FAILED/);
+});
+
+test("desktop logout clears shared runtime caches and trade confirmation records", async () => {
+  let closed = false;
+  const runtime = loadRuntime("browser-runtime.cjs", {}, `
+    module.exports.seed = () => {
+      modulesPromise = Promise.resolve({ browser: { closeAllBrowserSessions: async () => { module.exports.closed = true; } } });
+      queues.set("old", Promise.resolve());
+      collectedMarkets.set("old", {});
+      confirmations.add("old");
+    };
+    module.exports.sizes = () => [queues.size, collectedMarkets.size, confirmations.size];
+  `);
+  runtime.seed();
+  await runtime.closeBrowserRuntime();
+  closed = runtime.closed;
+  assert.equal(closed, true);
+  assert.deepEqual(Array.from(runtime.sizes()), [0, 0, 0]);
+});

@@ -34,11 +34,13 @@ export function setUserToken(token: string) {
     clearUserToken();
     return;
   }
+  if (value !== getUserToken()) invalidateSession();
   window.localStorage.setItem(USER_TOKEN_KEY, value);
   window.sessionStorage.removeItem(USER_TOKEN_KEY);
 }
 
 export function clearUserToken() {
+  invalidateSession();
   window.localStorage.removeItem(USER_TOKEN_KEY);
   window.sessionStorage.removeItem(USER_TOKEN_KEY);
 }
@@ -64,6 +66,8 @@ function authHeaders(): Record<string, string> {
 }
 
 const mutatingInFlight = new Map<string, Promise<unknown>>();
+const sessionRequests = new Set<AbortController>();
+let sessionGeneration = 0;
 export type RequestOptions = RequestInit & { background?: boolean };
 let pendingRequests = 0;
 const requestListeners = new Set<() => void>();
@@ -79,30 +83,61 @@ function updatePendingRequests(change: number) {
   requestListeners.forEach((listener) => listener());
 }
 
-function mutationKey(path: string, options?: RequestInit) {
-  const method = String(options?.method || "GET").toUpperCase();
-  if (method === "GET" || method === "HEAD") return "";
-  return `${method} ${path} ${typeof options?.body === "string" ? options.body : ""}`;
+function invalidateSession() {
+  sessionGeneration += 1;
+  for (const controller of sessionRequests) controller.abort(new DOMException("SESSION_ENDED", "AbortError"));
+  sessionRequests.clear();
+  mutatingInFlight.clear();
+  updatePendingRequests(-pendingRequests);
 }
 
-async function request<T>(path: string, options?: RequestOptions): Promise<T> {
-  const key = mutationKey(path, options);
+function mutationKey(path: string, scope: string, options?: RequestInit) {
+  const method = String(options?.method || "GET").toUpperCase();
+  if (method === "GET" || method === "HEAD") return "";
+  return `${scope} ${method} ${path} ${typeof options?.body === "string" ? options.body : ""}`;
+}
+
+async function request<T>(path: string, options?: RequestOptions, sessionBound = true): Promise<T> {
+  const generation = sessionGeneration;
+  const baseUrl = apiBaseUrl;
+  const tokens = authHeaders();
+  const scope = JSON.stringify([baseUrl, tokens]);
+  const key = sessionBound ? mutationKey(path, scope, options) : "";
   const existing = key ? mutatingInFlight.get(key) : undefined;
   if (existing) return existing as Promise<T>;
-  const headers = new Headers({ ...authHeaders(), ...(options?.headers || {}) });
+  const headers = new Headers(tokens);
+  new Headers(options?.headers).forEach((value, name) => headers.set(name, value));
   if (options?.body !== undefined && !headers.has("content-type")) headers.set("content-type", "application/json");
   const { background = false, ...fetchOptions } = options || {};
+  const controller = new AbortController();
+  if (sessionBound) sessionRequests.add(controller);
+  const signal = options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+  const assertCurrent = () => {
+    if (sessionBound && (generation !== sessionGeneration || scope !== JSON.stringify([apiBaseUrl, authHeaders()]))) {
+      throw new DOMException("SESSION_ENDED", "AbortError");
+    }
+    signal.throwIfAborted();
+  };
   if (!background) updatePendingRequests(1);
   const pending = (async () => {
     try {
-      const response = await fetch(`${apiBaseUrl}${path}`, {
+      const response = await fetch(`${baseUrl}${path}`, {
         ...fetchOptions,
         headers,
+        signal,
       });
-      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
-      return await response.json() as T;
+      assertCurrent();
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        assertCurrent();
+        throw new Error(body?.error || `HTTP ${response.status}`);
+      }
+      const result = await response.json() as T;
+      assertCurrent();
+      return result;
     } finally {
-      if (!background) updatePendingRequests(-1);
+      sessionRequests.delete(controller);
+      if (!background && generation === sessionGeneration) updatePendingRequests(-1);
     }
   })();
   if (key) {
@@ -138,7 +173,12 @@ export async function userSession() {
 }
 
 export async function userLogout() {
-  return request<{ ok: boolean }>("/api/user/logout", { method: "POST", body: "{}" });
+  const token = getUserToken();
+  clearUserToken();
+  return request<{ ok: boolean }>("/api/user/logout", {
+    method: "POST", body: "{}", headers: { "x-user-token": token },
+    background: true, signal: AbortSignal.timeout(15000),
+  }, false);
 }
 
 export async function listAdminUsers() {

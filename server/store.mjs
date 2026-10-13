@@ -119,10 +119,10 @@ export function publicConnector(connector) {
   return safeConnector;
 }
 
-export function publicSkill(skill) {
+export function publicSkill(skill, userId = "") {
   if (!skill) return skill;
   const { ownerUserId, ...safeSkill } = skill;
-  return { ...safeSkill, owned: Boolean(ownerUserId) };
+  return { ...safeSkill, owned: Boolean(userId && String(ownerUserId || "") === String(userId)) };
 }
 
 export function publicProvider(provider) {
@@ -452,15 +452,12 @@ export function publicState({ taskIds = null, userId = null, includeEvents = fal
     : visibleTaskIds
       ? state.events.filter((event) => visibleTaskIds.has(String(event.metadata?.taskId || "")))
       : state.events;
-  const visibleSkills = normalizedUserId
-    ? state.skills.filter((skill) => String(skill.ownerUserId || "") === normalizedUserId)
-    : state.skills;
   const visibleConnectors = normalizedUserId
     ? state.connectors.filter((connector) => String(connector.ownerUserId || "") === normalizedUserId)
     : state.connectors;
   return {
     tasks: tasks.map(publicTask),
-    skills: visibleSkills.map(publicSkill),
+    skills: state.skills.map((skill) => publicSkill(skill, normalizedUserId)),
     providers: normalizedUserId ? publicProviderList(normalizedUserId) : state.providers.map(publicProvider),
     events: includeEvents ? visibleEvents : [],
     runs: visibleTaskIds ? state.runs.filter((run) => visibleTaskIds.has(String(run.taskId || ""))) : state.runs,

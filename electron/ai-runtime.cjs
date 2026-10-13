@@ -106,7 +106,8 @@ function disconnect() {
   activeSession = null;
   clearInterval(heartbeatTimer);
   for (const call of activeCalls.values()) call.controller.abort(new Error("DESKTOP_DISCONNECTED"));
-  cleanupPromise = cleanupPromise.then(() => closeBrowserRuntime()).catch((error) => console.error("Desktop browser cleanup failed", error.message));
+  cleanupPromise = cleanupPromise.catch(() => {}).then(() => closeBrowserRuntime());
+  cleanupPromise.catch((error) => console.error("Desktop browser cleanup failed", error.message));
   safeCloseSocket(current);
   return cleanupPromise;
 }
@@ -195,8 +196,8 @@ function connect(app, session) {
 
 function bindIpc(ipcMain, app) {
   ipcMain.handle("ai:connect", (_event, session) => connect(app, session || {}));
-  ipcMain.handle("ai:disconnect", () => {
-    disconnect();
+  ipcMain.handle("ai:disconnect", async () => {
+    await disconnect();
     return { ok: true };
   });
 }

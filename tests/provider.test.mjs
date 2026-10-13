@@ -550,7 +550,7 @@ test("provider decision sends approved experience as a separate analysis prompt"
     await requestDecision(provider, { evidenceIds: ["evidence:skill:one:v1"], experiencePrompt: "标题：盘口回撤经验\n原文：放量突破后观察回撤" });
     const promptMessage = received.messages.find((message) => message.content.includes("标题：盘口回撤经验"));
     assert.ok(promptMessage);
-    assert.match(promptMessage.content, /审核通过的 Skill/);
+    assert.match(promptMessage.content, /共享知识库中已审核发布的 Skill/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
