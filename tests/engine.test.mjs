@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
-import { createProvider } from "../server/provider.mjs";
+import { createProvider, requestDecision } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
 
@@ -294,6 +294,9 @@ for (const autoDecisionEnabled of [false, true]) {
           assert.deepEqual(submissions[0].targetPositionIds, ["P-close"]);
           assert.equal(submissions[0].quantity, 2);
           assert.equal(task.pendingAction.status, "AWAITING_FILL");
+          assert.equal(task.decision.riskFlags.includes("HUMAN_REVIEW_REQUIRED"), false);
+          assert.equal(task.decision.riskFlags.includes("RED_LINE_TRIGGERED"), false);
+          assert.equal(task.pendingAction.decisionRunId, task.decision.runId);
         } finally {
           stopController(taskId);
           state.tasks = state.tasks.filter((item) => item.id !== taskId);
@@ -824,6 +827,87 @@ for (const autoDecisionEnabled of [false, true]) {
       assert.equal(task.status, "MONITORING");
     } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
   });
+}
+
+for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
+  for (const autoDecisionEnabled of [false, true]) {
+    test(`${apiFormat}格式失败后恢复入场、离场、撤单，保留${autoDecisionEnabled ? "自动" : "手动"}模式和历史订单`, async (t) => {
+      const task = insertNorthstarTask(`provider_recovery_${apiFormat}_${autoDecisionEnabled}_${Date.now()}`);
+      Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+      task.rules = [{ id: "review", mode: "REVIEW", status: "pending" }, { id: "block", mode: "BLOCK", status: "pending" }];
+      const market = testMarketSnapshot("recovery-0", 103);
+      market.account = { positionsVerified: true, openOrdersVerified: true, positions: [
+        { positionOrderId: "P-legacy", symbol: task.symbol, side: "买", quantity: 1 },
+        { positionOrderId: "P-active", symbol: task.symbol, side: "买", quantity: 2 },
+      ], openOrders: [{ orderId: "O-cancel", symbol: task.symbol, side: "买", remainingQuantity: 1 }] };
+      task.market = structuredClone(market);
+      task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-legacy"], targetSymbol: task.symbol }), status: "AWAITING_FILL", decisionRunId: "old-run", createdAt: "2026-10-10T00:00:00Z" };
+      const legacyId = task.pendingAction.id;
+      const provider = { apiKey: "synthetic-key", baseUrl: "https://provider.example.test", model: apiFormat === "chat" ? "deepseek-v4-pro" : "test-model", apiFormat };
+      let phase = 0;
+      let requests = 0;
+      const submitted = [];
+      const filled = [];
+      const cancelled = [];
+      const answers = [
+        '{"action":"BUY",',
+        JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol }),
+        JSON.stringify({ action: "SELL", exit_type: "TAKE_PROFIT", target_position_ids: ["P-active"], target_symbol: task.symbol, bullish_profit_probability: 0.2, bearish_profit_probability: 0.2 }),
+        JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, cancel_order_ids: ["O-cancel"] }),
+      ];
+      t.mock.method(globalThis, "fetch", async () => {
+        requests++;
+        const text = answers[phase];
+        const payload = apiFormat === "chat" ? { choices: [{ message: { reasoning_content: "private", content: [{ type: "text", text }] }, finish_reason: "stop" }] }
+          : apiFormat === "responses" ? { output: [{ type: "reasoning", content: [{ type: "text", text: "private" }] }, { type: "message", content: [{ type: "output_text", text }] }], status: "completed" }
+            : apiFormat === "anthropic" ? { content: [{ type: "thinking", text: "private" }, { type: "text", text }], stop_reason: "end_turn" }
+              : { candidates: [{ content: { parts: [{ thought: true, text: "private" }, { text }] }, finishReason: "STOP" }] };
+        return new Response(JSON.stringify(payload));
+      });
+      const runtime = {
+        openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+        observeMarket: async () => ({ ...market, fingerprint: `recovery-${phase}` }),
+        requestDecision: async (_provider, context, options) => {
+          assert.equal(context.executionPolicy.rulesBlockExecution, false);
+          assert.equal(context.executionPolicy.entryMode, autoDecisionEnabled ? "automatic" : "manual_submit");
+          assert.equal(context.account.positions.length, 2);
+          return requestDecision(provider, context, options);
+        },
+        fillSuggestionForm: async (input) => { filled.push(input); return { ok: true, filled: true }; },
+        submitSuggestionForm: async (input) => { submitted.push(input); return { ok: true, filled: true, submitted: true }; },
+        cancelOpenOrders: async (input) => { cancelled.push(input.orderIds); return { ok: true, results: input.orderIds.map((orderId) => ({ orderId, cancelled: true })) }; },
+      };
+      try {
+        const failure = await runMonitoringCycle(task.id, { runtime });
+        assert.equal(failure.run.status, "error");
+        assert.equal(failure.run.code, "INVALID_MODEL_JSON");
+        assert.equal(failure.route, "ANALYSIS_FAILED");
+        assert.equal(submitted.length, 0);
+        assert.equal(task.pendingAction.id, legacyId);
+        assert.equal(task.pendingAction.status, "AWAITING_FILL");
+        assert.ok(task.nextPollAt);
+        assert.equal(state.agentOutput.find((line) => line.runId === failure.run.id && line.kind === "decision").data.modelDiagnostics.jsonStatus, "INVALID_JSON");
+        phase = 1;
+        await runMonitoringCycle(task.id, { runtime });
+        assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
+        assert.equal(task.pendingAction.decisionRunId, task.decision.runId);
+        assert.equal(filled.length, autoDecisionEnabled ? 0 : 1);
+        assert.equal(submitted.length, autoDecisionEnabled ? 1 : 0);
+        assert.ok(task.unsettledActions.some((pending) => pending.id === legacyId));
+        phase = 2;
+        await runMonitoringCycle(task.id, { runtime });
+        assert.equal(submitted.at(-1).exitType, "TAKE_PROFIT");
+        assert.deepEqual(submitted.at(-1).targetPositionIds, ["P-active"]);
+        assert.equal(submitted.at(-1).quantity, 2);
+        phase = 3;
+        await runMonitoringCycle(task.id, { runtime });
+        assert.deepEqual(cancelled, [["O-cancel"]]);
+        assert.equal(requests, 4);
+        assert.equal(task.status, "MONITORING");
+        assert.equal(task.decision.riskFlags.includes("HUMAN_REVIEW_REQUIRED"), false);
+      } finally { stopController(task.id); state.tasks = state.tasks.filter((item) => item.id !== task.id); }
+    });
+  }
 }
 
 test("AI KEEP does not invoke cancellation", async () => {

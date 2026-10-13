@@ -77,3 +77,17 @@ test("heartbeat evicts an unresponsive desktop socket", async (t) => {
   assert.equal(hasDesktopAi("owner"), false);
   assert.equal(socket.readyState, 3);
 });
+
+test("live desktop traffic counts as heartbeat even when a pong is delayed", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  t.after(resetDesktopAiForTests);
+  const socket = new Socket();
+  attachDesktopAiSocket("owner", socket);
+  t.mock.timers.tick(15000);
+  socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
+  t.mock.timers.tick(15000);
+  assert.equal(hasDesktopAi("owner"), true);
+  socket.emit("pong");
+  t.mock.timers.tick(15000);
+  assert.equal(hasDesktopAi("owner"), true);
+});

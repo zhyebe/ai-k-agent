@@ -1,12 +1,67 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
-import { buildConversationMessages, createProvider, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
+import { buildConversationMessages, createProvider, extractModelText, listProviderModels, normalizeUnitProbability, providerApiKey, providerIdentityKey, providerRequestUrl, publicProvider, requestBrowserActions, requestDecision, requestSegmentReview, resolveProviderWireApi, verifyProvider } from "../server/provider.mjs";
 import { hasDirectionalProbabilities } from "../server/entry-policy.mjs";
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
+
+test("all provider formats extract final text without treating reasoning as the decision", () => {
+  const final = '{"action":"SELL","bullish_profit_probability":0.3,"bearish_profit_probability":0.6}';
+  const reasoning = '{"action":"BUY"}';
+  for (const payload of [
+    { choices: [{ message: { reasoning_content: reasoning, content: [{ type: "text", text: final.slice(0, 30) }, { type: "text", text: final.slice(30) }] } }] },
+    { content: [{ type: "thinking", text: reasoning }, { type: "text", text: final }] },
+    { output: [{ type: "reasoning", content: [{ type: "text", text: reasoning }] }, { type: "message", content: [{ type: "output_text", text: final }] }] },
+    { candidates: [{ content: { parts: [{ thought: true, text: reasoning }, { text: final }] } }] },
+  ]) assert.equal(extractModelText(payload), final);
+});
+
+test("a single complete decision inside prose braces is parsed without repairing malformed JSON", async (t) => {
+  const final = { action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, analysis_summary: 'literal {level} and "quote"' };
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: `说明 {非 JSON 注释}\n${JSON.stringify(final)}\n结束` }, finish_reason: "stop" }] })));
+  const result = await requestDecision({ apiKey: "secret-test-key", baseUrl: "https://provider.example.test", model: "deepseek-v4-pro" }, {});
+  assert.equal(result.action, "BUY");
+  assert.equal(result.analysisSummary, final.analysis_summary);
+  assert.equal(result.modelDiagnostics.jsonStatus, "COMPLETE_JSON");
+  assert.equal(result.modelDiagnostics.contentHash.length, 64);
+  assert.doesNotMatch(JSON.stringify(result.modelDiagnostics), /secret-test-key|非 JSON 注释|literal/);
+});
+
+test("malformed output keeps failure diagnostics and the following valid decision still works", async (t) => {
+  const malformed = '{"action":"BUY","bullish_profit_probability":0.9';
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ content: [{ type: "thinking", thinking: "private reasoning" }, { type: "text", text: calls++ === 0 ? malformed : '{"action":"SELL","bullish_profit_probability":0.3,"bearish_profit_probability":0.6}' }], stop_reason: "end_turn", usage: { input_tokens: 32000, output_tokens: 2500 } })));
+  const provider = { apiKey: "secret-test-key", apiFormat: "anthropic", baseUrl: "https://api.stepfun.com/step_plan/v1/messages", fullUrlMode: true, model: "step-5-preview" };
+  const failure = await requestDecision(provider, {}, { fastAnalysis: true });
+  assert.deepEqual(failure.riskFlags, ["INVALID_MODEL_JSON"]);
+  assert.equal(failure.action, "HOLD");
+  assert.equal(failure.modelDiagnostics.jsonStatus, "INVALID_JSON");
+  assert.equal(failure.modelDiagnostics.stopReason, "end_turn");
+  assert.deepEqual(failure.modelDiagnostics.contentTypes, ["thinking", "text"]);
+  assert.equal(failure.modelDiagnostics.textLength, malformed.length);
+  assert.doesNotMatch(JSON.stringify(failure.modelDiagnostics), /secret-test-key|private reasoning|bullish_profit_probability/);
+  const next = await requestDecision(provider, {}, { fastAnalysis: true });
+  assert.equal(next.action, "SELL");
+  assert.equal(next.bearishProfitProbability, 0.6);
+  assert.equal(calls, 2);
+});
+
+test("conflicting complete outputs and truncated nested JSON never become a trade", async (t) => {
+  const buy = JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3 });
+  const sell = JSON.stringify({ action: "SELL", bullish_profit_probability: 0.3, bearish_profit_probability: 0.6 });
+  let content;
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content } }] })));
+  for (content of [`\`\`\`json\n${buy}\n\`\`\`\n${sell}`, `{\"incomplete\":${buy}`, `${buy}\n{\"action\":`]) {
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {});
+    assert.equal(result.action, "HOLD");
+    assert.deepEqual(result.riskFlags, ["INVALID_MODEL_JSON"]);
+  }
+  content = `\`\`\`json\n${sell}\n\`\`\``;
+  assert.equal((await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {})).action, "SELL");
+});
 
 test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profit/configured quantity", async (t) => {
   let calls = 0;

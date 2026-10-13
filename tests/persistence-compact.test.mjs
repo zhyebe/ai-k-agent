@@ -2,6 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persistence.mjs";
 
+test("decision correlation and compact model diagnostics survive restart without raw output", () => {
+  const modelDiagnostics = { wireApi: "anthropic", jsonStatus: "INVALID_JSON", contentTypes: ["thinking", "text"], stopReason: "end_turn", textLength: 40, contentHash: "a".repeat(64) };
+  const runtime = compactTaskRuntime({
+    decision: { runId: "current-run", action: "HOLD", modelDiagnostics: { ...modelDiagnostics, rawOutput: "private model output", reasoning: "private thinking" } },
+    pendingAction: { id: "prior-order", decisionRunId: "prior-run", status: "AWAITING_FILL" },
+  });
+  assert.equal(runtime.decision.runId, "current-run");
+  assert.equal(runtime.pendingAction.decisionRunId, "prior-run");
+  assert.deepEqual(runtime.decision.modelDiagnostics, modelDiagnostics);
+  assert.doesNotMatch(JSON.stringify(runtime), /private model output|private thinking/);
+});
+
 test("MySQL runtime retains configured quantity and cancellation evidence", () => {
   const task = { entryQuantity: 3, decision: { action: "HOLD", orderAssessments: [{ orderId: "O-1", decision: "CANCEL" }], cancelOrderIds: ["O-1"], orderCancellation: { results: [{ orderId: "O-1", cancelled: true }] } } };
   const stored = JSON.parse(JSON.stringify(compactTaskRuntime(task)));

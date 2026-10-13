@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { decryptSecret, encryptSecret, maskSecret } from "./crypto.mjs";
 import { uniqueBoardAssessments } from "./haohan.mjs";
 import { hasDirectionalProbabilities } from "./entry-policy.mjs";
@@ -257,26 +258,30 @@ function providerRequestBody(provider, messages, options = {}) {
 }
 
 export function extractModelText(payload) {
+  const isReasoning = (part) => part?.thought === true || ["reasoning", "thinking", "redacted_thinking", "analysis"].includes(part?.type);
+  const partText = (part) => typeof part === "string" ? part : !isReasoning(part) && typeof part?.text === "string" ? part.text : "";
   if (typeof payload?.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
   if (Array.isArray(payload?.output)) {
     const texts = [];
     for (const item of payload.output) {
+      if (isReasoning(item)) continue;
       if (typeof item?.text === "string") texts.push(item.text);
       for (const part of Array.isArray(item?.content) ? item.content : []) {
-        if (typeof part?.text === "string") texts.push(part.text);
+        texts.push(partText(part));
       }
     }
     if (texts.join("").trim()) return texts.join("").trim();
   }
   if (Array.isArray(payload?.content)) {
-    const text = payload.content.map((part) => typeof part?.text === "string" ? part.text : "").join("").trim();
+    const text = payload.content.map(partText).join("").trim();
     if (text) return text;
   }
   if (Array.isArray(payload?.candidates?.[0]?.content?.parts)) {
-    const text = payload.candidates[0].content.parts.map((part) => typeof part?.text === "string" ? part.text : "").join("").trim();
+    const text = payload.candidates[0].content.parts.map(partText).join("").trim();
     if (text) return text;
   }
-  return String(payload?.choices?.[0]?.message?.content || "").trim();
+  const content = payload?.choices?.[0]?.message?.content;
+  return (Array.isArray(content) ? content.map(partText).join("") : typeof content === "string" ? content : "").trim();
 }
 
 async function readJsonPayload(response) {
@@ -537,16 +542,45 @@ function parseModelContent(content) {
   const text = String(content || "").trim();
   if (!text) return null;
   try { return JSON.parse(text); } catch {}
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  if (fenced) {
-    try { return JSON.parse(fenced[1]); } catch {}
+  // Locate complete top-level JSON values. Never repair a fragment or choose between conflicting outputs.
+  const candidates = [];
+  let start = -1;
+  let stack = [];
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (start < 0) {
+      if (char !== "{" && char !== "[") continue;
+      start = index;
+      stack = [char];
+      continue;
+    }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === "{" || char === "[") stack.push(char);
+    if (char !== "}" && char !== "]") continue;
+    if (stack.at(-1) !== (char === "}" ? "{" : "[")) return null;
+    stack.pop();
+    if (stack.length) continue;
+    try { candidates.push(JSON.parse(text.slice(start, index + 1))); } catch {}
+    start = -1;
   }
-  const first = text.indexOf("{");
-  const last = text.lastIndexOf("}");
-  if (first >= 0 && last > first) {
-    try { return JSON.parse(text.slice(first, last + 1)); } catch {}
-  }
-  return null;
+  return start < 0 && candidates.length === 1 ? candidates[0] : null;
+}
+
+function modelDiagnostics(payload, content, parsed, wireApi) {
+  const knownTypes = new Set(["text", "output_text", "input_text", "thinking", "reasoning", "analysis", "redacted_thinking", "message", "tool_use", "tool_result", "refusal"]);
+  const parts = payload.content || payload.output || payload.choices?.[0]?.message?.content || payload.candidates?.[0]?.content?.parts;
+  const contentTypes = Array.isArray(parts) ? [...new Set(parts.map((part) => part?.thought ? "thinking" : knownTypes.has(part?.type) ? part.type : typeof part?.text === "string" ? "text" : "unknown"))] : typeof parts === "string" ? ["text"] : [];
+  const reason = payload.stop_reason || payload.choices?.[0]?.finish_reason || payload.candidates?.[0]?.finishReason || payload.incomplete_details?.reason || payload.status || "";
+  const stopReason = ["end_turn", "stop", "max_tokens", "length", "tool_use", "stop_sequence", "content_filter", "STOP", "MAX_TOKENS", "completed", "incomplete", "max_output_tokens"].includes(reason) ? reason : reason ? "unknown" : "";
+  return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex") };
 }
 
 function providerReady(provider) {
@@ -579,7 +613,9 @@ async function requestProviderJson(provider, messages, options = {}) {
     }
     if (response.ok) {
       const content = extractModelText(payload);
-      return { content, parsed: parseModelContent(content), stopReason: payload.stop_reason || payload.choices?.[0]?.finish_reason || "" };
+      const parsed = parseModelContent(content);
+      const diagnostics = modelDiagnostics(payload, content, parsed, resolveProviderWireApi(candidate.provider));
+      return { content, parsed, stopReason: diagnostics.stopReason, modelDiagnostics: diagnostics };
     }
     lastResponse = response;
     lastPayload = payload;
@@ -739,19 +775,20 @@ export async function requestDecision(provider, context, options = {}) {
   const messages = [
     { role: "system", content: `${coreObjectivePrompt}\n${defaultSystemPrompt}\n${entryThresholdPrompt}\nUser-configured entry quantity: ${requestContext.strategy?.entryQuantity ?? 1} per new order. Assess liquidity, costs and exposure for this quantity; exits use actual position quantity.\n${positionObservationPrompt}\n${conservativeExitPrompt}\n${holdingDurationPrompt}\n${netExitPrompt}\n${pendingOrderPrompt}\n${pendingTransferPrompt}\n${orderBookPrompt}\n${operatorPrompt}\n${permanentCounterpartyPrompt}${options.fastAnalysis ? `\n${fastAnalysisPrompt}` : ""}` },
     ...conversationMessages,
+    ...(requestContext.executionPolicy?.rulesBlockExecution === false ? [{ role: "system", content: "Live execution fact: context.rules are advisory evidence, including modes named BLOCK or REVIEW; they do not block software submission or request human takeover. Assess their market evidence yourself; do not invent an ATR system block. context.executionPolicy.entryMode describes who clicks a new entry; closing positions and cancelling AI-selected orders are automatic in both entry modes. Keep all market and Skill evidence, honest probabilities and existing entry requirements." }] : []),
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),
     { role: "user", content: JSON.stringify(wireContext) },
   ];
   const response = await requestProviderJson(provider, messages, options);
-  const outputLimitReached = ["max_tokens", "length"].includes(response?.stopReason);
-  if (!response?.content || !response.parsed) return normalizeDecision({
+  const outputLimitReached = ["max_tokens", "length", "MAX_TOKENS", "max_output_tokens"].includes(response?.stopReason);
+  if (!response?.content || !response.parsed) return { ...normalizeDecision({
     action: "HOLD",
     risk_flags: [response?.content ? "INVALID_MODEL_JSON" : "EMPTY_MODEL_RESPONSE", ...(outputLimitReached ? ["MODEL_OUTPUT_LIMIT"] : [])],
     invalidation: outputLimitReached
       ? "模型达到输出额度上限，未返回完整结论；继续监控并重新分析"
       : response?.content ? "模型返回内容不是有效的决策 JSON；继续监控并重新分析" : "模型接口未返回结论正文；继续监控并重新分析",
-  });
-  let decision = normalizeDecision(response.parsed);
+  }), modelDiagnostics: response?.modelDiagnostics };
+  let decision = { ...normalizeDecision(response.parsed), modelDiagnostics: response.modelDiagnostics };
   const missingExitAction = (value) => value.holdingPlan.decision === "EXIT_NOW" && (!value.exitType || value.action === "HOLD");
   const inconsistent = (value) => missingExitAction(value) || (value.action === "HOLD"
     && (Boolean(value.exitType) || (!value.orderAssessments.length && !value.cancelOrderIds.length && Math.max(value.bullishProfitProbability, value.bearishProfitProbability) >= 0.45)));
@@ -766,7 +803,7 @@ export async function requestDecision(provider, context, options = {}) {
     } catch (error) {
       if (options.signal?.aborted) throw error;
     }
-    if (corrected?.parsed) decision = normalizeDecision(corrected.parsed);
+    if (corrected?.parsed) decision = { ...normalizeDecision(corrected.parsed), modelDiagnostics: corrected.modelDiagnostics };
     if (inconsistent(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"])];
     if (missingExitAction(decision)) {
       // An incomplete closing plan cannot be routed as a new opening order.

@@ -390,6 +390,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
   const probabilityLabel = `${profitProbabilityLabel(decisionProbability)}%`;
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    decisionRunId: decision.runId || null,
     action,
     orderType: decision.orderType || "MARKET",
     exitType: decision.exitType || null,
@@ -1551,6 +1552,14 @@ function recentAnalysisRounds(taskId, limit = 8) {
     }));
 }
 
+function decisionExecutionPolicy(task) {
+  return isLiveTask(task) ? {
+    entryMode: task.autoDecisionEnabled ? "automatic" : "manual_submit",
+    exitsAutomatic: true, cancellationsAutomatic: true,
+    rulesRole: "advisory", rulesBlockExecution: false,
+  } : undefined;
+}
+
 export function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
   const layered = analysisMarket?.analysisLayers ? analysisMarket : buildLayeredAnalysisMarket(analysisMarket || task.market);
   const positionContext = updatePositionTracking(task, market, Date.now());
@@ -1601,6 +1610,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       positionContext,
     },
     rules: task.rules,
+    executionPolicy: decisionExecutionPolicy(task),
     strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
     approvedSkills: approvedSkillsForContext(evidence),
     experiencePrompt: buildApprovedExperiencePrompt(evidence),
@@ -1935,6 +1945,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           positions: positionContext,
           rawPositions: market.account?.positions || [],
           rules: task.rules,
+          executionPolicy: decisionExecutionPolicy(task),
           strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
           approvedSkills: approvedSkillsForContext(knowledge),
           evidence,
@@ -1949,7 +1960,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         analysisMarket = result.market;
         analysisCoverage = result.coverage;
         task.analysisCoverage = analysisCoverage;
-        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: `客户端分析完成：${analysisCoverage.bookCount} 个盘、${analysisCoverage.totalKlineRows} 根 K 线、${knowledge.length} 条 Skill`, data: analysisCoverage });
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "coverage", message: `客户端已返回分析响应：${analysisCoverage.bookCount} 个盘、${analysisCoverage.totalKlineRows} 根 K 线、${knowledge.length} 条 Skill`, data: analysisCoverage });
       } else if (provider?.encryptedKey && shouldUseSegmentedAnalysis(analysisMarket)) {
         const segmented = await reviewAllMarketSegments({ task, run, provider, runtime, market: analysisMarket, evidence, assertCurrent, signal: analysisAbort.signal });
         assertCurrent();
@@ -2040,7 +2051,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (providerSucceeded && market.fingerprint) task.lastAnalyzedFingerprint = market.fingerprint;
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
-    task.decision = { ...decision, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
+    task.decision = { ...decision, runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
     completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`);
     appendAgentOutput({
@@ -2050,7 +2061,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       kind: "decision",
       level: providerSucceeded ? "info" : "error",
       message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`,
-      data: { action: decision.action, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
+      data: { action: decision.action, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], modelDiagnostics: decision.modelDiagnostics, observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
     });
 
     logStage(task, run, "rules", "执行确定性规则与红线检查");
@@ -2068,13 +2079,13 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const riskLimitExceeded = decisionFlags.has("RISK_LIMIT_EXCEEDED");
     const holdRequired = decision.action === "HOLD" || (!liveExecution && (invalidEvidence || providerUnavailable || riskLimitExceeded || qualityIssues.length > 0));
     if (blocked || reviewRequired || automaticRuleFailures.length || holdRequired) {
-      if (blocked) decisionFlags.add("RED_LINE_TRIGGERED");
-      if (reviewRequired) decisionFlags.add("HUMAN_REVIEW_REQUIRED");
+      if (blocked && !liveExecution) decisionFlags.add("RED_LINE_TRIGGERED");
+      if (reviewRequired && !liveExecution) decisionFlags.add("HUMAN_REVIEW_REQUIRED");
       if (automaticRuleFailures.length) decisionFlags.add("AUTO_RULE_FAILED");
       for (const issue of qualityIssues) decisionFlags.add(issue);
       task.decision.riskFlags = [...decisionFlags];
       task.status = "MONITORING";
-      route = blocked ? "BLOCKED"
+      route = liveExecution ? (providerSucceeded ? (decision.action === "HOLD" ? "HOLD" : "SUGGESTION_PENDING") : "ANALYSIS_FAILED") : blocked ? "BLOCKED"
         : reviewRequired ? "REVIEW"
           : automaticRuleFailures.length ? "HOLD_RULE"
             : qualityIssues.length ? "HOLD_DATA_QUALITY"
@@ -2221,7 +2232,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     state.analyses.unshift(analysis);
     if (state.analyses.length > 20) state.analyses.length = 20;
     persistAnalysis(analysis);
-    finishAgentRun(run.id, { status: "completed", action: task.decision.action, route, code: execution.code || route });
+    finishAgentRun(run.id, { status: providerSucceeded ? "completed" : "error", action: task.decision.action, route, code: providerSucceeded ? execution.code || route : decision.riskFlags.find((code) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].includes(code)) || "ANALYSIS_INCOMPLETE" });
     if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task);
     else if (pauseForPendingAction(task)) task.nextPollAt = null;
       persistTask(task);

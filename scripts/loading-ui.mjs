@@ -164,6 +164,28 @@ for (const [riskFlags, label, invalidation] of [
   });
 }
 
+for (const identified of [false, true]) {
+  test(`old submitted request is separate from a failed current analysis using ${identified ? "run IDs" : "legacy timestamps"}`, async (t) => {
+    const { page, navigate } = await openPage(t);
+    const sample = structuredClone(workspace);
+    const task = sample.tasks[0];
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+    Object.assign(task.decision, { action: "HOLD", riskFlags: ["INVALID_MODEL_JSON"], createdAt: "2026-10-12T11:25:54Z", ...(identified ? { runId: "current" } : {}) });
+    task.pendingAction = { id: "old-submission", action: "SELL", status: "AWAITING_FILL", message: "已提交买跌请求，后台核实成交", createdAt: "2026-10-10T07:29:43Z", ...(identified ? { decisionRunId: "prior" } : {}) };
+    task.unsettledActions = [{ ...task.pendingAction }];
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await navigate();
+    const panel = page.locator(".decision-panel");
+    await panel.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+    assert.equal(await panel.locator(".decision-action strong").innerText(), "模型结果格式无效");
+    assert.doesNotMatch(await panel.locator(".decision-safe").allTextContents().then((lines) => lines.join(" ")), /已提交买跌/);
+    assert.match(await panel.innerText(), /后台核实 1 笔历史请求/);
+    await panel.locator(".decision-details summary").click();
+    assert.match(await panel.locator(".decision-details").innerText(), /历史请求核实.*已提交买跌/s);
+    assert.equal(await page.getByRole("alertdialog").count(), 0);
+  });
+}
+
 for (const width of [1440, 390]) {
   test(`fast decision timestamps and background requests stay readable at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width, height: 900 });

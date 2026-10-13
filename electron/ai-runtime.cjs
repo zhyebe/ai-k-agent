@@ -115,6 +115,8 @@ function connect(app, session) {
   const apiBaseUrl = String(session?.apiBaseUrl || "").trim();
   const userToken = String(session?.userToken || "").trim();
   if (!apiBaseUrl || !userToken) return { ok: false, error: "AI_SESSION_REQUIRED" };
+  if (!stopped && activeSession?.apiBaseUrl === apiBaseUrl && activeSession?.userToken === userToken
+    && socket && [0, 1].includes(socket.readyState)) return { ok: true };
   stopped = false;
   activeSession = { apiBaseUrl, userToken };
   clearTimeout(reconnectTimer);
@@ -148,6 +150,7 @@ function connect(app, session) {
   next.on("message", async (raw) => {
     let message;
     try { message = JSON.parse(String(raw)); } catch { return; }
+    lastPongAt = Date.now();
     if (!message?.id || socket !== next) return;
     if (message.type === "ai.cancel" || message.type === "browser.cancel") {
       activeCalls.get(message.id)?.controller.abort(new Error("DESKTOP_CALL_CANCELLED"));

@@ -84,6 +84,7 @@ export interface Rule {
 
 export interface PendingAction {
   id: string;
+  decisionRunId?: string | null;
   action: "BUY" | "SELL";
   orderType?: "MARKET" | "LIMIT";
   exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
@@ -115,6 +116,7 @@ export interface PendingAction {
 }
 
 export interface Decision {
+  runId?: string;
   observedAt?: string | null;
   analysisDurationMs?: number | null;
   collectionDurationMs?: number | null;

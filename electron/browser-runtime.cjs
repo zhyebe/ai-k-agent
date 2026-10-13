@@ -63,7 +63,9 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     const { browser, market, tools, analysis } = await loadModules(app);
     signal.throwIfAborted();
     const input = { ...message.input, sessionId };
-    const abort = () => { browser.closeBrowserSession(sessionId).catch(() => {}); };
+    const shouldCloseOnAbort = () => !(["observeMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
+      && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
+    const abort = () => { if (shouldCloseOnAbort()) browser.closeBrowserSession(sessionId).catch(() => {}); };
     signal.addEventListener("abort", abort, { once: true });
     try {
       if (message.method === "openMarketBrowser" || message.method === "observeMarket") {
@@ -100,7 +102,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
       throw new Error("BROWSER_METHOD_UNKNOWN");
     } finally {
       signal.removeEventListener("abort", abort);
-      if (signal.aborted) await browser.closeBrowserSession(sessionId);
+      if (signal.aborted && shouldCloseOnAbort()) await browser.closeBrowserSession(sessionId);
     }
   });
   queues.set(sessionId, operation);

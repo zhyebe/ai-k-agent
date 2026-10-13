@@ -74,6 +74,15 @@ function compactPersistedDecision(decision) {
   if (!decision || typeof decision !== "object") return decision;
   return {
     action: decision.action || "HOLD",
+    runId: decision.runId || null,
+    modelDiagnostics: decision.modelDiagnostics ? {
+      wireApi: decision.modelDiagnostics.wireApi,
+      jsonStatus: decision.modelDiagnostics.jsonStatus,
+      contentTypes: decision.modelDiagnostics.contentTypes,
+      stopReason: decision.modelDiagnostics.stopReason,
+      textLength: decision.modelDiagnostics.textLength,
+      contentHash: decision.modelDiagnostics.contentHash,
+    } : null,
     orderAssessments: decision.orderAssessments || [],
     cancelOrderIds: decision.cancelOrderIds || [],
     orderCancellation: decision.orderCancellation || null,
