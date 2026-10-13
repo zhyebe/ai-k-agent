@@ -63,7 +63,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     const { browser, market, tools, analysis } = await loadModules(app);
     signal.throwIfAborted();
     const input = { ...message.input, sessionId };
-    const shouldCloseOnAbort = () => !(["observeMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
+    const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
       && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
     const abort = () => { if (shouldCloseOnAbort()) browser.closeBrowserSession(sessionId).catch(() => {}); };
     signal.addEventListener("abort", abort, { once: true });

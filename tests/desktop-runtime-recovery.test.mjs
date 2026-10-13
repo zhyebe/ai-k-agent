@@ -102,6 +102,28 @@ test("a trading call still cancels on disconnect and is never replayed", async (
   assert.equal(submitted, 1);
 });
 
+for (const reason of ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"]) {
+  test(`opening an existing market page survives ${reason} without destroying its login session`, async () => {
+    const started = deferred();
+    const finish = deferred();
+    let closes = 0;
+    const runtime = loadRuntime("browser-runtime.cjs", {}, "\nmodule.exports.useModules = (value) => { modulesPromise = Promise.resolve(value); };\n");
+    runtime.useModules({
+      browser: { closeBrowserSession: async () => { closes++; } },
+      market: { openMarketBrowser: async () => { started.resolve(); return finish.promise; } },
+    });
+    const controller = new AbortController();
+    const message = { userId: "owner", method: "openMarketBrowser", input: { task: { id: "one", target: { browserSessionId: "task:one" } } }, deadlineAt: Date.now() + 10000 };
+    const opened = runtime.executeBrowserCall({}, message, "https://example.test", controller.signal);
+    const rejected = assert.rejects(opened, new RegExp(reason));
+    await started.promise;
+    controller.abort(new Error(reason));
+    finish.resolve({ ok: true, url: "https://example.test/market" });
+    await rejected;
+    assert.equal(closes, 0, "a transport disconnect must preserve the existing market page and sessionStorage");
+  });
+}
+
 test("desktop logout IPC waits for browser cleanup and reports a cleanup failure", async () => {
   const handlers = new Map();
   const started = deferred();
