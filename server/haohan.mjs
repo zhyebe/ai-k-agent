@@ -536,13 +536,14 @@ export function parseHaohanAccount(visibleText, tables = []) {
   const valueChange = labeledValue(visibleText, ["货值变化"]);
   const dayPnl = labeledValue(visibleText, ["今日盈亏", "当日盈亏"]) ?? valueChange ?? realtimeValueChange;
   const riskRate = labeledValue(visibleText, ["风险率"]);
-  const positions = parseHaohanPositions(tables.filter((table) => !table.loading));
-  const positionTables = tables.filter((table) => !table.loading && table.rows?.some((row) => row.some((cell) => /持仓单号/.test(String(cell)))));
-  const positionEmpty = positions.length === 0 && positionTables.some((table) => /暂无数据/.test(table.emptyText || "") || table.rows.some((row) => row.some((cell) => /暂无数据/.test(String(cell)))));
-  const positionsVerified = positionEmpty || (positions.length > 0 && positions.every((item) => item.positionOrderId && Number.isFinite(item.quantity) && item.quantity > 0 && /买|卖|多|空|long|short/i.test(item.side)));
+  const positionTables = tables.filter((table) => table.kind === "positions" || (table.kind !== "currentOrders" && table.rows?.some((row) => row.some((cell) => /持仓单号/.test(String(cell))) && !row.some((cell) => /委托单号/.test(String(cell))))));
+  const positions = parseHaohanPositions(positionTables.filter((table) => !table.loading));
+  const allPositionsLoaded = positionTables.length > 0 && positionTables.every((table) => !table.loading);
+  const positionEmpty = allPositionsLoaded && positions.length === 0 && positionTables.every((table) => /暂无数据/.test(table.emptyText || "") || table.rows?.some((row) => row.some((cell) => /暂无数据/.test(String(cell)))));
+  const positionsVerified = allPositionsLoaded && (positionEmpty || (positions.length > 0 && positions.every((item) => item.positionOrderId && Number.isFinite(item.quantity) && item.quantity > 0 && /买|卖|多|空|long|short/i.test(item.side))));
   const orderTables = tables.filter((table) => table.kind === "currentOrders");
   const openOrders = parseHaohanOpenOrders(tables);
-  const openOrdersEmpty = openOrders.length === 0 && orderTables.some((table) => /暂无数据/.test(table.emptyText || "") || table.rows?.some((row) => /暂无数据/.test(row.join(" "))));
+  const openOrdersEmpty = orderTables.length > 0 && orderTables.every(table => !table.loading) && openOrders.length === 0 && orderTables.every((table) => /暂无数据/.test(table.emptyText || "") || table.rows?.some((row) => /暂无数据/.test(row.join(" "))));
   const openOrdersVerified = orderTables.length > 0 && orderTables.every((table) => !table.loading)
     && (openOrdersEmpty || (openOrders.length > 0 && openOrders.every((order) => order.orderId && order.remainingQuantity > 0 && order.orderPrice > 0 && /^(已委托|部分成交)$/.test(order.status))));
   return {

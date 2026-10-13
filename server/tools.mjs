@@ -8,6 +8,8 @@ import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstru
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
+import { parseHaohanPageSnapshot } from "./haohan.mjs";
+import { executableExitQuote, exitGuardAllowsPrice } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -534,13 +536,18 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
   return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };
 }
 
-export async function continueManualEntry({ sessionId = "default", action } = {}) {
+function entryConfirmationGuard(entryDeadlineAt) {
+  if (entryDeadlineAt == null) return undefined;
+  return async () => ({ ok: Number.isFinite(entryDeadlineAt) && Date.now() < entryDeadlineAt, code: "SESSION_CLOSING_NO_ENTRY" });
+}
+
+export async function continueManualEntry({ sessionId = "default", action, entryDeadlineAt = null } = {}) {
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND" };
   const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
   if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
-  const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page) });
-  return { ok: result.ok, continued: result.confirmed === true };
+  const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page), canConfirm: entryConfirmationGuard(entryDeadlineAt) });
+  return { ok: result.ok, code: result.code, continued: result.confirmed === true };
 }
 
 export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } = {}) {
@@ -587,7 +594,7 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   return { ok: results.length > 0 && results.every((item) => item.cancelled), results };
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [] } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, entryDeadlineAt = null } = {}) {
   if (action !== "BUY" && action !== "SELL") return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
@@ -596,6 +603,15 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false };
   const target = { action, symbol, symbolName, instrumentId, targetPositionIds };
   const results = [];
+  const entryGuard = exitType ? undefined : entryConfirmationGuard(entryDeadlineAt);
+  const verifyExitGuard = async (dialogPrice = null) => {
+    const snapshot = await readVisiblePage(sessionId, { quick: true });
+    if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED" };
+    const market = parseHaohanPageSnapshot(snapshot, { symbol });
+    const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: exitGuard?.heldSide }, Date.now());
+    const allowed = quote && exitGuardAllowsPrice(exitGuard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(exitGuard, dialogPrice));
+    return { ok: Boolean(allowed), code: "EXIT_CONDITION_CHANGED" };
+  };
   const withCompleted = (result) => {
     const completedPositionIds = results.filter((item) => item.ok).flatMap((item) => item.targetPositionIds);
     if (!completedPositionIds.length) return { ...result, results };
@@ -604,8 +620,10 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   try {
     let targets = [target];
     if (exitType) {
+      if (exitGuard && !await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "EXIT_INSTRUMENT_UNVERIFIED", submitted: false };
       const rows = await preparePositionRows(page, target);
       if (!rows.length) return { ok: false, code: "EXIT_POSITION_NOT_FOUND", message: "持仓明细未显示目标持仓，未操作其他持仓", filled: false, submitted: false };
+      if (exitGuard && (rows.length !== 1 || rows[0].id !== exitGuard.positionId || rows[0].quantity !== exitGuard.quantity || !await verifyExitGuard().then(r => r.ok))) return { ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false };
       targets = rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index }));
     } else {
       const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId });
@@ -615,11 +633,12 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       const baselineToken = await markTradePageHints(page);
       const writeResponse = watchTradeResponse(page);
       try {
+        if (entryGuard && !(await entryGuard()).ok) return { ok: false, code: "SESSION_CLOSING_NO_ENTRY", submitted: false };
         const clicked = exitType ? await clickPositionTransfer(page, positionTarget) : await clickTradeEntry(page, action);
         if (!clicked.clicked) {
           return withCompleted({ ok: false, code: clicked.code, message: clicked.code === "SUBMIT_BUTTON_DISABLED" ? "入场按钮存在但网页禁用，继续刷新页面并重试" : "目标交易控件未就绪，继续刷新页面并重试", filled: true, submitted: false });
         }
-        const dialog = await completeTradeDialogs(page, { exitType, orderType, price, baselineToken, finished: () => Boolean(writeResponse.peek()) });
+        const dialog = await completeTradeDialogs(page, { exitType, orderType, price, baselineToken, finished: () => Boolean(writeResponse.peek()), canConfirm: exitGuard ? verifyExitGuard : entryGuard });
         if (!dialog.ok) return withCompleted({ ok: false, code: dialog.code, message: "转让弹窗尚未完成，继续监控并重试", filled: true, submitted: false });
         const { response, pageHint } = await observeTradeFeedback(page, writeResponse, baselineToken);
         const result = { ...tradeSubmissionOutcome({ responseSeen: Boolean(response), responseOk: response ? response.ok() : null, pageHint, clicked }), targetPositionIds: positionTarget.targetPositionIds, submittedQuantity: clicked.quantity };

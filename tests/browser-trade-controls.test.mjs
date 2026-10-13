@@ -6,6 +6,7 @@ import { parseHaohanAccount } from "../server/haohan.mjs";
 import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
+import { observeExecutionMarket } from "../server/market.mjs";
 
 let browser;
 let page;
@@ -32,6 +33,26 @@ test("collection reads current orders and restores holdings without mixing histo
   assert.deepEqual(account.openOrders.map((order) => order.orderId), ["O-10", "O-1", "O-2"]);
   assert.equal(account.openOrders[1].remainingQuantity, 2);
   assert.equal(await page.locator("#positions").isVisible(), true);
+});
+
+test("initial empty table waits for Haohan holdings query without a loading mask", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const table = document.querySelector("#positions");
+    const rows = table.querySelector("tbody").innerHTML;
+    table.__vue__ = { pageData: { total: null }, isNetWrong: false };
+    const tab = [...document.querySelectorAll(".header_l_item")].find((node) => node.textContent === "持仓明细");
+    tab.onclick = () => {
+      orderPane("positions");
+      table.querySelector("tbody").innerHTML = '<tr><td colspan="6">暂无数据</td></tr>';
+      setTimeout(() => { table.querySelector("tbody").innerHTML = rows; table.__vue__.pageData.total = 3; }, 400);
+    };
+  });
+  const snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true, quick: true });
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positionsVerified, true);
+  assert.equal(account.positionEmpty, false);
+  assert.equal(account.positions.length, 3);
 });
 
 test("empty current orders verify emptiness while loading orders stay unverified", async () => {
@@ -183,6 +204,26 @@ test("manual entry needs exactly one user click; Agent completes website confirm
   assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "BUY", price: "20", quantity: "1" }]);
 });
 
+for (const manual of [true, false]) {
+  test(`closing deadline cancels ${manual ? "manual" : "automatic"} entry confirmation before it can submit`, async () => {
+    await page.reload();
+    const input = { sessionId: "trade-fixture", action: "BUY", price: 20, quantity: 1 };
+    let result;
+    if (manual) {
+      await fillSuggestionForm(input);
+      await page.locator('input[type="button"][value="买入订立"]').click();
+      await page.locator(".el-message-box").waitFor();
+      result = await continueManualEntry({ ...input, entryDeadlineAt: Date.now() - 1 });
+    } else {
+      result = await submitSuggestionForm({ ...input, entryDeadlineAt: Date.now() + 200 });
+    }
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal(result.code, "SESSION_CLOSING_NO_ENTRY");
+    assert.deepEqual(await page.evaluate(() => window.entries), []);
+    assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+  });
+}
+
 for (const action of ["BUY", "SELL"]) {
   test(`${action}: manual fill never submits; automatic click completes delayed confirmation`, async () => {
     await page.reload();
@@ -299,3 +340,80 @@ test("missing position ID does not close a same-symbol position", async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(await page.evaluate(() => window.exits), []);
 });
+
+test("holdings pagination reads every position and transfers only an exact later-page ID", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const root = document.querySelector("#positions"), rows = [...root.querySelectorAll("tbody tr")];
+    const pagination = document.createElement("div");
+    pagination.className = "el-pagination";
+    pagination.innerHTML = '<button class="btn-prev">previous</button><ul class="el-pager"><li class="number">1</li><li class="number">2</li><li class="number active">3</li></ul><button class="btn-next">next</button>';
+    root.append(pagination);
+    let current = 3;
+    const render = () => {
+      root.querySelector("tbody").replaceChildren(rows[current - 1]);
+      pagination.querySelector(".btn-prev").disabled = current === 1;
+      pagination.querySelector(".btn-next").disabled = current === 3;
+      [...pagination.querySelectorAll("li")].forEach((node, index) => node.classList.toggle("active", index === current - 1));
+    };
+    pagination.querySelector(".btn-prev").onclick = () => { current--; render(); };
+    pagination.querySelector(".btn-next").onclick = () => { current++; render(); };
+    render();
+  });
+  const snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true, quick: true });
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positionsVerified, true);
+  assert.deepEqual(account.positions.map(p => p.positionOrderId), ["P-10", "P-1", "P-2"]);
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", exitType: "SCHEDULED_CLOSE", targetPositionIds: ["P-2"] });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual((await page.evaluate(() => window.exits)).map(p => p.id), ["P-2"]);
+});
+
+test("fast observations rotate held instruments without collecting stale quotes for every board", async () => {
+  await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace('<body>', '<body><div id="instrument">DGKZ | 测试商品</div><div>最新价 100</div><ul><li role="option" onclick="document.querySelector(\'#instrument\').textContent=\'DGKZ | 测试商品\'">测试商品</li><li role="option" onclick="document.querySelector(\'#instrument\').textContent=\'DGJJ | 第二商品\'">第二商品</li></ul>') }));
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  await page.evaluate(() => { document.querySelector("#positions tbody tr:last-child td").textContent = "第二商品"; });
+  const connector = { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] };
+  const task = { target: { browserSessionId: "trade-fixture" } };
+  for (const [index, symbol] of [[0, "DGKZ"], [1, "DGJJ"], [2, "DGKZ"]]) {
+    const observed = await observeExecutionMarket({ ...task, exitObservationIndex: index }, connector);
+    assert.equal(observed.ok, true);
+    assert.equal(observed.account.positions.length, 3);
+    assert.equal(observed.books.length, 1);
+    assert.equal(observed.books[0].symbol, symbol);
+    assert.ok(Date.now() - Date.parse(observed.books[0].observedAt) < 5000);
+  }
+});
+
+for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired"]) {
+  test(`conditional exit verifies ${scenario} at final confirmation without unintended orders`, async () => {
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace('<body>', '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    await page.reload();
+    const startedAt = Date.now();
+    const observed = await observeExecutionMarket({ target: { browserSessionId: "trade-fixture" } }, { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] });
+    assert.equal(observed.account.positions.length, 3);
+    assert.equal(observed.account.positionsVerified, true);
+    assert.ok(Date.now() - startedAt < 5000, "quick reads must omit slow chart history sampling");
+    if (scenario !== "valid") await page.evaluate(name => {
+      const original = window.transfer;
+      window.transfer = (...args) => {
+        original(...args);
+        if (name === "reversed-quote") setTimeout(() => { document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = '18'; }, 350);
+        if (name === "reversed-dialog") {
+          new MutationObserver(() => {
+            const input = document.querySelector('.el-dialog input');
+            if (input) { input.value = '18'; setInterval(() => { input.value = '18'; }, 20); }
+          }).observe(document.body, { childList: true });
+        }
+      };
+    }, scenario);
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2, exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: { positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 19, comparison: "GTE", expiresAt: new Date(Date.now() + (scenario === "expired" ? 600 : 10000)).toISOString() } });
+    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, scenario === "valid" ? 1 : 0);
+    if (scenario !== "valid") {
+      assert.equal(result.code, "EXIT_CONDITION_CHANGED");
+      assert.equal(await page.locator(".el-dialog:visible").count(), 0);
+    }
+  });
+}

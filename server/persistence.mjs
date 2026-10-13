@@ -1,4 +1,5 @@
 import { entryQuantityForTask } from "./order-quantity.mjs";
+import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
 
 function json(value) {
   return JSON.stringify(value ?? {});
@@ -103,6 +104,9 @@ function compactPersistedDecision(decision) {
       nextK: decision.forecastHorizon.nextK || null,
       next10K: decision.forecastHorizon.next10K || null,
     } : null,
+    exitPlans: decision.exitPlans || [],
+    exitPlanRejections: decision.exitPlanRejections || [],
+    positionAudit: decision.positionAudit || null,
     holdingPlan: decision.holdingPlan && typeof decision.holdingPlan === "object" ? {
       decision: decision.holdingPlan.decision || "UNKNOWN",
       maxHoldK: decision.holdingPlan.maxHoldK ?? null,
@@ -170,6 +174,11 @@ export function compactTaskRuntime(task = {}) {
     monitorGeneration: Number(task.monitorGeneration || 0),
     monitoringRound: Number(task.monitoringRound || 0),
     monitorFailureCount: Number(task.monitorFailureCount || 0),
+    sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
+    sessionCloseState: task.sessionCloseState || null,
+    exitPlans: task.exitPlans || [],
+    exitMonitor: task.exitMonitor || null,
+    lastPositionAudit: task.lastPositionAudit || null,
     positionTracking: task.positionTracking && typeof task.positionTracking === "object" ? task.positionTracking : {},
     lastObservedFingerprint: task.lastObservedFingerprint || "",
     lastAnalyzedFingerprint: task.lastAnalyzedFingerprint || "",
@@ -683,6 +692,11 @@ async function createMySqlAdapter() {
             monitorGeneration: Number(runtime.monitorGeneration || 0),
             monitoringRound: Number(runtime.monitoringRound || 0),
             monitorFailureCount: Number(runtime.monitorFailureCount || 0),
+            sessionClose: runtime.sessionClose || DEFAULT_SESSION_CLOSE,
+            sessionCloseState: runtime.sessionCloseState || null,
+            exitPlans: runtime.exitPlans || [],
+            exitMonitor: runtime.exitMonitor || null,
+            lastPositionAudit: runtime.lastPositionAudit || null,
             positionTracking: runtime.positionTracking && typeof runtime.positionTracking === "object" ? runtime.positionTracking : {},
             lastObservedFingerprint: runtime.lastObservedFingerprint || "",
             lastAnalyzedFingerprint: runtime.lastAnalyzedFingerprint || "",

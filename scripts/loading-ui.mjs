@@ -63,6 +63,62 @@ async function capture(page, name) {
 }
 
 for (const width of [1440, 390]) {
+  test(`daily close settings persist through task creation and editing at ${width}px`, async (t) => {
+    const { page, navigate } = await openPage(t, { width });
+    const sample = structuredClone(workspace);
+    const template = sample.tasks[0];
+    let createdPayload, updatedPayload;
+    await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+    await page.route("**/api/tasks", async (route) => {
+      assert.equal(route.request().method(), "POST");
+      createdPayload = route.request().postDataJSON();
+      const task = { ...structuredClone(template), ...createdPayload, id: "close-settings", status: "MANUAL_CONTROL", monitoringEnabled: false, stopLocked: true };
+      sample.tasks.unshift(task);
+      await route.fulfill({ json: { task } });
+    });
+    await page.route("**/api/tasks/close-settings", async (route) => {
+      assert.equal(route.request().method(), "PATCH");
+      updatedPayload = route.request().postDataJSON();
+      Object.assign(sample.tasks[0], updatedPayload);
+      await route.fulfill({ json: { task: sample.tasks[0] } });
+    });
+    await navigate();
+    if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("button", { name: "任务管理", exact: true }).click();
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    let dialog = page.getByRole("dialog", { name: "创建任务", exact: true });
+    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "16:00");
+    assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "5");
+    await dialog.getByLabel("每日收盘（北京时间）").fill("15:30");
+    await dialog.getByLabel("提前清仓（分钟）").fill("10");
+    await dialog.getByLabel("登录账号", { exact: true }).fill("ui-test-account");
+    await dialog.getByLabel("登录密码", { exact: true }).fill("ui-test-password");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await capture(page, `close-settings-create-${width}`);
+    await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.deepEqual(createdPayload.sessionClose, { time: "15:30", leadMinutes: 10, timezone: "Asia/Shanghai" });
+    await page.getByText("收盘 15:30 · 提前 10 分钟清仓", { exact: true }).waitFor();
+    if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("button", { name: "任务管理", exact: true }).click();
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    dialog = page.getByRole("dialog", { name: "编辑任务", exact: true });
+    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "15:30");
+    assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "10");
+    await dialog.getByLabel("每日收盘（北京时间）").fill("15:45");
+    await dialog.getByLabel("提前清仓（分钟）").fill("8");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await capture(page, `close-settings-edit-${width}`);
+    await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.deepEqual(updatedPayload.sessionClose, { time: "15:45", leadMinutes: 8, timezone: "Asia/Shanghai" });
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "15:45");
+    assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "8");
+  });
+}
+
+for (const width of [1440, 390]) {
   test(`order book shows actual depth and opens the client browser at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width });
     const sample = structuredClone(workspace);

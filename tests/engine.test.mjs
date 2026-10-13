@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./fixtures/open-market-clock.mjs";
 import test from "node:test";
 import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider, requestDecision } from "../server/provider.mjs";
@@ -849,11 +850,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const submitted = [];
       const filled = [];
       const cancelled = [];
+      const exit_plans = market.account.positions.map(position => ({ position_id: position.positionOrderId, held_side: "LONG", quantity: position.quantity, valid_for_sec: 300, take_profit_price: 104, stop_loss_price: 100 }));
       const answers = [
         '{"action":"BUY",',
-        JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol }),
-        JSON.stringify({ action: "SELL", exit_type: "TAKE_PROFIT", target_position_ids: ["P-active"], target_symbol: task.symbol, bullish_profit_probability: 0.2, bearish_profit_probability: 0.2 }),
-        JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, cancel_order_ids: ["O-cancel"] }),
+        JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol, exit_plans }),
+        JSON.stringify({ action: "SELL", exit_type: "TAKE_PROFIT", target_position_ids: ["P-active"], target_symbol: task.symbol, bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, exit_plans }),
+        JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, cancel_order_ids: ["O-cancel"], exit_plans }),
       ];
       t.mock.method(globalThis, "fetch", async () => {
         requests++;

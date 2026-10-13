@@ -11,6 +11,7 @@ import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } 
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
+import { evaluateExitPlan, executableExitQuote, heldDirection, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -18,6 +19,9 @@ const controllerLoops = new Map();
 const pendingActionTimers = new Map();
 const pendingConfirmLocks = new Set();
 const pendingSubmissionCancels = new Map();
+const positionExitRuns = new Map();
+const positionExitCancels = new Map();
+const actionPhaseLocks = new Set();
 const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
@@ -71,6 +75,7 @@ function resolveRuntime(overrides = {}, { userId = "" } = {}) {
     browserLoginStatus: use("browserLoginStatus", (input) => callBrowserMethod("browserLoginStatus", userId, input)),
     browserLogin: use("browserLogin", (input) => callBrowserMethod("browserLogin", userId, input)),
     observeMarket: use("observeMarket", (task, connector) => callBrowserMethod("observeMarket", userId, { task, connector })),
+    observeExecutionMarket: use("observeExecutionMarket", (task, connector, options) => callBrowserMethod("observeExecutionMarket", userId, { task, connector }, options)),
     requestDecision: use("requestDecision", (provider, context, options) => callProviderMethod("requestDecision", userId, { provider, context, options })),
     requestMarketAnalysis: use("requestMarketAnalysis", (provider, context, options) => callProviderMethod("requestMarketAnalysis", userId, { provider, context, options, channel: "browser" })),
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
@@ -98,6 +103,7 @@ function pendingTargetLabel(pending) {
 }
 
 function pendingActionLabel(pending) {
+  if (pending?.exitType === "SCHEDULED_CLOSE") return "收盘清仓";
   if (pending?.exitType === "TAKE_PROFIT" || pending?.exitType === "STOP_LOSS") return pending?.action === "BUY" ? "转让回补" : "转让卖出";
   if (pending?.action === "BUY") return "买涨";
   if (pending?.action === "SELL") return "买跌";
@@ -149,6 +155,7 @@ function positionTrackingKey(position, index) {
 }
 
 function updatePositionTracking(task, market, now = Date.now()) {
+  if (market?.account?.positionsVerified === false) return [];
   const positions = openPositionsFromMarket(market);
   const previous = task.positionTracking && typeof task.positionTracking === "object" ? task.positionTracking : {};
   const next = {};
@@ -348,6 +355,7 @@ function signalTierForDecision(decision) {
 }
 
 export function meetsOrderBoundary(decision) {
+  if (decision?.exitType === "SCHEDULED_CLOSE") return true;
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
   if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
   return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
@@ -394,6 +402,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     action,
     orderType: decision.orderType || "MARKET",
     exitType: decision.exitType || null,
+    exitGuard: decision.exitGuard || null,
     targetPositionIds: Array.isArray(decision.targetPositionIds) ? decision.targetPositionIds : [],
     targetSymbol: String(decision.targetSymbol || ""),
     targetSymbolName: String(decision.targetSymbolName || ""),
@@ -450,12 +459,14 @@ function schedulePendingActionTimeout(task) {
 function clearPendingAction(task, { persist = true } = {}) {
   if (!task) return;
   clearPendingActionTimer(task.id);
-  if (task.pendingAction?.status === "WAITING") {
+  if (["WAITING", "SUBMITTING"].includes(task.pendingAction?.status)) {
+    const submitting = task.pendingAction.status === "SUBMITTING";
+    if (submitting) pendingSubmissionCancels.get(task.id)?.();
     task.pendingAction = {
       ...task.pendingAction,
       status: "CANCELLED",
       resolvedAt: new Date().toISOString(),
-      message: "待确认建议已取消",
+      message: submitting ? "下单请求已中止；已发出的交易需核实实际持仓" : "待确认建议已取消",
     };
   }
   if (persist) persistTask(task);
@@ -753,10 +764,17 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
+  if (isLiveTask(task) && !task.pendingAction.exitType && sessionCloseWindow(task).active) throw new Error("SESSION_CLOSING_NO_ENTRY");
   if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("BELOW_ENTRY_THRESHOLD");
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
+  const generation = taskGeneration(task);
+  const pendingId = task.pendingAction.id;
+  const assertSubmissionCurrent = () => {
+    assertCycleCurrent(task, generation);
+    if (getTask(taskId) !== task || task.pendingAction?.id !== pendingId || task.pendingAction?.status !== "SUBMITTING") throw new Error("TRADE_SUBMIT_CANCELLED");
+  };
   pendingConfirmLocks.add(taskId);
   try {
     clearPendingActionTimer(task.id);
@@ -782,7 +800,8 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       persistTask(task);
       const sessionId = task.target?.browserSessionId || `task:${task.id}`;
       const submissionAbort = new AbortController();
-      pendingSubmissionCancels.set(taskId, () => submissionAbort.abort(new Error("TRADE_SUBMIT_CANCELLED")));
+      const cancelSubmission = () => submissionAbort.abort(new Error("TRADE_SUBMIT_CANCELLED"));
+      pendingSubmissionCancels.set(taskId, cancelSubmission);
       const submissionStartedAt = Date.now();
       let submitted;
       try {
@@ -799,9 +818,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           orderType: task.pendingAction.orderType,
           targetPositionIds: task.pendingAction.targetPositionIds,
           targetPrice: task.pendingAction.targetPrice,
+          exitGuard: task.pendingAction.exitGuard,
+          entryDeadlineAt: task.pendingAction.exitType ? null : sessionCloseWindow(task).startsAt,
         }, { signal: submissionAbort.signal });
+        submissionAbort.signal.throwIfAborted();
+        assertSubmissionCurrent();
       } catch (error) {
-        if (task.pendingAction?.status === "SUBMITTING") {
+        if (getTask(taskId) === task && taskGeneration(task) === generation && !task.stopLocked && task.pendingAction?.id === pendingId && task.pendingAction?.status === "SUBMITTING") {
           task.pendingAction = {
             ...task.pendingAction,
             status: "WAITING",
@@ -812,7 +835,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         }
         throw error;
       } finally {
-        if (pendingSubmissionCancels.get(taskId)) pendingSubmissionCancels.delete(taskId);
+        if (pendingSubmissionCancels.get(taskId) === cancelSubmission) pendingSubmissionCancels.delete(taskId);
       }
       task.pendingAction.formFilled = submitted?.filled === true;
       task.pendingAction.executionDurationMs = Date.now() - submissionStartedAt;
@@ -939,7 +962,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     return task;
   } finally {
     pendingConfirmLocks.delete(taskId);
-    resumeMonitoringAfterAction(task);
+    if (getTask(taskId) === task && taskGeneration(task) === generation && !task.stopLocked) resumeMonitoringAfterAction(task);
   }
 }
 
@@ -1049,7 +1072,7 @@ function monitorRetryDelay(task) {
 }
 
 function decisionExpired(task) {
-  const createdAt = new Date(task?.decision?.createdAt || "").getTime();
+  const createdAt = new Date(task?.decision?.observedAt || task?.decision?.createdAt || "").getTime();
   const ttlSec = Number(task?.decision?.ttlSec || 0);
   return !Number.isFinite(createdAt) || !Number.isFinite(ttlSec) || ttlSec <= 0 || Date.now() >= createdAt + ttlSec * 1000;
 }
@@ -1251,6 +1274,7 @@ export function stopTask(taskId) {
   task.monitoringEnabled = false;
   task.nextPollAt = null;
   task.nextTrigger = "已停止观察";
+  task.exitPlans = [];
   clearPendingAction(task, { persist: false });
   stopController(taskId);
   task.status = "STOPPING";
@@ -1556,6 +1580,7 @@ function decisionExecutionPolicy(task) {
   return isLiveTask(task) ? {
     entryMode: task.autoDecisionEnabled ? "automatic" : "manual_submit",
     exitsAutomatic: true, cancellationsAutomatic: true,
+    conditionalExits: true, sessionClose: sessionCloseWindow(task),
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
 }
@@ -1796,6 +1821,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
   const assertCurrent = () => assertCycleCurrent(task, generation);
   const statusBeforeCycle = task.status;
   const cycleStartedAt = Date.now();
+  const exitRevisionAtStart = Number(task.exitExecutionRevision || 0);
   let modelStartedAt = cycleStartedAt;
   try {
     assertCurrent();
@@ -1812,7 +1838,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (!loginResult.ok || !loginResult.authenticated) return stopForLoginFailure(task, run, loginResult);
 
     if (isLiveTask(task) && !task.autoDecisionEnabled && !task.pendingAction?.exitType && ["WAITING", "AWAITING_FILL"].includes(task.pendingAction?.status)) {
-      const continued = await runtime.continueManualEntry({ sessionId: task.target?.browserSessionId || `task:${task.id}`, action: task.pendingAction.action });
+      const continued = await runtime.continueManualEntry({ sessionId: task.target?.browserSessionId || `task:${task.id}`, action: task.pendingAction.action, entryDeadlineAt: sessionCloseWindow(task).startsAt });
       assertCurrent();
       if (continued?.continued) {
         task.pendingAction = { ...task.pendingAction, status: "AWAITING_FILL", source: "manual_browser", message: "用户已点击入场，Agent 已自动处理网页确认；继续监控成交与离场" };
@@ -2034,7 +2060,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     } finally {
       clearTimeout(analysisTimer);
     }
+    await positionExitRuns.get(taskId)?.catch(() => {});
     assertCurrent();
+    actionPhaseLocks.add(taskId);
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
     decision = bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(applyEntryBoundary(enforceProfitProbability(decision), market), market)), market);
@@ -2052,6 +2080,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
     task.decision = { ...decision, runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
+    const positionChangedDuringAnalysis = Number(task.exitExecutionRevision || 0) !== exitRevisionAtStart;
+    if (providerSucceeded && !positionChangedDuringAnalysis && !decisionExpired(task)) {
+      const validated = validateExitPlans(decision, market, task);
+      task.exitPlans = validated.plans;
+      task.decision.exitPlanRejections = validated.rejected;
+    }
+    task.decision.positionAudit = { observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true, positions: updatePositionTracking(task, market), holdingPlan: decision.holdingPlan || null };
+    appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "positions", message: market.account?.positionsVerified === true ? `持仓已核实：${openPositionCount(market)} 笔；AI ${decision.holdingPlan?.decision || "UNKNOWN"}；有效条件离场计划 ${(task.exitPlans || []).length} 个` : "持仓尚未核实，禁止将缺失数据认定为空仓", data: task.decision.positionAudit });
     const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && item.jsonStatus !== "COMPLETE_JSON");
     if (modelFailure) task.lastModelFailure = {
       runId: run.id, providerId: provider?.id || task.providerId || "", createdAt: task.decision.createdAt,
@@ -2132,7 +2168,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const cancelOrderIds = [...new Set([...(task.decision.cancelOrderIds || []), ...(task.decision.orderAssessments || []).filter((item) => item.decision === "CANCEL").map((item) => item.orderId)])]
       .filter((id) => liveOrderIds.has(id) && !keepOrderIds.has(id));
     const cancelAssessedOrders = async (orderIds) => {
-      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length) return;
+      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !providerSucceeded || positionChangedDuringAnalysis || decisionExpired(task)) return;
       const cancellationAbort = new AbortController();
       const cancelSubmission = () => cancellationAbort.abort(new Error("ORDER_CANCEL_ABORTED"));
       pendingSubmissionCancels.set(task.id, cancelSubmission);
@@ -2176,7 +2212,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       : task.lastEntryKWindow;
     const sameKEntry = !task.decision.exitType && previousEntryKWindow === nextCandleTarget({}, Date.now()).closeTime;
     const executionBlocked = !liveExecution && (rulePaused || holdRequired);
-    const canPromptOrder = !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && meetsOrderBoundary(task.decision);
+    const closeWindow = sessionCloseWindow(task);
+    const closingEntryBlocked = isLiveTask(task) && closeWindow.active && !task.decision.exitType;
+    const accountUnverified = isLiveTask(task) && market.account?.positionsVerified === false;
+    const staleDecision = decisionExpired(task);
+    const conditionalExitOnly = liveExecution && desktopBrowserRequired() && Boolean(task.decision.exitType);
+    const canPromptOrder = providerSucceeded && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !conditionalExitOnly && meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
@@ -2184,7 +2225,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         skipped: true,
         reason: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
         route,
-        code: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "BELOW_ENTRY_THRESHOLD",
+        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : conditionalExitOnly ? "EXIT_CONDITION_MONITORING" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "BELOW_ENTRY_THRESHOLD",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
@@ -2219,8 +2260,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，所选方向获利概率未达45%的入场边界" : "已记录受控动作";
-      completeWorkflow(task, "action", actionMessage);
-      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: actionMessage });
+      const boundaryMessage = conditionalExitOnly ? (task.exitPlans?.length ? "AI 离场条件已交给独立行情监控，满足条件即执行" : "AI 未提供有效离场条件，已请求下一轮补充；收盘清仓独立执行") : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
+      completeWorkflow(task, "action", boundaryMessage);
+      appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });
     }
     const analysis = {
       id: run.id,
@@ -2258,6 +2300,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     persistTask(task);
     throw error;
   } finally {
+    actionPhaseLocks.delete(taskId);
     activeCycles.delete(taskId);
     notifyCycleIdle(taskId);
     if (taskGeneration(task) === generation && !task.stopLocked) {
@@ -2304,6 +2347,143 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
   if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task, failed ? monitorRetryDelay(task) : monitoringPollIntervalMs(task));
   persistTask(task);
   return result;
+}
+
+export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, now = Date.now() } = {}) {
+  if (positionExitRuns.has(taskId)) return positionExitRuns.get(taskId);
+  const exitAbort = new AbortController();
+  const cancelExit = () => exitAbort.abort(new Error("EXIT_MONITOR_STOPPED"));
+  positionExitCancels.set(taskId, cancelExit);
+  const operation = Promise.resolve().then(async () => {
+    const task = getTask(taskId);
+    if (!task || !isLiveTask(task) || !monitoringIntent(task) || !task.target?.browserSessionId || actionPhaseLocks.has(taskId) || pendingConfirmLocks.has(taskId)) return { skipped: true };
+    const generation = taskGeneration(task);
+    const assertCurrent = () => { exitAbort.signal.throwIfAborted(); assertCycleCurrent(task, generation); };
+    const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "" });
+    const connector = getConnector(task.target.connectorId);
+    const observationStartedAt = Date.now();
+    const currentTime = () => now + Date.now() - observationStartedAt;
+    let market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal });
+    assertCurrent();
+    task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
+    if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
+    if (actionPhaseLocks.has(taskId) || pendingConfirmLocks.has(taskId)) return { skipped: true };
+    let closing = sessionCloseWindow(task, currentTime());
+    reconcilePendingPosition(task, market);
+    task.lastPositionAudit = {
+      observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true,
+      positions: (market.account?.positions || []).map(p => ({ positionId: p.positionOrderId, symbol: p.symbol, symbolName: p.symbolName, side: heldDirection(p), quantity: p.quantity, entryPrice: p.orderPrice, frozenQuantity: p.frozenQuantity })),
+      openOrdersVerified: market.account?.openOrdersVerified === true, openOrderCount: market.account?.openOrders?.length || 0,
+      observationDurationMs: Date.now() - observationStartedAt,
+    };
+    if (market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {
+      task.exitMonitor = { status: "ACCOUNT_UNVERIFIED", checkedAt: new Date().toISOString(), message: "持仓或委托未核实，不能认定空仓或执行离场" };
+      if (closing.active) task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: closing.overdue ? "OVERDUE" : "CLOSING", remainingPositions: null, checkedAt: market.observedAt };
+      persistTask(task);
+      return { code: "ACCOUNT_UNVERIFIED" };
+    }
+    // Closing withdraws unfilled entries and frozen transfers before flattening.
+    // Each cancellation is verified by the existing exact-order workflow.
+    if (closing.active && market.account.openOrders.length) {
+      let cancellation;
+      try {
+        cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId, orderIds: market.account.openOrders.map(o => o.orderId) }, { signal: exitAbort.signal });
+      } catch (error) {
+        assertCurrent();
+        cancellation = { ok: false, results: [], error: error.message || "ORDER_CANCEL_FAILED" };
+        appendAgentOutput({ taskId, stage: "action", kind: "exit_monitor", level: "error", message: `收盘撤单异常：${cancellation.error}；继续处理未冻结持仓，并保留委托未核实状态` });
+      }
+      assertCurrent();
+      const cancelledIds = new Set((cancellation.results || []).filter(r => r.cancelled).map(r => r.orderId));
+      for (const pending of unsettledActions(task)) {
+        if (pending.entrustedOrderIds?.length && pending.entrustedOrderIds.every(id => cancelledIds.has(id))) pending.status = "CANCELLED";
+      }
+      task.unsettledActions = (task.unsettledActions || []).filter(p => p.status !== "CANCELLED");
+      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal });
+      assertCurrent();
+      closing = sessionCloseWindow(task, currentTime());
+      if (!market.ok || market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {
+        task.exitMonitor = { status: "CANCELLATION_UNVERIFIED", checkedAt: new Date().toISOString(), message: "收盘撤单尚未全部核实，继续检查真实委托与持仓" };
+        persistTask(task);
+        return { code: "CANCELLATION_UNVERIFIED" };
+      }
+      reconcilePendingPosition(task, market);
+    }
+    const candidates = [];
+    if (closing.active) {
+      for (const position of market.account.positions) {
+        const direction = heldDirection(position);
+        if (!["LONG", "SHORT"].includes(direction) || !position.positionOrderId || Number(position.quantity) <= 0) continue;
+        const quote = executableExitQuote(market, position, Date.now());
+        if (!quote) continue;
+        candidates.push({ position, decision: { action: direction === "LONG" ? "SELL" : "BUY", orderType: "MARKET", exitType: "SCHEDULED_CLOSE", targetPositionIds: [position.positionOrderId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId } });
+      }
+      task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: market.account.positions.length || market.account.openOrders.length ? (closing.overdue ? "OVERDUE" : "CLOSING") : "FLAT_VERIFIED", remainingPositions: market.account.positions.length, remainingOrders: market.account.openOrders.length, checkedAt: market.observedAt };
+    } else {
+      for (const plan of task.exitPlans || []) {
+        const result = evaluateExitPlan(plan, market, Date.now());
+        plan.status = result.status;
+        plan.lastQuotePrice = result.quotePrice ?? null;
+        if (result.status === "TRIGGERED") candidates.push({ ...result, plan });
+      }
+    }
+    const submitted = [];
+    const failures = [];
+    for (const candidate of candidates) {
+      assertCurrent();
+      if (!isTradingSwitchOn()) break;
+      const decision = executableExitDecision(task, candidate.decision);
+      if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
+      archivePendingSubmission(task);
+      task.pendingAction = buildPendingAction({ ...task, market }, decision);
+      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : "ai_price_trigger", runtime }); }
+      catch (error) {
+        assertCurrent();
+        failures.push({ positionId: candidate.position.positionOrderId, code: error.message });
+        appendAgentOutput({ taskId, stage: "action", kind: "exit_monitor", level: "error", message: `持仓 ${candidate.position.positionOrderId} 离场未完成：${error.message}；继续处理其他持仓并重试` });
+        continue;
+      }
+      assertCurrent();
+      if (["AWAITING_FILL", "UNVERIFIED"].includes(task.pendingAction?.status)) {
+        task.exitExecutionRevision = Number(task.exitExecutionRevision || 0) + 1;
+        if (candidate.plan) candidate.plan.status = "SUBMITTED";
+        submitted.push(candidate.position.positionOrderId);
+      } else if (task.pendingAction?.status === "REJECTED") {
+        failures.push({ positionId: candidate.position.positionOrderId, code: "TRADE_REJECTED", message: task.pendingAction.message });
+      }
+    }
+    const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，AI 尚缺有效条件计划，继续请求分析` : `已核实 ${market.account.positions.length} 笔持仓，按 AI 触发条件监控` };
+    if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔离场未完成；${task.exitMonitor.message}` };
+    if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
+    persistTask(task);
+    return { submitted, closing: closing.active };
+  }).finally(() => {
+    if (positionExitRuns.get(taskId) === operation) positionExitRuns.delete(taskId);
+    if (positionExitCancels.get(taskId) === cancelExit) positionExitCancels.delete(taskId);
+  });
+  positionExitRuns.set(taskId, operation);
+  return operation;
+}
+
+function schedulePositionExit(taskId) {
+  const entry = controllerLoops.get(taskId);
+  if (!entry || entry.stopped || entry.exitTimer) return;
+  entry.exitTimer = setTimeout(async () => {
+    entry.exitTimer = null;
+    if (controllerLoops.get(taskId) !== entry || entry.stopped) return;
+    try { await runPositionExitCycle(taskId, { runtime: entry.runtime }); }
+    catch (error) {
+      const task = getTask(taskId);
+      if (task && !task.stopLocked && taskGeneration(task) === entry.generation) {
+        task.exitMonitor = { status: "ERROR", checkedAt: new Date().toISOString(), message: error.message };
+        if (entry.lastExitError !== error.message) appendAgentOutput({ taskId, stage: "action", kind: "exit_monitor", level: "error", message: `离场监控未完成：${error.message}` });
+        entry.lastExitError = error.message;
+        persistTask(task);
+      }
+    } finally { if (controllerLoops.get(taskId) === entry && !entry.stopped) schedulePositionExit(taskId); }
+  }, 2000);
+  entry.exitTimer.unref?.();
 }
 
 function scheduleController(taskId, delayMs) {
@@ -2358,21 +2538,25 @@ export function startController(taskId, options = {}) {
   const runCycle = typeof options.runCycle === "function"
     ? options.runCycle
     : (id) => runMonitoringCycle(id, { providerId: options.providerId, userId, runtime: options.runtime });
-  const entry = { timer: null, running: false, stopped: false, generation: taskGeneration(task), runCycle };
+  const entry = { timer: null, exitTimer: null, runtime: options.runtime, running: false, stopped: false, generation: taskGeneration(task), runCycle };
   controllerLoops.set(taskId, entry);
   const persistedNextPoll = new Date(task.nextPollAt || "").getTime();
   scheduleController(taskId, Number.isFinite(persistedNextPoll) ? Math.max(0, persistedNextPoll - Date.now()) : 0);
+  schedulePositionExit(taskId);
 }
 
 export function stopController(taskId) {
+  positionExitCancels.get(taskId)?.();
+  pendingSubmissionCancels.get(taskId)?.();
   const entry = controllerLoops.get(taskId);
   if (!entry) return;
   entry.stopped = true;
   if (entry.timer) clearTimeout(entry.timer);
+  if (entry.exitTimer) clearTimeout(entry.exitTimer);
   entry.timer = null;
   controllerLoops.delete(taskId);
 }
 
 export function stopAllControllers() {
-  for (const taskId of [...controllerLoops.keys()]) stopController(taskId);
+  for (const taskId of new Set([...controllerLoops.keys(), ...positionExitCancels.keys(), ...pendingSubmissionCancels.keys()])) stopController(taskId);
 }

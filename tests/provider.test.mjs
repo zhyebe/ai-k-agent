@@ -190,6 +190,39 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
   assert.deepEqual(buildConversationMessages({ recentRounds: [{ decision }] })[1] && JSON.parse(buildConversationMessages({ recentRounds: [{ decision }] })[1].content).cancelOrderIds, ["O-1"]);
 });
 
+test("missing conditional exits are returned to AI and preserve corrected plans or incomplete evidence", async (t) => {
+  let calls = 0;
+  let correctedPlan = true;
+  const response = { action: "HOLD", bullish_profit_probability: 0.3, bearish_profit_probability: 0.2, holding_plan: { decision: "HOLD_FOR_TARGET" } };
+  const plan = { position_id: "P-1", held_side: "LONG", quantity: 2, valid_for_sec: 90, take_profit_price: 105, stop_loss_price: 99, rationale: "profit path invalidates below 99" };
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls += 1;
+    if (calls % 2 === 0) {
+      assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
+      assert.match(body.messages.at(-1).content, /maximum supported expected net profit first/);
+      assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
+      assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
+    } else {
+      assert.match(body.messages[0].content, /Report UNKNOWN if evidence is insufficient/);
+    }
+    const content = calls % 2 === 0 && correctedPlan ? { ...response, exit_plans: [plan] } : response;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }));
+  });
+  const provider = { apiKey: "test", baseUrl: "https://provider.example.test" };
+  const context = { executionPolicy: { conditionalExits: true }, account: { positionsVerified: true, positions: [{ positionOrderId: "P-1", side: "买涨", quantity: 2, frozenQuantity: 0 }] } };
+  const corrected = await requestDecision(provider, context, { fastAnalysis: true });
+  assert.equal(calls, 2);
+  assert.deepEqual(corrected.exitPlans, [{ positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 90, takeProfitPrice: 105, stopLossPrice: 99, rationale: plan.rationale }]);
+  assert.equal(corrected.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+  correctedPlan = false;
+  const incomplete = await requestDecision(provider, context, { fastAnalysis: true });
+  assert.equal(calls, 4);
+  assert.equal(incomplete.action, "HOLD");
+  assert.ok(incomplete.riskFlags.includes("INCOMPLETE_EXIT_PLAN"));
+  assert.ok(incomplete.riskFlags.includes("ANALYSIS_INCOMPLETE"));
+});
+
 test("live fast analysis disables official DeepSeek thinking without changing the model or custom gateways", async (t) => {
   const bodies = [];
   t.mock.method(globalThis, "fetch", async (_url, options) => {

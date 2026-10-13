@@ -1,3 +1,5 @@
+import { paginationText, turnOrderPage, waitForAccountTable } from "./order-controls.mjs";
+
 const BUTTONS = "button, input[type='button'], input[type='submit'], [role='button'], a";
 const TABS = "button, [role='tab'], .el-tabs__item, .el-radio-button__inner, .trade_btn, .tab_btn, .header_l_item, span, a, div";
 const ROWS = "tr, [role='row'], .el-table__row, .position-row";
@@ -127,10 +129,24 @@ export async function findPositionRows(page, { targetPositionIds = [], symbol = 
 
 export async function preparePositionRows(page, input) {
   await activateTradeControl(page, "持仓明细");
+  if (!await waitForAccountTable(page, "持仓单号")) return [];
+  const previousPages = new Set();
+  while (true) {
+    const marker = await paginationText(page);
+    if (previousPages.has(marker) || !await turnOrderPage(page, "prev")) break;
+    previousPages.add(marker);
+  }
   const deadline = Date.now() + 5000;
+  const found = new Map();
+  const visitedPages = new Set();
   do {
     const rows = await findPositionRows(page, input);
-    if (rows.length && (!input.targetPositionIds?.length || input.targetPositionIds.every((id) => rows.some((row) => row.id === String(id))))) return rows;
+    if (!input.targetPositionIds?.length && rows.length) return rows;
+    for (const row of rows) found.set(row.id, row);
+    if (input.targetPositionIds?.every((id) => found.has(String(id)))) return [...found.values()];
+    const marker = await paginationText(page);
+    if (visitedPages.has(marker) || !await turnOrderPage(page, "next")) break;
+    visitedPages.add(marker);
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   return [];
@@ -146,7 +162,7 @@ export async function clickPositionTransfer(page, input) {
   return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity };
 }
 
-export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false } = {}) {
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
@@ -170,6 +186,15 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       }
       const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"]);
       if (!control || await control.isDisabled()) continue;
+      if (canConfirm) {
+        const price = await box.locator("input").evaluateAll((inputs) => inputs.filter(node => !node.disabled && node.type !== "checkbox").map(node => Number(node.value)).find(value => value > 0) ?? null);
+        const guard = await canConfirm(price);
+        if (!guard.ok) {
+          const cancel = await findControl(box, ["取消", "关闭"]);
+          if (cancel && !await cancel.isDisabled()) await cancel.click({ timeout: 1500 });
+          return { ok: false, code: guard.code };
+        }
+      }
       const fresh = await control.evaluate((node, token) => {
         if (node.dataset.axiomTradeConfirmation === token) return false;
         node.dataset.axiomTradeConfirmation = token;

@@ -167,3 +167,52 @@ test("desktop logout clears shared runtime caches and trade confirmation records
   assert.equal(closed, true);
   assert.deepEqual(Array.from(runtime.sizes()), [0, 0, 0]);
 });
+
+test("slow history releases the browser queue while DOM phases remain serial and final collection refreshes", async () => {
+  const historyStarted = deferred(), finishHistory = deferred(), quickStarted = deferred(), finishQuick = deferred();
+  const events = [];
+  const runtime = loadRuntime("browser-runtime.cjs", {}, "\nmodule.exports.useModules = (value) => { modulesPromise = Promise.resolve(value); };\n");
+  runtime.useModules({
+    browser: { closeBrowserSession: async () => {} },
+    analysis: { compactCollectedMarket: value => value },
+    market: {
+      observeMarket: async (_task, _connector, { withBrowser }) => {
+        await withBrowser(async () => { events.push("initial-dom"); });
+        historyStarted.resolve();
+        await finishHistory.promise;
+        return withBrowser(async () => { events.push("refreshed-dom"); return { ok: true, fingerprint: "fresh" }; });
+      },
+      observeExecutionMarket: async () => { events.push("quick-dom-start"); quickStarted.resolve(); await finishQuick.promise; events.push("quick-dom-finish"); return { ok: true }; },
+    },
+  });
+  const message = { userId: "owner", input: { task: { id: "one", target: { browserSessionId: "task:one" } } }, deadlineAt: Date.now() + 10000 };
+  const full = runtime.executeBrowserCall({}, { ...message, method: "observeMarket" }, "https://example.test", new AbortController().signal);
+  await historyStarted.promise;
+  const quick = runtime.executeBrowserCall({}, { ...message, method: "observeExecutionMarket" }, "https://example.test", new AbortController().signal);
+  await quickStarted.promise;
+  finishHistory.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events, ["initial-dom", "quick-dom-start"]);
+  finishQuick.resolve();
+  await Promise.all([full, quick]);
+  assert.deepEqual(events, ["initial-dom", "quick-dom-start", "quick-dom-finish", "refreshed-dom"]);
+});
+
+test("logout during history waits prevents every later DOM read and cache write", async () => {
+  const started = deferred(), finish = deferred();
+  let refreshed = false;
+  const runtime = loadRuntime("browser-runtime.cjs", {}, "\nmodule.exports.useModules = (value) => { modulesPromise = Promise.resolve(value); };\n");
+  runtime.useModules({
+    browser: { closeBrowserSession: async () => {}, closeAllBrowserSessions: async () => {} },
+    analysis: { compactCollectedMarket: () => { throw new Error("must not cache"); } },
+    market: { observeMarket: async (_task, _connector, { withBrowser }) => { await withBrowser(async () => {}); started.resolve(); await finish.promise; return withBrowser(async () => { refreshed = true; return { ok: true }; }); } },
+  });
+  const controller = new AbortController();
+  const operation = runtime.executeBrowserCall({}, { userId: "owner", method: "observeMarket", input: { task: { id: "one", target: {} } }, deadlineAt: Date.now() + 10000 }, "https://example.test", controller.signal);
+  await started.promise;
+  controller.abort(new Error("DESKTOP_CALL_CANCELLED"));
+  await runtime.closeBrowserRuntime();
+  finish.resolve();
+  await assert.rejects(operation, /DESKTOP_CALL_CANCELLED/);
+  assert.equal(refreshed, false);
+});

@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 import { activateTradeControl } from "./trade-controls.mjs";
-import { collectCurrentOrderTables } from "./order-controls.mjs";
+import { collectCurrentOrderTables, collectPositionTables } from "./order-controls.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -189,13 +189,18 @@ export async function collectTables(page) {
     };
     const roots = [...document.querySelectorAll(".el-table, table, [role='table'], [role='grid']")]
       .filter((root) => visible(root) && !root.parentElement?.closest(".el-table, table, [role='table'], [role='grid']")).slice(0, 20);
-    return roots.map((root) => ({
-      rows: [...root.querySelectorAll("tr, [role='row']")]
+    return roots.map((root) => {
+      let owner = root.__vue__;
+      while (owner && !owner.pageData) owner = owner.$parent;
+      return {
+        rows: [...root.querySelectorAll("tr, [role='row']")]
         .filter((row) => visible(row) && !row.closest(".el-table__fixed, .el-table__fixed-right, .el-table__footer-wrapper"))
         .slice(0, 120).map((row) => [...row.querySelectorAll("th, td, [role='columnheader'], [role='gridcell']")].slice(0, 30).map((cell) => String(cell.innerText || cell.textContent || "").trim())),
-      emptyText: [...root.querySelectorAll(".el-table__empty-block, .el-table__empty-text")].filter(visible).map((node) => node.innerText).join(" "),
-      loading: [...root.querySelectorAll(".el-loading-mask")].some(visible),
-    })).filter((table) => table.rows.some((row) => row.length));
+        emptyText: [...root.querySelectorAll(".el-table__empty-block, .el-table__empty-text")].filter(visible).map((node) => node.innerText).join(" "),
+        loading: [...root.querySelectorAll(".el-loading-mask")].some(visible)
+        || Boolean(owner?.pageData && (owner.pageData.total == null || owner.isNetWrong === true)),
+      };
+    }).filter((table) => table.rows.some((row) => row.length));
   });
 }
 
@@ -464,23 +469,20 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
   }
 }
 
-export async function readVisiblePage(sessionId = "default", { inspectPositions = false } = {}) {
+export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false } = {}) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
     const orderTables = inspectPositions ? await collectCurrentOrderTables(session.page, collectTables) : [];
-    if (inspectPositions) {
-      await activateTradeControl(session.page, "持仓明细");
-      await session.page.waitForFunction(() => [...document.querySelectorAll("th")].some((node) => /持仓单号/.test(node.textContent) && node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).catch(() => {});
-    }
+    const positionTables = inspectPositions ? await collectPositionTables(session.page, collectTables) : [];
     const raw = await session.page.evaluate(() => ({
       url: location.href,
       title: document.title,
       visibleText: document.body?.innerText || "",
     }));
-    const tables = [...await collectTables(session.page), ...orderTables];
-    const chart = await collectHqChart(session.page);
-    const chartSamples = (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
+    const tables = inspectPositions ? [...positionTables, ...orderTables] : await collectTables(session.page);
+    const chart = quick ? { klines: [] } : await collectHqChart(session.page);
+    const chartSamples = quick || (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
     const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });
     const chartInstrument = chart.symbol && /^\d+$/.test(String(chart.symbol))
       ? { symbol: "", symbolName: "", instrumentId: String(chart.symbol) }
@@ -490,7 +492,7 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
       symbolName: instrument.symbolName || "",
       instrumentId: chartInstrument?.instrumentId || "",
     };
-    const instruments = uniquePageInstruments([currentInstrument, ...(await readVisibleInstrumentOptions(session.page))].filter(Boolean));
+    const instruments = quick ? [currentInstrument] : uniquePageInstruments([currentInstrument, ...(await readVisibleInstrumentOptions(session.page))].filter(Boolean));
     return {
       ok: true,
       sessionId: String(sessionId || "default"),

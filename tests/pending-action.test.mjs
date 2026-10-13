@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import "./fixtures/open-market-clock.mjs";
 import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
 import { buildPendingAction, cancelPendingAction, claimManual, confirmPendingAction, setAutoDecision, setTaskMode, startTask, stopController, stopTask, takeoverPendingAction } from "../server/engine.mjs";

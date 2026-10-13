@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import NodeWebSocket from "ws";
 import { orderBookFingerprint, summarizeOrderBook } from "./order-book.mjs";
-import { collectAllPageBoards, listPageBoardInstruments, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
+import { listPageBoardInstruments, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
 import { extractHaohanPageInstrument, HAO_HAN_HOST, isHaohanTarget, normalizePageInstrument, parseHaohanPageSnapshot, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 
 const DEFAULT_WS_URL = "wss://smyt.haohandahan.cn/wsfront_tq";
@@ -743,6 +743,7 @@ function mergeBoardBook({ instrument, apiBook, pageBook, account, pageView, page
       ticks,
       timeframes,
       quote: mergedQuote,
+      observedAt: pageBook?.observedAt || apiBook.observedAt,
       account,
       pageView: pageBook?.pageView || { account, orderBook: null },
       page,
@@ -1192,20 +1193,38 @@ export function resolveObservedHaohanSymbol(pageInstrument, taskSymbol) {
   return pageSymbol || configured;
 }
 
-export async function observeMarket(task, connector) {
+export async function observeExecutionMarket(task, connector) {
+  if (connector?.reviewStatus !== "APPROVED" || connector.adapterId !== "haohan-readonly" || !connector.capabilities?.includes("read_visible_market")) return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED" };
+  const sessionId = task.target.browserSessionId || `task:${task.id}`;
+  const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true });
+  if (!snapshot.ok) return snapshot;
+  if (!isHaohanTarget(snapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH" };
+  const primary = parseHaohanPageSnapshot(snapshot, { symbol: extractHaohanPageInstrument(snapshot).symbol });
+  if (primary.code === "REAUTH_REQUIRED") return primary;
+  // Rotate one held instrument per poll so earlier quotes cannot age out while
+  // collecting other instruments. Submission rechecks the exact position/quote.
+  const targets = uniquePageInstruments(primary.account?.positions || []);
+  const index = Math.max(0, Math.floor(Number(task.exitObservationIndex) || 0));
+  const target = targets.length ? targets[index % targets.length] : null;
+  let book = { ...primary, observedAt: new Date(snapshot.capturedAt).toISOString() };
+  if (target && !samePageInstrument(book, target)) {
+    if (!await selectPageBoardInstrument(sessionId, target)) return { ...primary, ok: true, books: [], orderBook: null };
+    const next = await readVisiblePage(sessionId, { quick: true });
+    if (!next.ok) return next;
+    const parsed = parseHaohanPageSnapshot(next, { symbol: extractHaohanPageInstrument(next).symbol });
+    if (parsed.code === "REAUTH_REQUIRED") return parsed;
+    if (!samePageInstrument(parsed, target)) return { ok: false, code: "PAGE_INSTRUMENT_MISMATCH" };
+    book = { ...parsed, observedAt: new Date(next.capturedAt).toISOString() };
+  }
+  return { ...book, ok: true, account: primary.account, books: [book] };
+}
+
+export async function observeMarket(task, connector, { withBrowser = async (operation) => operation() } = {}) {
   if (!connector || connector.reviewStatus !== "APPROVED") return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED", message: "目标适配器未审核，无法读取可验证行情" };
   if (!connector.capabilities.includes("read_visible_market") || connector.adapterId !== "haohan-readonly") {
     return { ok: false, code: "READONLY_MARKET_ADAPTER_UNAVAILABLE", message: "当前目标没有只读行情适配器" };
   }
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
-  let pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
-  if (!pageSnapshot.ok) {
-    const opened = await openMarketBrowser(task, connector);
-    if (!opened.ok) return opened;
-    pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
-    if (!pageSnapshot.ok) return pageSnapshot;
-  }
-  if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
   const configuredSymbol = String(task.symbol || "").trim();
   const monitorAllBoards = task.monitorAllBoards === true;
   const selectedTarget = {
@@ -1213,26 +1232,39 @@ export async function observeMarket(task, connector) {
     symbolName: String(task.target?.selectedSymbolName || "").trim(),
     instrumentId: String(task.target?.selectedInstrumentId || "").trim(),
   };
-  if (!monitorAllBoards && (selectedTarget.symbol || selectedTarget.symbolName || selectedTarget.instrumentId)) {
-    const currentInstrument = extractHaohanPageInstrument(pageSnapshot);
-    if (!samePageInstrument(currentInstrument, selectedTarget)) {
-      const switched = await selectPageBoardInstrument(sessionId, selectedTarget);
-      if (switched) {
-        const switchedSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
-        if (switchedSnapshot?.ok) pageSnapshot = switchedSnapshot;
+  const timeframe = task.timeframe || "15m";
+  const initial = await withBrowser(async () => {
+    let pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+    if (!pageSnapshot.ok) {
+      const opened = await openMarketBrowser(task, connector);
+      if (!opened.ok) return opened;
+      pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+      if (!pageSnapshot.ok) return pageSnapshot;
+    }
+    if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
+    if (!monitorAllBoards && (selectedTarget.symbol || selectedTarget.symbolName || selectedTarget.instrumentId)) {
+      const currentInstrument = extractHaohanPageInstrument(pageSnapshot);
+      if (!samePageInstrument(currentInstrument, selectedTarget)) {
+        const switched = await selectPageBoardInstrument(sessionId, selectedTarget);
+        if (switched) {
+          const switchedSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+          if (switchedSnapshot?.ok) pageSnapshot = switchedSnapshot;
+        }
       }
     }
-  }
-  const pageInstrument = extractHaohanPageInstrument(pageSnapshot);
-  const observedSymbol = resolveObservedHaohanSymbol(pageInstrument, configuredSymbol) || "DGJJ";
-  const timeframe = task.timeframe || "15m";
-  const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe });
-  if (parsed.code === "REAUTH_REQUIRED") return parsed;
-  const allPageInstruments = uniquePageInstruments([
-    ...(Array.isArray(pageSnapshot.instruments) ? pageSnapshot.instruments : []),
-    pageInstrument,
-    ...(await listPageBoardInstruments(sessionId)),
-  ]);
+    const pageInstrument = extractHaohanPageInstrument(pageSnapshot);
+    const observedSymbol = resolveObservedHaohanSymbol(pageInstrument, configuredSymbol) || "DGJJ";
+    const parsed = parseHaohanPageSnapshot(pageSnapshot, { symbol: observedSymbol, timeframe });
+    if (parsed.code === "REAUTH_REQUIRED") return parsed;
+    const allPageInstruments = uniquePageInstruments([
+      ...(Array.isArray(pageSnapshot.instruments) ? pageSnapshot.instruments : []),
+      pageInstrument,
+      ...(await listPageBoardInstruments(sessionId)),
+    ]);
+    return { pageSnapshot, pageInstrument, observedSymbol, parsed, allPageInstruments };
+  });
+  if (!initial.pageSnapshot) return initial;
+  let { pageSnapshot, pageInstrument, observedSymbol, parsed, allPageInstruments } = initial;
   const pageInstruments = monitorAllBoards || !selectedTarget.symbol
     ? allPageInstruments
     : allPageInstruments.filter((instrument) => samePageInstrument(instrument, selectedTarget));
@@ -1265,16 +1297,27 @@ export async function observeMarket(task, connector) {
     pageBooks.push(parsedPage);
     return parsedPage;
   };
-  recordPageSnapshot(pageSnapshot, pageInstrument);
-  const needsBoardCollect = cycleTargets.length && !samePageInstrument(cycleTargets[0], pageInstrument);
-  if (needsBoardCollect) {
-    const collected = await collectAllPageBoards(sessionId, monitorAllBoards ? cycleTargets.filter((item) => !samePageInstrument(item, pageInstrument)) : cycleTargets, { restore: monitorAllBoards });
-    for (const item of collected) {
-      if (!item.selected) continue;
-      const recorded = recordPageSnapshot(item.snapshot, item.instrument);
-      if (recorded?.code === "REAUTH_REQUIRED") return recorded;
-    }
+  for (const instrument of cycleTargets.filter(item => !samePageInstrument(item, pageInstrument))) {
+    const recorded = await withBrowser(async () => {
+      if (!await selectPageBoardInstrument(sessionId, instrument)) return null;
+      return recordPageSnapshot(await readVisiblePage(sessionId), instrument);
+    });
+    if (recorded?.code === "REAUTH_REQUIRED") return recorded;
   }
+  const refreshed = await withBrowser(async () => {
+    // Historical HTTP/WebSocket waits release the DOM queue. Reacquire it and
+    // refresh holdings and executable quotes after those waits, before analysis.
+    if (!await selectPageBoardInstrument(sessionId, pageInstrument)) return { ok: false, code: "PAGE_INSTRUMENT_MISMATCH" };
+    const current = await readVisiblePage(sessionId, { inspectPositions: true });
+    if (!current.ok || !isHaohanTarget(current.url)) return { ok: false, code: current.code || "BROWSER_TARGET_MISMATCH" };
+    const currentParsed = parseHaohanPageSnapshot(current, { symbol: observedSymbol, timeframe });
+    if (currentParsed.code === "REAUTH_REQUIRED" || currentParsed.code === "PAGE_INSTRUMENT_MISMATCH") return currentParsed;
+    pageSnapshot = current;
+    parsed = currentParsed;
+    recordPageSnapshot(current, pageInstrument);
+    return { ok: true };
+  });
+  if (!refreshed.ok) return refreshed;
   const page = {
     url: pageSnapshot.url,
     title: pageSnapshot.title,

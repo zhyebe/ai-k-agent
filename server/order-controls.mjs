@@ -3,30 +3,28 @@ import { activateTradeControl } from "./trade-controls.mjs";
 const TABLES = ".el-table, table, [role='table'], [role='grid']";
 const VISIBLE_TABLES = TABLES.split(", ").map((selector) => `${selector}:visible`).join(", ");
 
-async function paginationText(page) {
+export async function paginationText(page) {
   const pagination = page.locator(".el-pagination:visible").first();
   return await pagination.count() ? pagination.evaluate((node) => node.querySelector(".el-pager .active, [aria-current='page']")?.textContent.trim() || node.innerText) : "";
 }
 
 export async function activateCurrentOrders(page) {
   if (!await activateTradeControl(page, "当前委托")) return false;
-  return page.waitForFunction(() => [...document.querySelectorAll("th, [role='columnheader']")]
-    .some((node) => node.textContent.trim() === "委托单号" && node.getBoundingClientRect().height > 0)
-    && ![...document.querySelectorAll(".el-loading-mask")].some((node) => node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).then(() => true, () => false);
+  return waitForAccountTable(page, "委托单号");
 }
 
-async function turnOrderPage(page, direction) {
+export async function turnOrderPage(page, direction) {
   const button = page.locator(`.el-pagination .btn-${direction}:visible`).first();
   if (!await button.count() || await button.isDisabled()) return false;
   const before = await paginationText(page);
-  const tableText = await page.locator(VISIBLE_TABLES).allTextContents();
+  const tableText = await page.evaluate(() => [...document.querySelectorAll(".el-table, table, [role='table'], [role='grid']")].filter(node => node.getBoundingClientRect().height > 0).map(node => node.textContent));
   await button.click();
   await page.waitForFunction(({ previous, tableText }) => {
     const pagination = [...document.querySelectorAll(".el-pagination")].find((node) => node.getBoundingClientRect().height > 0);
     const current = pagination?.querySelector(".el-pager .active, [aria-current='page']")?.textContent.trim() || pagination?.innerText;
     const text = [...document.querySelectorAll(".el-table, table, [role='table'], [role='grid']")].filter((node) => node.getBoundingClientRect().height > 0).map((node) => node.textContent);
     return current !== previous && JSON.stringify(text) !== JSON.stringify(tableText) && ![...document.querySelectorAll(".el-loading-mask")].some((node) => node.getBoundingClientRect().height > 0);
-  }, { previous: before, tableText }, { timeout: 1500 }).catch(() => {});
+  }, { previous: before, tableText }, { timeout: 8000 });
   return true;
 }
 
@@ -50,6 +48,48 @@ export async function collectCurrentOrderTables(page, collectTables) {
     }
     seen.add(marker);
     tables.push(...current.map((table) => ({ ...table, kind: "currentOrders" })));
+    if (!await turnOrderPage(page, "next")) break;
+  }
+  return tables;
+}
+
+// Haohan mounts an empty table before its query resolves, without a loading mask.
+// pageData.total starts as null and is assigned by the query's success handler.
+export async function waitForAccountTable(page, header) {
+  return page.waitForFunction((header) => {
+    const visible = (node) => node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== "hidden";
+    const cell = [...document.querySelectorAll("th, [role='columnheader']")].find((node) => node.textContent.trim() === header && visible(node));
+    if (!cell) return false;
+    const table = cell.closest(".el-table") || cell.closest("table, [role='table']");
+    if ([...document.querySelectorAll(".el-loading-mask")].some(visible)) return false;
+    let owner = table.__vue__;
+    while (owner && !owner.pageData) owner = owner.$parent;
+    if (owner?.pageData) return owner.pageData.total != null && owner.isNetWrong !== true;
+    return [...table.querySelectorAll("tbody tr, [role='row'], .el-table__empty-text")].some(visible);
+  }, header, { timeout: 8000 }).then(() => true, () => false);
+}
+
+export async function collectPositionTables(page, collectTables) {
+  if (!await activateTradeControl(page, "持仓明细") || !await waitForAccountTable(page, "持仓单号")) {
+    return [{ kind: "positions", loading: true, rows: [] }];
+  }
+  const previousPages = new Set();
+  while (true) {
+    const marker = await paginationText(page);
+    if (previousPages.has(marker) || !await turnOrderPage(page, "prev")) break;
+    previousPages.add(marker);
+  }
+  const tables = [];
+  const seen = new Set();
+  while (true) {
+    const current = (await collectTables(page)).filter((table) => table.rows.some((row) => row.includes("持仓单号") && !row.includes("委托单号")));
+    const marker = JSON.stringify(current);
+    if (seen.has(marker) || !current.length || current.some((table) => table.loading)) {
+      tables.push({ kind: "positions", loading: true, rows: [] });
+      break;
+    }
+    seen.add(marker);
+    tables.push(...current.map((table) => ({ ...table, kind: "positions" })));
     if (!await turnOrderPage(page, "next")) break;
   }
   return tables;

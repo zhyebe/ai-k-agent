@@ -15,7 +15,7 @@ export function isLiveTask(task) {
 
 export function isAutomaticAction(task, decision = task?.pendingAction || task?.decision) {
   return task?.autoDecisionEnabled === true
-    || (isLiveTask(task) && ["TAKE_PROFIT", "STOP_LOSS"].includes(decision?.exitType));
+    || (isLiveTask(task) && ["TAKE_PROFIT", "STOP_LOSS", "SCHEDULED_CLOSE"].includes(decision?.exitType));
 }
 
 export function shouldSubmitLiveOrder(task, source = "manual_confirm") {

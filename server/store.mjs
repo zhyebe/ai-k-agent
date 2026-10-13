@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { indexSkill } from "./rag.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
+import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
 import { publicProvider as formatPublicProvider, providerIdentityKey } from "./provider.mjs";
 
 const isoNow = () => new Date().toISOString();
@@ -88,6 +89,7 @@ export function publicTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
+    sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: String(task.providerId || ""),
     monitorAllBoards: task.monitorAllBoards === true,
@@ -215,6 +217,7 @@ function sanitizeHydratedTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
+    sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,

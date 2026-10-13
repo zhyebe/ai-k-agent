@@ -87,7 +87,7 @@ export interface PendingAction {
   decisionRunId?: string | null;
   action: "BUY" | "SELL";
   orderType?: "MARKET" | "LIMIT";
-  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
+  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | "SCHEDULED_CLOSE" | null;
   targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
@@ -122,7 +122,7 @@ export interface Decision {
   collectionDurationMs?: number | null;
   action: "BUY" | "SELL" | "HOLD";
   orderType?: "MARKET" | "LIMIT";
-  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | null;
+  exitType?: "TAKE_PROFIT" | "STOP_LOSS" | "SCHEDULED_CLOSE" | null;
   targetPositionIds?: string[];
   targetSymbol?: string;
   targetSymbolName?: string;
@@ -339,6 +339,10 @@ export interface Task {
   monitorAllBoards?: boolean;
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
+  sessionClose?: { time: string; leadMinutes: number; timezone: "Asia/Shanghai" };
+  sessionCloseState?: { date: string; closesAt: string; status: string; remainingPositions: number | null; remainingOrders?: number; checkedAt: string } | null;
+  exitMonitor?: { status: string; checkedAt: string; message: string } | null;
+  exitPlans?: Array<{ positionId: string; heldSide: "LONG" | "SHORT"; quantity: number; takeProfitPrice: number | null; stopLossPrice: number | null; expiresAt: string; status: string }>;
   entryQuantity?: number;
   autoDecisionCountdownSec?: number;
   providerId?: string;

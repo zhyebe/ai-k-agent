@@ -1,0 +1,190 @@
+import "./fixtures/open-market-clock.mjs";
+import assert from "node:assert/strict";
+import test, { afterEach } from "node:test";
+import { buildPendingAction, confirmPendingAction, runAnalysis, runPositionExitCycle, stopAllControllers, stopTask } from "../server/engine.mjs";
+import { validateExitPlans } from "../server/exit-policy.mjs";
+import { compactTaskRuntime } from "../server/persistence.mjs";
+import { state } from "../server/store.mjs";
+
+afterEach(stopAllControllers);
+
+function setup(id, positions, extras = {}) {
+  const now = Date.now();
+  const history = Array.from({ length: 30 }, (_, i) => ({ timestamp: now - (29 - i) * 60000, open: 100, high: 106, low: 99, close: 105, volume: 10 }));
+  const market = { ok: true, symbol: "DGKZ", symbolName: "测试商品", observedAt: new Date(now).toISOString(), source: "test", evidenceId: "market:test", fingerprint: id, history, historyCount: history.length, timeframe: "1m", quote: { price: 105 }, latest: { price: 105 }, account: { positionsVerified: true, positions, openOrdersVerified: true, openOrders: [], availableFunds: 10000 }, orderBook: { bids: [{ price: 105, volume: 100 }], asks: [{ price: 106, volume: 100 }] }, books: [], missingFields: [], indicators: {} };
+  const task = { id, ownerUserId: "exit-test-owner", name: id, mode: "LIVE", autoDecisionEnabled: false, status: "MONITORING", monitoringEnabled: true, stopLocked: false, monitorGeneration: 0, riskProfile: "Balanced", target: { type: "website", url: "https://smyw.haohandahan.cn/client/#/transcc", connectorId: "connector_haohan_readonly", browserSessionId: `task:${id}` }, market, rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: "HOLD", riskFlags: [], evidenceIds: [], confidence: 0 }, ...extras };
+  state.tasks.unshift(task);
+  const submitted = [], cancelled = [];
+  const runtime = {
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString(), account: { ...market.account, positions: [...market.account.positions], openOrders: [...market.account.openOrders] } }),
+    cancelOpenOrders: async ({ orderIds }) => { cancelled.push(...orderIds); market.account.openOrders = []; return { ok: true, results: orderIds.map(orderId => ({ orderId, cancelled: true })) }; },
+    submitSuggestionForm: async input => { submitted.push(input); market.account.positions = market.account.positions.filter(p => !input.targetPositionIds.includes(p.positionOrderId)); return { ok: true, submitted: true, targetPositionIds: input.targetPositionIds, submittedQuantity: input.quantity }; },
+  };
+  return { task, market, runtime, submitted, cancelled };
+}
+const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
+
+test("closing clears all three long/short positions and verifies actual flatness next observation", async () => {
+  const f = setup("closing-three", [long("P1"), long("P2", 2), { ...long("P3"), side: "卖出" }]);
+  f.market.account.openOrders = [{ orderId: "entry-old", orderKind: "订立", remainingQuantity: 1 }];
+  const now = Date.parse("2026-10-13T15:56:00+08:00");
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime, now });
+  assert.deepEqual(f.cancelled, ["entry-old"]);
+  assert.deepEqual(f.submitted.map(s => [s.action, s.targetPositionIds[0], s.quantity]), [["SELL", "P1", 1], ["SELL", "P2", 2], ["BUY", "P3", 1]]);
+  assert.equal(f.task.sessionCloseState.status, "CLOSING");
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime, now });
+  assert.equal(f.task.sessionCloseState.status, "FLAT_VERIFIED");
+  assert.equal(f.submitted.length, 3);
+});
+
+test("closing blocks both automatic entries and acknowledgements of stale manual entry forms", async () => {
+  const f = setup("closing-entry", [], { autoDecisionEnabled: true, sessionClose: { time: "09:00", leadMinutes: 5 } });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /SESSION_CLOSING_NO_ENTRY/);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("unverified or frozen holdings cannot masquerade as successful closing", async () => {
+  const f = setup("closing-unknown", [long("P1")]);
+  f.market.account.positionsVerified = false;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime, now: Date.parse("2026-10-13T16:01:00+08:00") });
+  assert.equal(f.task.exitMonitor.status, "ACCOUNT_UNVERIFIED");
+  assert.equal(f.task.sessionCloseState.status, "OVERDUE");
+  assert.equal(f.task.sessionCloseState.remainingPositions, null);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("AI conditions execute independently while the model is waiting; its late entry cannot overwrite the exit", async () => {
+  const f = setup("exit-while-ai", [long("P1")]);
+  f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 }] }, f.market, f.task).plans;
+  let releaseModel, modelStarted;
+  const waiting = new Promise(resolve => { modelStarted = resolve; });
+  const analysis = runAnalysis(f.task.id, "", { runtime: {
+    ...f.runtime, openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => structuredClone(f.market),
+    requestDecision: async () => { modelStarted(); return new Promise(resolve => { releaseModel = resolve; }); },
+  } });
+  await waiting;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitType, "TAKE_PROFIT");
+  releaseModel({ action: "BUY", bullishProfitProbability: 0.9, bearishProfitProbability: 0.1, riskFlags: [], evidenceIds: ["market:test"], holdingPlan: { decision: "HOLD_FOR_TARGET" } });
+  await analysis;
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.task.pendingAction?.exitType, "TAKE_PROFIT");
+});
+
+test("stopping aborts an in-flight fast observation and never submits its late result", async () => {
+  const f = setup("stop-exit-watch", [long("P1")]);
+  let finishObservation, observedSignal;
+  const operation = runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: { ...f.runtime, observeExecutionMarket: async (_task, _connector, options) => { observedSignal = options.signal; return new Promise(resolve => { finishObservation = resolve; }); } } });
+  await new Promise(resolve => setImmediate(resolve));
+  stopTask(f.task.id);
+  assert.equal(observedSignal.aborted, true);
+  finishObservation(f.market);
+  await assert.rejects(operation, /EXIT_MONITOR_STOPPED/);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("daily close settings, explicit AI plans and position verification survive persistence", () => {
+  const f = setup("exit-persist", [long("P1")], { sessionClose: { time: "15:30", leadMinutes: 10, timezone: "Asia/Shanghai" } });
+  f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 }] }, f.market, f.task).plans;
+  f.task.lastPositionAudit = { positionsVerified: true, positions: [{ positionId: "P1", quantity: 1 }] };
+  const runtime = JSON.parse(JSON.stringify(compactTaskRuntime(f.task)));
+  assert.equal(runtime.sessionClose.time, "15:30");
+  assert.equal(runtime.exitPlans[0].positionId, "P1");
+  assert.equal(runtime.lastPositionAudit.positionsVerified, true);
+});
+
+test("entering the closing window during observation still closes; a failed transfer never skips later positions", async () => {
+  const f = setup("closing-delay-failure", [long("P1"), long("P2")]);
+  await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:54:59.995+08:00"), runtime: {
+    ...f.runtime,
+    observeExecutionMarket: async () => { await new Promise(resolve => setTimeout(resolve, 15)); return f.market; },
+    submitSuggestionForm: async input => { if (input.targetPositionIds[0] === "P1") return { ok: false, code: "EXCHANGE_REJECTED" }; return f.runtime.submitSuggestionForm(input); },
+  } });
+  assert.equal(f.submitted.length, 1);
+  assert.deepEqual(f.submitted[0].targetPositionIds, ["P2"]);
+  assert.equal(f.task.exitMonitor.status, "ERROR");
+  assert.deepEqual(f.task.exitMonitor.failures, [{ positionId: "P1", code: "EXCHANGE_REJECTED" }]);
+});
+
+test("failed cancellation keeps closing free holdings, while frozen positions and live orders prevent flat verification", async () => {
+  const f = setup("closing-partial-cancel", [long("P1"), { ...long("P2"), frozenQuantity: 1 }]);
+  f.market.account.openOrders = [{ orderId: "O1", orderKind: "转让", remainingQuantity: 1, positionOrderId: "P2" }];
+  const now = Date.parse("2026-10-13T15:56:00+08:00");
+  await runPositionExitCycle(f.task.id, { now, runtime: { ...f.runtime, cancelOpenOrders: async () => ({ ok: false, results: [] }) } });
+  assert.deepEqual(f.submitted.map(s => s.targetPositionIds[0]), ["P1"]);
+  assert.equal(f.task.sessionCloseState.status, "CLOSING");
+  assert.equal(f.task.sessionCloseState.remainingOrders, 1);
+});
+
+test("a cancellation transport error still refreshes the account and closes free positions", async () => {
+  const f = setup("closing-cancel-error", [long("P1"), { ...long("P2"), frozenQuantity: 1 }]);
+  f.market.account.openOrders = [{ orderId: "O1", orderKind: "转让", positionOrderId: "P2" }];
+  await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: {
+    ...f.runtime, cancelOpenOrders: async () => { throw new Error("DESKTOP_CALL_TIMEOUT"); },
+  } });
+  assert.deepEqual(f.submitted.map(s => s.targetPositionIds[0]), ["P1"]);
+  assert.equal(f.task.sessionCloseState.status, "CLOSING");
+  assert.equal(f.task.sessionCloseState.remainingOrders, 1);
+});
+
+test("an exchange rejection is reported and retried without blocking other holdings", async () => {
+  const f = setup("closing-rejected", [long("P1"), long("P2")]);
+  const now = Date.parse("2026-10-13T15:56:00+08:00");
+  await runPositionExitCycle(f.task.id, { now, runtime: {
+    ...f.runtime, submitSuggestionForm: async input => input.targetPositionIds[0] === "P1"
+      ? { ok: false, submitted: true, code: "TRADE_REJECTED", message: "交易所拒绝" }
+      : f.runtime.submitSuggestionForm(input),
+  } });
+  assert.equal(f.task.exitMonitor.status, "ERROR");
+  assert.equal(f.task.exitMonitor.failures[0].positionId, "P1");
+  await runPositionExitCycle(f.task.id, { now, runtime: f.runtime });
+  assert.deepEqual(f.submitted.map(s => s.targetPositionIds[0]), ["P2", "P1"]);
+});
+
+test("stop during cancellation discards a late failure without adding output", async () => {
+  const f = setup("closing-cancel-stop", [long("P1")]);
+  f.market.account.openOrders = [{ orderId: "O1", orderKind: "订立" }];
+  let rejectCancellation;
+  const operation = runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: {
+    ...f.runtime, cancelOpenOrders: async () => new Promise((_resolve, reject) => { rejectCancellation = reject; }),
+  } });
+  while (!rejectCancellation) await new Promise(resolve => setImmediate(resolve));
+  stopTask(f.task.id);
+  const outputCount = state.agentOutput.length;
+  rejectCancellation(new Error("DESKTOP_DISCONNECTED"));
+  await assert.rejects(operation, /EXIT_MONITOR_STOPPED/);
+  assert.equal(state.agentOutput.length, outputCount);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("stop during submission ignores a successful late browser response", async () => {
+  const f = setup("closing-submit-stop", [long("P1")]);
+  let finishSubmission;
+  const operation = runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: {
+    ...f.runtime, submitSuggestionForm: async () => new Promise(resolve => { finishSubmission = resolve; }),
+  } });
+  while (!finishSubmission) await new Promise(resolve => setImmediate(resolve));
+  stopTask(f.task.id);
+  const orderCount = state.orders.length;
+  finishSubmission({ ok: true, submitted: true });
+  await assert.rejects(operation, /EXIT_MONITOR_STOPPED/);
+  assert.equal(state.orders.length, orderCount);
+  assert.equal(f.task.pendingAction.status, "CANCELLED");
+  assert.equal(f.task.status, "MANUAL_CONTROL");
+});
+
+test("manual continuation receives the close deadline even for an already waiting entry", async () => {
+  const f = setup("closing-manual-continuation", [], { sessionClose: { time: "09:00", leadMinutes: 5 } });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  let input;
+  await runAnalysis(f.task.id, "", { runtime: {
+    ...f.runtime, openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    continueManualEntry: async value => { input = value; return { ok: false, continued: false, code: "SESSION_CLOSING_NO_ENTRY" }; },
+    observeMarket: async () => f.market,
+    requestDecision: async () => ({ action: "BUY", bullishProfitProbability: 0.8, bearishProfitProbability: 0.2, riskFlags: [], evidenceIds: ["market:test"] }),
+  } });
+  assert.ok(input.entryDeadlineAt < Date.now());
+  assert.equal(f.submitted.length, 0);
+});

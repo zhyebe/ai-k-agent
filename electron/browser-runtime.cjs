@@ -56,21 +56,31 @@ function scopedSession(message, apiBaseUrl) {
 async function executeBrowserCall(app, message, apiBaseUrl, signal) {
   if (!message.userId) throw new Error("DESKTOP_BROWSER_USER_REQUIRED");
   const sessionId = scopedSession(message, apiBaseUrl);
-  const previous = queues.get(sessionId) || Promise.resolve();
-  const operation = previous.catch(() => {}).then(async () => {
+  const withBrowser = async (operation) => {
+    const previous = queues.get(sessionId) || Promise.resolve();
+    const queued = previous.catch(() => {}).then(async () => {
+      signal.throwIfAborted();
+      if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
+      return operation();
+    });
+    queues.set(sessionId, queued);
+    try { return await queued; }
+    finally { if (queues.get(sessionId) === queued) queues.delete(sessionId); }
+  };
+  const execute = async () => {
     signal.throwIfAborted();
     if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
     const { browser, market, tools, analysis } = await loadModules(app);
     signal.throwIfAborted();
     const input = { ...message.input, sessionId };
-    const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
+    const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "observeExecutionMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
       && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
     const abort = () => { if (shouldCloseOnAbort()) browser.closeBrowserSession(sessionId).catch(() => {}); };
     signal.addEventListener("abort", abort, { once: true });
     try {
-      if (message.method === "openMarketBrowser" || message.method === "observeMarket") {
+      if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(message.method)) {
         const task = { ...input.task, target: { ...input.task?.target, browserSessionId: sessionId } };
-        const result = await market[message.method](task, input.connector);
+        const result = await market[message.method](task, input.connector, { withBrowser });
         signal.throwIfAborted();
         // The public session ID stays stable across desktop installs and reconnects.
         if (result.sessionId) result.sessionId = input.task?.target?.browserSessionId || `task:${input.task?.id}`;
@@ -105,10 +115,10 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
       signal.removeEventListener("abort", abort);
       if (signal.aborted && shouldCloseOnAbort()) await browser.closeBrowserSession(sessionId);
     }
-  });
-  queues.set(sessionId, operation);
-  try { return await operation; }
-  finally { if (queues.get(sessionId) === operation) queues.delete(sessionId); }
+  };
+  // Only DOM phases of full collection need the same-session queue. Its slow
+  // read-only history requests must leave room for position/exit observations.
+  return message.method === "observeMarket" ? execute() : withBrowser(execute);
 }
 
 async function closeBrowserRuntime() {
