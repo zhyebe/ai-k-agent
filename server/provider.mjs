@@ -301,7 +301,7 @@ async function readJsonPayload(response) {
   }
 }
 
-export function publicProvider(provider) {
+export function publicProvider(provider, userId = "") {
   return {
     id: provider.id,
     name: provider.name,
@@ -314,7 +314,7 @@ export function publicProvider(provider) {
     configured: Boolean(provider.encryptedKey),
     keyPreview: provider.keyPreview || maskSecret(decryptSecret(provider.encryptedKey)),
     status: provider.status || "未验证",
-    owned: Boolean(provider.ownerUserId),
+    owned: Boolean(userId && String(provider.ownerUserId || "") === String(userId)),
   };
 }
 

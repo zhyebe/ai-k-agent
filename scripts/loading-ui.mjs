@@ -62,6 +62,72 @@ async function capture(page, name) {
   await page.screenshot({ path: join(process.env.AXIOM_LOADING_SCREENSHOTS, `${name}.png`), fullPage: true });
 }
 
+test("shared providers enforce creator controls and cache each user's enabled model locally", async (t) => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  const template = sample.tasks[0];
+  sample.tasks = [];
+  sample.providers = [
+    { id: "stepfun", name: "STEPFUN", model: "step-5", baseUrl: "https://step.example.test", configured: true, owned: true, keyPreview: "***", status: "模型可用" },
+    { id: "deepseek", name: "deepseek", model: "deepseek-chat", baseUrl: "https://deep.example.test", configured: true, owned: false, keyPreview: "***", status: "模型可用" },
+  ];
+  let activeUser = user;
+  const usageRequests = [];
+  await page.route("**/api/user/session", (route) => route.fulfill({ json: { authenticated: true, user: activeUser } }));
+  await page.route("**/api/workspace", (route) => route.fulfill({ json: sample }));
+  await page.route("**/api/tasks/local-choice/*", (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: { output: [], runs: [] } });
+    usageRequests.push({ path: new URL(route.request().url()).pathname, body: route.request().postDataJSON() });
+    return route.fulfill({ json: { task: sample.tasks[0], route: "HOLD", output: [] } });
+  });
+  const row = (name) => page.locator(".provider-row").filter({ hasText: name });
+  const connectors = async () => page.getByRole("button", { name: "连接器", exact: true }).first().click();
+  await navigate();
+  await connectors();
+  await row("STEPFUN").waitFor();
+  for (const name of ["编辑", "模型", "验证", "删除"]) {
+    assert.equal(await row("STEPFUN").getByRole("button", { name, exact: true }).count(), 1);
+    assert.equal(await row("deepseek").getByRole("button", { name, exact: true }).count(), 0);
+  }
+  await row("deepseek").getByText("共享只读", { exact: true }).waitFor();
+  await row("STEPFUN").getByRole("button", { name: "使用", exact: true }).click();
+  await row("STEPFUN").getByRole("button", { name: "使用中", exact: true }).waitFor();
+  assert.deepEqual(usageRequests, [], "choosing a model without tasks only writes localStorage");
+
+  activeUser = { id: "second-local-user", username: "second", displayName: "第二用户" };
+  sample.providers[0].owned = false;
+  sample.providers[1].owned = true;
+  await page.reload();
+  await connectors();
+  await row("deepseek").waitFor();
+  assert.equal(await page.getByRole("button", { name: "使用中", exact: true }).count(), 0, "B must not inherit A's selection");
+  await row("deepseek").getByRole("button", { name: "使用", exact: true }).click();
+  await row("deepseek").getByRole("button", { name: "使用中", exact: true }).waitFor();
+  await page.reload();
+  await connectors();
+  await row("deepseek").getByRole("button", { name: "使用中", exact: true }).waitFor();
+
+  activeUser = user;
+  sample.tasks = [{ ...structuredClone(template), id: "local-choice", providerId: "deepseek", status: "MANUAL_CONTROL", monitoringEnabled: false, stopLocked: true }];
+  await page.reload();
+  const selector = page.getByRole("combobox", { name: "分析模型", exact: true });
+  await selector.waitFor();
+  assert.equal(await selector.inputValue(), "stepfun", "local preference overrides historical server task data");
+  await page.getByRole("button", { name: "开始观察", exact: true }).click();
+  await page.getByRole("button", { name: "立即分析", exact: true }).click();
+  assert.deepEqual(usageRequests.map(({ path, body }) => ({ path, body })), [
+    { path: "/api/tasks/local-choice/start", body: { providerId: "stepfun" } },
+    { path: "/api/tasks/local-choice/analyze", body: { providerId: "stepfun" } },
+  ]);
+  sample.providers = sample.providers.filter((provider) => provider.id !== "stepfun");
+  await page.reload();
+  await selector.waitFor();
+  assert.equal(await selector.inputValue(), "", "a deleted selected model does not silently switch to another model");
+  await page.getByRole("button", { name: "立即分析", exact: true }).click();
+  await page.getByText("请先选择本机使用的 AI Provider", { exact: true }).waitFor();
+  assert.equal(usageRequests.length, 2);
+});
+
 for (const width of [1440, 390]) {
   test(`daily close settings persist through task creation and editing at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width });

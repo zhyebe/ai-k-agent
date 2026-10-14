@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import "./fixtures/open-market-clock.mjs";
 import test from "node:test";
-import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
+import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, setTaskProvider, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider, requestDecision } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { state } from "../server/store.mjs";
@@ -793,6 +793,47 @@ function testMarketSnapshot(fingerprint, price) {
     raw: { source: "test", timeline: { ticks: [{ timestamp: now, price }] } },
   };
 }
+
+test("双用户自动分析分别使用各自启用的共享模型", async () => {
+  const first = insertNorthstarTask(`provider-user-a-${Date.now()}`);
+  const second = insertNorthstarTask(`provider-user-b-${Date.now()}`);
+  Object.assign(first, { ownerUserId: "provider-user-a", status: "MONITORING", monitoringEnabled: true });
+  Object.assign(second, { ownerUserId: "provider-user-b", status: "MONITORING", monitoringEnabled: true });
+  const providers = [
+    { ...createProvider({ name: "STEPFUN", model: "step-5", baseUrl: "https://step.example.test", apiKey: "test-key-a" }), ownerUserId: first.ownerUserId },
+    { ...createProvider({ name: "deepseek", model: "deepseek-chat", baseUrl: "https://deep.example.test", apiKey: "test-key-b" }), ownerUserId: second.ownerUserId },
+  ];
+  state.providers.push(...providers);
+  const calls = [];
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => testMarketSnapshot(`shared-model-${calls.length}`, 100),
+    requestDecision: async (provider, context) => {
+      calls.push(provider.id);
+      return { action: "HOLD", bullishProfitProbability: 0.2, bearishProfitProbability: 0.3, evidenceIds: [context.evidenceIds[0]], riskFlags: [] };
+    },
+    submitSuggestionForm: async () => assert.fail("model selection test cannot submit an order"),
+  };
+  try {
+    setTaskProvider(first.id, providers[0].id, first.ownerUserId);
+    setTaskProvider(second.id, providers[1].id, second.ownerUserId);
+    await runMonitoringCycle(first.id, { userId: first.ownerUserId, runtime });
+    await runMonitoringCycle(second.id, { userId: second.ownerUserId, runtime });
+    assert.deepEqual(calls, [providers[0].id, providers[1].id]);
+    setTaskProvider(first.id, providers[1].id, first.ownerUserId);
+    setTaskProvider(second.id, providers[0].id, second.ownerUserId);
+    await runAnalysis(first.id, "", { userId: first.ownerUserId, runtime });
+    await runAnalysis(second.id, "", { userId: second.ownerUserId, runtime });
+    assert.deepEqual(calls, [providers[0].id, providers[1].id, providers[1].id, providers[0].id]);
+    assert.equal(first.providerId, providers[1].id);
+    assert.equal(second.providerId, providers[0].id);
+  } finally {
+    for (const task of [first, second]) stopController(task.id);
+    state.tasks = state.tasks.filter((task) => ![first.id, second.id].includes(task.id));
+    state.providers = state.providers.filter((provider) => !providers.some((item) => item.id === provider.id));
+  }
+});
 
 for (const autoDecisionEnabled of [false, true]) {
   test(`委托撤销独立于${autoDecisionEnabled ? "自动" : "手动"}入场、HOLD和同K限制，未变行情继续分析`, async () => {

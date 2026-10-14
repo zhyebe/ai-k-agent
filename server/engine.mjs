@@ -6,7 +6,7 @@ import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, isAutomaticAction
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
-import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, resolveDefaultProviderId, startAgentRun, state } from "./store.mjs";
+import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities } from "./entry-policy.mjs";
@@ -594,10 +594,11 @@ export function setTaskProvider(taskId, providerId, userId = "") {
   if (!ownerUserId || (userId && String(userId) !== ownerUserId)) throw new Error("TASK_ACCESS_DENIED");
   const provider = findProviderForUser(String(providerId || ""), ownerUserId);
   if (!provider?.encryptedKey || !provider.baseUrl) throw new Error("PROVIDER_NOT_READY");
-  task.providerId = provider.id;
-  task.updatedAt = new Date().toISOString();
-  addEvent("provider_selected", `已切换分析模型：${provider.name} / ${provider.model}`, { taskId, providerId: provider.id, userId });
-  persistTask(task);
+  // Relay this desktop's selection to its user's running tasks only in memory.
+  // The enabled provider is a local preference, never durable task configuration.
+  for (const current of state.tasks) {
+    if (current.id === taskId || String(current.ownerUserId || "") === ownerUserId) current.providerId = provider.id;
+  }
   return task;
 }
 
@@ -1935,8 +1936,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         ? `本轮喂入共享知识库已审核的 ${knowledge.length} 条 Skill，与出K策略、K 线、各盘买卖档位一起分析`
         : "共享知识库没有已发布 Skill，本轮仅基于实时实盘数据和出K策略分析",
     });
-    const resolvedProviderId = resolveDefaultProviderId(resolvedUserId, providerId || task.providerId);
-    const provider = findProviderForUser(resolvedProviderId, resolvedUserId);
+    const resolvedProviderId = String(providerId || task.providerId || "");
+    const provider = resolvedProviderId ? findProviderForUser(resolvedProviderId, resolvedUserId) : null;
     if (provider?.id) task.providerId = provider.id;
     appendAgentOutput({
       taskId,

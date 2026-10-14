@@ -189,7 +189,6 @@ export function compactTaskRuntime(task = {}) {
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-    providerId: String(task.providerId || ""),
     pendingAction: task.pendingAction || null,
     unsettledActions: task.unsettledActions || [],
     lastEntryKWindow: task.lastEntryKWindow || null,
@@ -708,7 +707,7 @@ async function createMySqlAdapter() {
             autoDecisionEnabled: runtime.autoDecisionEnabled === true,
             entryQuantity: entryQuantityForTask(runtime),
             autoDecisionCountdownSec: Number(runtime.autoDecisionCountdownSec || 30),
-            providerId: String(runtime.providerId || ""),
+            providerId: "",
             pendingAction: runtime.pendingAction || null,
             unsettledActions: runtime.unsettledActions || [],
             lastEntryKWindow: runtime.lastEntryKWindow || null,
@@ -781,7 +780,10 @@ async function createMongoAdapter() {
       if (!shouldPersistAuditEvent(event?.type)) return;
       await collections.audit.replaceOne({ _id: event.id }, { ...event, _id: event.id }, { upsert: true });
     },
-    saveTask: (task) => collections.tasks.replaceOne({ _id: task.id }, { ...task, ...compactTaskRuntime(task), _id: task.id }, { upsert: true }),
+    saveTask: (task) => {
+      const { providerId, ...persistentTask } = task;
+      return collections.tasks.replaceOne({ _id: task.id }, { ...persistentTask, ...compactTaskRuntime(task), _id: task.id }, { upsert: true });
+    },
     async deleteTaskData({ taskId, ownerUserId }) {
       const owned = await collections.tasks.findOne({ _id: taskId, ownerUserId });
       if (!owned) throw new Error("TASK_NOT_FOUND");

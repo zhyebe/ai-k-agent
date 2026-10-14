@@ -75,7 +75,7 @@ function publicMarket(market) {
 
 export function publicTask(task) {
   if (!task) return task;
-  const { ownerUserId, automationTestMode, ...safeTask } = task;
+  const { ownerUserId, automationTestMode, providerId, ...safeTask } = task;
   const target = task.target ? { ...task.target, credentialRef: "" } : task.target;
   if (target?.marketAnalysis) target.marketAnalysis = { ...target.marketAnalysis, credentialRef: "" };
   if (target) {
@@ -91,7 +91,6 @@ export function publicTask(task) {
     entryQuantity: entryQuantityForTask(task),
     sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-    providerId: String(task.providerId || ""),
     monitorAllBoards: task.monitorAllBoards === true,
     pendingAction: task.pendingAction || null,
     target,
@@ -127,17 +126,16 @@ export function publicSkill(skill, userId = "") {
   return { ...safeSkill, owned: Boolean(userId && String(ownerUserId || "") === String(userId)) };
 }
 
-export function publicProvider(provider) {
+export function publicProvider(provider, userId = "") {
   if (!provider) return provider;
-  return formatPublicProvider(provider);
+  return formatPublicProvider(provider, userId);
 }
 
 export function publicProviderList(userId = "") {
   const normalizedUserId = String(userId || "");
   if (!normalizedUserId) return [];
-  return state.providers
-    .filter((provider) => String(provider.ownerUserId || "") === normalizedUserId)
-    .map(publicProvider);
+  // Provider configuration is shared; ownership controls management only.
+  return state.providers.map((provider) => publicProvider(provider, normalizedUserId));
 }
 
 export function findProviderForUser(providerId = "", userId = "") {
@@ -145,16 +143,9 @@ export function findProviderForUser(providerId = "", userId = "") {
   const normalizedUserId = String(userId || "");
   if (!normalizedUserId) return null;
   if (!requestedId) {
-    return state.providers.find((provider) =>
-      String(provider.ownerUserId || "") === normalizedUserId && providerIsReady(provider),
-    ) || null;
+    return state.providers.find(providerIsReady) || null;
   }
-  const owned = state.providers.find((provider) =>
-    String(provider.ownerUserId || "") === normalizedUserId
-    && (String(provider.id) === requestedId || String(provider.providerKey || "") === requestedId),
-  );
-  if (owned) return owned;
-  return null;
+  return state.providers.find((provider) => String(provider.id) === requestedId || String(provider.providerKey || "") === requestedId) || null;
 }
 
 function providerIsReady(provider) {
@@ -164,12 +155,13 @@ function providerIsReady(provider) {
 export function resolveDefaultProviderId(userId = "", preferredId = "") {
   const preferred = String(preferredId || "").trim();
   const normalizedUserId = String(userId || "");
+  if (!normalizedUserId) return "";
   if (preferred) {
     const found = findProviderForUser(preferred, userId);
-    if (found) return found.id;
+    return found?.id || preferred;
   }
-  const owned = state.providers.find((provider) => providerIsReady(provider) && String(provider.ownerUserId || "") === normalizedUserId);
-  if (owned) return owned.id;
+  const shared = state.providers.find(providerIsReady);
+  if (shared) return shared.id;
   return preferred;
 }
 
@@ -219,7 +211,7 @@ function sanitizeHydratedTask(task) {
     entryQuantity: entryQuantityForTask(task),
     sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
-    providerId: String(task.providerId || ""),
+    providerId: "",
     pendingAction: task.pendingAction || null,
     monitoringEnabled: task.monitoringEnabled === undefined ? task.status === "MONITORING" : Boolean(task.monitoringEnabled),
     monitorAllBoards: task.monitorAllBoards === true,
@@ -258,7 +250,8 @@ export function getConnector(connectorId) {
 }
 
 export function persistTask(task) {
-  return persistValue("saveTask", task);
+  const { providerId, ...persistentTask } = task;
+  return persistValue("saveTask", persistentTask);
 }
 
 export function persistDeletedTask(payload) {
@@ -461,7 +454,7 @@ export function publicState({ taskIds = null, userId = null, includeEvents = fal
   return {
     tasks: tasks.map(publicTask),
     skills: state.skills.map((skill) => publicSkill(skill, normalizedUserId)),
-    providers: normalizedUserId ? publicProviderList(normalizedUserId) : state.providers.map(publicProvider),
+    providers: normalizedUserId ? publicProviderList(normalizedUserId) : state.providers.map((provider) => publicProvider(provider)),
     events: includeEvents ? visibleEvents : [],
     runs: visibleTaskIds ? state.runs.filter((run) => visibleTaskIds.has(String(run.taskId || ""))) : state.runs,
     connectors: visibleConnectors.map(publicConnector),

@@ -21,6 +21,21 @@ export function getApiBaseUrl() {
   return apiBaseUrl;
 }
 
+function providerPreferenceKey(userId: string) {
+  if (!userId) throw new Error("USER_AUTH_REQUIRED");
+  return `axiom.provider:${JSON.stringify([apiBaseUrl || window.location.origin, userId])}`;
+}
+
+export function getLocalProviderId(userId: string) {
+  return window.localStorage.getItem(providerPreferenceKey(userId)) || "";
+}
+
+export function setLocalProviderId(userId: string, providerId: string) {
+  const key = providerPreferenceKey(userId);
+  if (providerId) window.localStorage.setItem(key, providerId);
+  else window.localStorage.removeItem(key);
+}
+
 const USER_TOKEN_KEY = "axiom.user.token";
 const ADMIN_TOKEN_KEY = "axiom.admin.token";
 
@@ -221,8 +236,8 @@ export async function loadWorkspace(): Promise<Workspace> {
   return fetchWorkspace();
 }
 
-export async function startTask(taskId: string): Promise<Task> {
-  return (await request<{ task: Task }>(`/api/tasks/${taskId}/start`, { method: "POST", body: "{}" })).task;
+export async function startTask(taskId: string, providerId?: string): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/start`, { method: "POST", body: JSON.stringify(providerId ? { providerId } : {}) })).task;
 }
 
 export async function createTask(payload: Record<string, unknown>): Promise<Task> {
@@ -245,8 +260,8 @@ export async function claimManual(taskId: string): Promise<Task> {
   return (await request<{ task: Task }>(`/api/tasks/${taskId}/manual`, { method: "POST", body: "{}" })).task;
 }
 
-export async function autoJudge(taskId: string): Promise<Task> {
-  return (await request<{ task: Task }>(`/api/tasks/${taskId}/auto-judge`, { method: "POST", body: "{}" })).task;
+export async function autoJudge(taskId: string, providerId?: string): Promise<Task> {
+  return (await request<{ task: Task }>(`/api/tasks/${taskId}/auto-judge`, { method: "POST", body: JSON.stringify(providerId ? { providerId } : {}) })).task;
 }
 
 export async function setAutoDecision(taskId: string, enabled: boolean, countdownSec?: number): Promise<Task> {

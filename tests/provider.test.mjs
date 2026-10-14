@@ -336,7 +336,7 @@ test("desktop users can create an owned provider and keep the wire format", () =
     apiFormat: "openai_responses",
   });
   provider.ownerUserId = "user_desktop_1";
-  const published = publicProvider(provider);
+  const published = publicProvider(provider, "user_desktop_1");
   assert.equal(published.configured, true);
   assert.equal(published.owned, true);
   assert.equal(published.apiFormat, "responses");
@@ -605,7 +605,10 @@ test("owned providers with the same name, model and URL share an identity", () =
   const first = { ownerUserId: "user_1", name: "gateway", model: "your-model", baseUrl: "https://gateway.example.test/" };
   const second = { ownerUserId: "user_1", name: "Gateway", model: "your-model", baseUrl: "https://gateway.example.test" };
   assert.equal(providerIdentityKey(first), providerIdentityKey(second));
-  assert.equal(publicProvider({ ...first, encryptedKey: "x" }).owned, true);
+  assert.notEqual(providerIdentityKey(first), providerIdentityKey({ ...second, ownerUserId: "user_2" }));
+  assert.equal(publicProvider({ ...first, encryptedKey: "x" }, "user_1").owned, true);
+  assert.equal(publicProvider({ ...first, encryptedKey: "x" }, "user_2").owned, false);
+  assert.equal(publicProvider({ ...first, encryptedKey: "x" }).owned, false);
 });
 
 test("provider decision receives bounded evidence context", async () => {

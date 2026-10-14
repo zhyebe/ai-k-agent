@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persistence.mjs";
 
+test("enabled provider is a desktop preference and excluded from durable task runtime", () => {
+  assert.equal("providerId" in compactTaskRuntime({ providerId: "stepfun-local-selection" }), false);
+});
+
 test("decision correlation and compact model diagnostics survive restart without raw output", () => {
   const modelDiagnostics = { wireApi: "anthropic", jsonStatus: "INVALID_JSON", contentTypes: ["thinking", "text"], stopReason: "end_turn", textLength: 40, contentHash: "a".repeat(64) };
   const runtime = compactTaskRuntime({

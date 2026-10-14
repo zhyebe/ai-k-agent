@@ -100,6 +100,7 @@ test("connector test enforces task binding and clears credentials on target chan
     const userProvider = await request(baseUrl, "/api/providers", { method: "POST", headers, body: JSON.stringify({ name: "Boundary Provider", baseUrl: "https://example.invalid/v1", model: "boundary-model", apiKey: "boundary-key" }) });
     assert.equal(userProvider.status, 201);
     assert.equal(userProvider.body.provider.configured, true);
+    assert.equal(userProvider.body.provider.owned, true);
     const secondCreated = await request(baseUrl, "/api/admin/users", { method: "POST", headers: adminHeaders, body: JSON.stringify({ username: "boundary-second", displayName: "第二用户", password: "boundary-second-pass" }) });
     assert.equal(secondCreated.status, 201);
     const secondLogin = await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-second", password: "boundary-second-pass" }) });
@@ -107,11 +108,26 @@ test("connector test enforces task binding and clears credentials on target chan
     const secondHeaders = { "x-user-token": secondLogin.body.token };
     const secondProviders = await request(baseUrl, "/api/providers", { headers: secondHeaders });
     assert.equal(secondProviders.status, 200);
-    assert.equal(secondProviders.body.providers.some((provider) => provider.name === "Boundary Provider"), false);
+    const sharedProvider = secondProviders.body.providers.find((provider) => provider.id === userProvider.body.provider.id);
+    assert.equal(sharedProvider.name, "Boundary Provider");
+    assert.equal(sharedProvider.owned, false);
+    assert.equal("encryptedKey" in sharedProvider, false);
+    assert.equal("apiKey" in sharedProvider, false);
+    assert.equal(JSON.stringify(secondProviders.body).includes("boundary-key"), false);
     const foreignProviderEdit = await request(baseUrl, "/api/providers", { method: "POST", headers: secondHeaders, body: JSON.stringify({ id: userProvider.body.provider.id, name: "stolen", baseUrl: "https://example.invalid/v1", model: "stolen" }) });
-    assert.equal(foreignProviderEdit.status, 404);
+    assert.equal(foreignProviderEdit.status, 403);
+    assert.equal(foreignProviderEdit.body.error, "PROVIDER_SHARED_READ_ONLY");
     const foreignProviderModels = await request(baseUrl, `/api/providers/${userProvider.body.provider.id}/models`, { method: "POST", headers: secondHeaders, body: "{}" });
-    assert.equal(foreignProviderModels.status, 404);
+    assert.equal(foreignProviderModels.status, 403);
+    const foreignProviderTest = await request(baseUrl, `/api/providers/${sharedProvider.id}/test`, { method: "POST", headers: secondHeaders, body: "{}" });
+    assert.equal(foreignProviderTest.status, 403);
+    const foreignProviderDelete = await request(baseUrl, `/api/providers/${sharedProvider.id}`, { method: "DELETE", headers: secondHeaders });
+    assert.equal(foreignProviderDelete.status, 403);
+    assert.equal(foreignProviderDelete.body.error, "PROVIDER_SHARED_READ_ONLY");
+    const unauthenticatedDelete = await request(baseUrl, `/api/providers/${sharedProvider.id}`, { method: "DELETE" });
+    assert.equal(unauthenticatedDelete.status, 401);
+    const afterDeniedDelete = await request(baseUrl, "/api/providers", { headers });
+    assert.ok(afterDeniedDelete.body.providers.some((provider) => provider.id === sharedProvider.id && provider.owned));
     const secondSkills = await request(baseUrl, "/api/skills", { headers: secondHeaders });
     assert.equal(secondSkills.status, 200);
     const sharedSkill = secondSkills.body.skills.find((skill) => skill.title === "boundary skill");
@@ -164,10 +180,14 @@ test("connector test enforces task binding and clears credentials on target chan
       assert.equal(invalidQuantity.status, 400);
     }
     assert.equal(second.status, 201);
-    assert.equal(first.body.task.providerId, userProvider.body.provider.id);
+    assert.equal(first.body.task.providerId, undefined);
     assert.equal(first.body.task.target.credentialStatus, "未配置");
     const secondTenantTask = await request(baseUrl, "/api/tasks", { method: "POST", headers: secondHeaders, body: JSON.stringify({ name: "second-tenant-task", targetType: "website", url: "https://example.edu" }) });
     assert.equal(secondTenantTask.status, 201);
+    assert.equal(secondTenantTask.body.task.providerId, undefined);
+    const selectSharedProvider = await request(baseUrl, `/api/tasks/${secondTenantTask.body.task.id}/provider`, { method: "POST", headers: secondHeaders, body: JSON.stringify({ providerId: sharedProvider.id }) });
+    assert.equal(selectSharedProvider.status, 200);
+    assert.equal(selectSharedProvider.body.task.providerId, undefined);
     const firstWorkspaceAfterTasks = await request(baseUrl, "/api/workspace", { headers });
     const secondWorkspaceAfterTasks = await request(baseUrl, "/api/workspace", { headers: secondHeaders });
     assert.equal(firstWorkspaceAfterTasks.body.tasks.some((task) => task.id === secondTenantTask.body.task.id), false);
@@ -198,7 +218,7 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal(hosted.status, 201, JSON.stringify(hosted.body));
     assert.equal(hosted.body.task.target.credentialStatus, "已托管");
     assert.equal(hosted.body.task.target.credentialRef, "");
-    assert.equal(hosted.body.task.providerId, userProvider.body.provider.id);
+    assert.equal(hosted.body.task.providerId, undefined);
     assert.equal(hosted.body.task.mode, "LIVE");
     assert.equal(hosted.body.task.autoDecisionEnabled, false);
     assert.equal(hosted.body.task.target.url, "https://smyw.haohandahan.cn/client/#/transcc");
@@ -231,7 +251,7 @@ test("connector test enforces task binding and clears credentials on target chan
     const secondCreds = await request(baseUrl, "/api/credentials", { headers: secondHeaders });
     assert.equal(secondCreds.body.credentials.some((item) => item.accountLabel === hosted.body.task.target.accountLabel), false);
     const secondWorkspace = await request(baseUrl, "/api/workspace", { headers: secondHeaders });
-    assert.equal(secondWorkspace.body.providers.some((provider) => provider.name === "Boundary Provider"), false);
+    assert.ok(secondWorkspace.body.providers.some((provider) => provider.name === "Boundary Provider" && !provider.owned));
     assert.equal((secondWorkspace.body.credentials || []).length, 0);
 
     const foreignConnector = second.body.task.target.connectorId;
@@ -315,6 +335,22 @@ test("connector test enforces task binding and clears credentials on target chan
 
     const secondProvider = await request(baseUrl, "/api/providers", { method: "POST", headers: secondHeaders, body: JSON.stringify({ name: "Second Provider", baseUrl: "https://second.invalid/v1", model: "second", apiKey: "second-key" }) });
     assert.equal(secondProvider.status, 201);
+    const bindSecondProvider = await request(baseUrl, `/api/tasks/${first.body.task.id}/provider`, { method: "POST", headers: reloginHeaders, body: JSON.stringify({ providerId: secondProvider.body.provider.id }) });
+    assert.equal(bindSecondProvider.status, 200);
+    const disposableProvider = await request(baseUrl, "/api/providers", { method: "POST", headers: reloginHeaders, body: JSON.stringify({ name: "Disposable Provider", baseUrl: "https://disposable.invalid/v1", model: "disposable", apiKey: "disposable-key", ownerUserId: secondCreated.body.user.id }) });
+    assert.equal(disposableProvider.status, 201);
+    assert.equal(disposableProvider.body.provider.owned, true, "request cannot spoof the creator");
+    for (const [task, ownerHeaders] of [[second.body.task, reloginHeaders], [secondTenantTask.body.task, secondHeaders]]) {
+      const bound = await request(baseUrl, `/api/tasks/${task.id}/provider`, { method: "POST", headers: ownerHeaders, body: JSON.stringify({ providerId: disposableProvider.body.provider.id }) });
+      assert.equal(bound.status, 200);
+    }
+    const creatorDelete = await request(baseUrl, `/api/providers/${disposableProvider.body.provider.id}`, { method: "DELETE", headers: reloginHeaders });
+    assert.equal(creatorDelete.status, 200);
+    for (const [task, ownerHeaders] of [[second.body.task, reloginHeaders], [secondTenantTask.body.task, secondHeaders]]) {
+      const after = await request(baseUrl, "/api/workspace", { headers: ownerHeaders });
+      assert.equal(after.body.providers.some((provider) => provider.id === disposableProvider.body.provider.id), false);
+      assert.equal(after.body.tasks.find((item) => item.id === task.id).providerId, undefined);
+    }
     const secondSkill = await request(baseUrl, "/api/skills", { method: "POST", headers: secondHeaders, body: JSON.stringify({ title: "second skill", content: "tenant-specific content" }) });
     assert.equal(secondSkill.status, 201);
     const visibleDraft = await request(baseUrl, "/api/skills", { headers: reloginHeaders });
@@ -334,6 +370,10 @@ test("connector test enforces task binding and clears credentials on target chan
     assert.equal((await request(baseUrl, "/api/user/login", { method: "POST", body: JSON.stringify({ username: "boundary-second", password: "boundary-second-pass" }) })).status, 401);
     const usersAfterDelete = await request(baseUrl, "/api/admin/users", { headers: adminHeaders });
     assert.equal(usersAfterDelete.body.users.some((item) => item.id === secondCreated.body.user.id), false);
+    const providersAfterUserDelete = await request(baseUrl, "/api/workspace", { headers: reloginHeaders });
+    assert.ok(providersAfterUserDelete.body.providers.some((provider) => provider.id === userProvider.body.provider.id && provider.owned));
+    assert.equal(providersAfterUserDelete.body.providers.some((provider) => provider.id === secondProvider.body.provider.id), false);
+    assert.equal(providersAfterUserDelete.body.tasks.find((task) => task.id === first.body.task.id).providerId, undefined);
     const skillsAfterUserDelete = await request(baseUrl, "/api/skills", { headers: reloginHeaders });
     assert.ok(skillsAfterUserDelete.body.skills.some((skill) => skill.id === secondSkill.body.skill.id && skill.status === "APPROVED" && !skill.owned));
     const ragAfterUserDelete = await request(baseUrl, "/api/rag/search?q=tenant-specific", { headers: reloginHeaders });

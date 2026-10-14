@@ -9,7 +9,7 @@ import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, resolveDefaultProviderId, setPersistence, state, subscribeState } from "./store.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
 import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMarketSelection, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
@@ -467,7 +467,10 @@ app.post("/api/user/logout", { preHandler: requireUser }, async (request, reply)
   const userId = request.userSession.user.id;
   const revocation = revokeUserSession(userTokenFromRequest(request));
   const tasks = state.tasks.filter((task) => String(task.ownerUserId || "") === userId);
-  for (const task of tasks) stopTask(task.id);
+  for (const task of tasks) {
+    stopTask(task.id);
+    task.providerId = "";
+  }
   disconnectUserConnections(userId, "USER_LOGOUT");
   const results = await Promise.allSettled([revocation, ...tasks.map((task) => persistTask(task))]);
   if (results.some((result) => result.status === "rejected")) return reply.code(503).send({ error: "USER_LOGOUT_FAILED" });
@@ -521,9 +524,15 @@ app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (requ
     console.error("deleteUserData failed", error);
     return reply.code(503).send({ error: "USER_DELETE_FAILED" });
   }
-  state.providers = state.providers.filter((item) => String(item.ownerUserId || "") !== String(user.id));
+  const deletedProviderIds = new Set(state.providers.filter((item) => String(item.ownerUserId || "") === String(user.id)).map((item) => item.id));
+  state.providers = state.providers.filter((item) => !deletedProviderIds.has(item.id));
   state.connectors = state.connectors.filter((item) => String(item.ownerUserId || "") !== String(user.id));
   for (const taskId of taskIds) removeTaskFromMemory(taskId);
+  for (const task of state.tasks) {
+    if (!deletedProviderIds.has(task.providerId)) continue;
+    task.providerId = "";
+    await persistTask(task);
+  }
   state.events = state.events.filter((item) => String(item.metadata?.userId || "") !== String(user.id));
   await removeOwnedCredentials(user.id).catch((error) => console.error("removeOwnedCredentials failed", error));
   removeUserState(user.id);
@@ -611,7 +620,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
-    providerId: request.auth?.type === "user" ? resolveDefaultProviderId(request.auth.user.id) : "",
+    providerId: "",
     pendingAction: null,
     target: {
       type: targetType,
@@ -717,7 +726,12 @@ app.delete("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reque
 });
 
 app.post("/api/tasks/:taskId/start", { preHandler: requireTaskAccess }, async (request, reply) => {
-  try { const task = startTask(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
+  try {
+    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    const task = startTask(request.params.taskId);
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/stop", { preHandler: requireTaskAccess }, async (request, reply) => {
   try { const task = stopTask(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
@@ -726,7 +740,12 @@ app.post("/api/tasks/:taskId/manual", { preHandler: requireTaskAccess }, async (
   try { const task = claimManual(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/auto-judge", { preHandler: requireTaskAccess }, async (request, reply) => {
-  try { const task = autoJudge(request.params.taskId); broadcast(); return { task: publicTask(task) }; } catch (error) { return reply.code(400).send({ error: error.message }); }
+  try {
+    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    const task = autoJudge(request.params.taskId);
+    broadcast();
+    return { task: publicTask(task) };
+  } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/auto-decision", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
@@ -775,7 +794,8 @@ app.post("/api/tasks/:taskId/pending-action/takeover", { preHandler: requireTask
 });
 app.post("/api/tasks/:taskId/analyze", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
-    const result = await runAnalysis(request.params.taskId, request.body?.providerId || resolveDefaultProviderId(request.auth.user.id), { trigger: "manual", userId: request.auth.user.id });
+    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    const result = await runAnalysis(request.params.taskId, request.body?.providerId || getTask(request.params.taskId)?.providerId || "", { trigger: "manual", userId: request.auth.user.id });
     broadcast();
     return { ...result, task: publicTask(result.task), output: getAgentOutput(request.params.taskId, result.run?.id, 400) };
   } catch (error) {
@@ -984,9 +1004,10 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
   const body = request.body || {};
   const providerId = String(body.id || "");
   const existing = providerId
-    ? state.providers.find((item) => item.id === providerId && String(item.ownerUserId || "") === request.auth.user.id)
+    ? state.providers.find((item) => item.id === providerId)
     : findOwnedProviderMatch(request.auth.user.id, body);
   if (providerId && !existing) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  if (existing && String(existing.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "PROVIDER_SHARED_READ_ONLY" });
   let provider;
   try {
     provider = createProvider(body, existing);
@@ -1002,11 +1023,12 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
   }
   addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id, userId: request.auth.user.id });
   broadcast();
-  return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider) });
+  return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider, request.auth.user.id) });
 });
 app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
   if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  if (String(provider.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "PROVIDER_SHARED_READ_ONLY" });
   let verification;
   try {
     verification = await callProviderMethod("verifyProvider", request.auth.user.id, { provider, options: { timeoutMs: 30000 } });
@@ -1023,11 +1045,12 @@ app.post("/api/providers/:providerId/test", { preHandler: requireWorkspaceAccess
   }
   addEvent("provider_test", `Provider ${provider.name} 状态：${provider.status}`, { providerId: provider.id, userId: request.auth.user.id, code: verification.code, httpStatus: verification.httpStatus });
   broadcast();
-  return { provider: publicProvider(provider), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus, message: verification.message || "" } };
+  return { provider: publicProvider(provider, request.auth.user.id), verification: { ok: verification.ok, code: verification.code, httpStatus: verification.httpStatus, message: verification.message || "" } };
 });
 app.post("/api/providers/:providerId/models", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
   if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  if (String(provider.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "PROVIDER_SHARED_READ_ONLY" });
   let discovery;
   try {
     discovery = await callProviderMethod("listProviderModels", request.auth.user.id, { provider, options: { timeoutMs: 10000 } });
@@ -1044,11 +1067,12 @@ app.post("/api/providers/:providerId/models", { preHandler: requireWorkspaceAcce
   }
   addEvent("provider_models_synced", `Provider ${provider.name} 已同步 ${provider.models.length} 个模型`, { providerId: provider.id, userId: request.auth.user.id, count: provider.models.length });
   broadcast();
-  return { provider: publicProvider(provider), models: provider.models, endpoint: discovery.endpoint || "" };
+  return { provider: publicProvider(provider, request.auth.user.id), models: provider.models, endpoint: discovery.endpoint || "" };
 });
 app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const provider = findProviderForUser(request.params.providerId, request.auth.user.id);
-  if (!provider || !provider.ownerUserId) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  if (!provider) return reply.code(404).send({ error: "PROVIDER_NOT_FOUND" });
+  if (String(provider.ownerUserId || "") !== request.auth.user.id) return reply.code(403).send({ error: "PROVIDER_SHARED_READ_ONLY" });
   state.providers = state.providers.filter((item) => item.id !== provider.id);
   try {
     await persistDeletedProvider(provider.id);
@@ -1057,7 +1081,7 @@ app.delete("/api/providers/:providerId", { preHandler: requireWorkspaceAccess },
     return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
   }
   for (const task of state.tasks) {
-    if (task.providerId !== provider.id || String(task.ownerUserId || "") !== request.auth.user.id) continue;
+    if (task.providerId !== provider.id) continue;
     task.providerId = "";
     persistTask(task);
   }
