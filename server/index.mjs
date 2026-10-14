@@ -997,7 +997,7 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
 });
 
 app.get("/api/providers", { preHandler: requireWorkspaceAccess }, async (request) => {
-  collapseDuplicateProviders();
+  collapseDuplicateProviders(request.auth.user.id);
   return { providers: publicProviderList(request.auth.user.id) };
 });
 app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (request, reply) => {

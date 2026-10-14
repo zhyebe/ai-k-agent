@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTaskProvider } from "../server/engine.mjs";
-import { findProviderForUser, persistTask, publicProviderList, publicState, publicTask, resolveDefaultProviderId, setPersistence, state } from "../server/store.mjs";
+import { collapseDuplicateProviders, findProviderForUser, persistTask, publicProviderList, publicState, publicTask, resolveDefaultProviderId, setPersistence, state } from "../server/store.mjs";
 
 test("signed-in users share providers while ownership remains specific to the creator", () => {
   const original = state.providers;
@@ -66,6 +66,7 @@ test("task can select another user's shared provider without granting access to 
   state.tasks.unshift({ id: siblingId, ownerUserId: "user_2", providerId: "" }, { id: otherId, ownerUserId: "user_1", providerId: "other-choice" });
   try {
     assert.throws(() => setTaskProvider(taskId, "provider_owned", "user_1"), /TASK_ACCESS_DENIED/);
+    assert.throws(() => setTaskProvider(taskId, "", "user_2"), /PROVIDER_NOT_READY/);
     const task = setTaskProvider(taskId, "provider_owned", "user_2");
     assert.equal(task.providerId, "provider_owned");
     assert.equal(state.tasks.find((item) => item.id === taskId).providerId, "provider_owned");
@@ -90,4 +91,21 @@ test("subsequent task persistence excludes the transient provider selection", as
     assert.equal(saved.ownerUserId, "user_1");
     assert.equal(task.providerId, "local-model");
   } finally { setPersistence(null); }
+});
+
+test("listing shared providers cannot deduplicate or delete another creator's data", () => {
+  const original = state.providers;
+  const provider = { name: "gateway", model: "model", baseUrl: "https://gateway.example.test", encryptedKey: "enc-test" };
+  state.providers = [
+    { ...provider, id: "a_1", ownerUserId: "user_a" }, { ...provider, id: "a_2", ownerUserId: "user_a" },
+    { ...provider, id: "b_1", ownerUserId: "user_b" }, { ...provider, id: "b_2", ownerUserId: "user_b" },
+  ];
+  try {
+    assert.equal(collapseDuplicateProviders(), 0);
+    assert.equal(collapseDuplicateProviders("user_c"), 0);
+    assert.equal(collapseDuplicateProviders("user_a"), 1);
+    assert.deepEqual(publicProviderList("user_a").map((item) => item.id), ["a_1", "b_1", "b_2"]);
+    assert.equal(collapseDuplicateProviders("user_b"), 1);
+    assert.deepEqual(publicProviderList("user_b").map((item) => item.id), ["a_1", "b_1"]);
+  } finally { state.providers = original; }
 });

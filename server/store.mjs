@@ -279,12 +279,14 @@ export function findOwnedProviderMatch(userId, payload) {
   return state.providers.find((item) => String(item.ownerUserId || "") === String(userId || "") && providerIdentityKey(item) === needle) || null;
 }
 
-export function collapseDuplicateProviders() {
+export function collapseDuplicateProviders(userId = "") {
+  const ownerUserId = String(userId || "");
+  if (!ownerUserId) return 0;
   const referenced = new Set(state.tasks.map((task) => String(task.providerId || "")).filter(Boolean));
   const keptByKey = new Map();
   const removed = [];
   for (const provider of state.providers) {
-    if (!provider.ownerUserId) continue;
+    if (String(provider.ownerUserId || "") !== ownerUserId) continue;
     const key = providerIdentityKey(provider);
     const current = keptByKey.get(key);
     if (!current) {

@@ -592,6 +592,7 @@ export function setTaskProvider(taskId, providerId, userId = "") {
   if (!task) throw new Error("TASK_NOT_FOUND");
   const ownerUserId = String(task.ownerUserId || userId || "");
   if (!ownerUserId || (userId && String(userId) !== ownerUserId)) throw new Error("TASK_ACCESS_DENIED");
+  if (!String(providerId || "").trim()) throw new Error("PROVIDER_NOT_READY");
   const provider = findProviderForUser(String(providerId || ""), ownerUserId);
   if (!provider?.encryptedKey || !provider.baseUrl) throw new Error("PROVIDER_NOT_READY");
   // Relay this desktop's selection to its user's running tasks only in memory.
