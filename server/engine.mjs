@@ -9,7 +9,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { hasDirectionalProbabilities } from "./entry-policy.mjs";
+import { hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { evaluateExitPlan, executableExitQuote, heldDirection, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
@@ -25,7 +25,6 @@ const actionPhaseLocks = new Set();
 const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
-const MIN_PROFIT_PROBABILITY = 0.45;
 const DEFAULT_ANALYSIS_KNOWLEDGE_BYTES = 96000;
 
 class CycleAbortError extends Error {
@@ -2113,7 +2112,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const blocked = task.rules.some((rule) => rule.status === "pending" && rule.mode === "BLOCK");
     const reviewRequired = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
     // Rule results remain visible evidence, but they do not replace the AI's directional decision.
-    // LIVE execution is gated only by an explicit AI HOLD, the selected-side 45% entry threshold, and the same-K guard; AI exits go immediately.
+    // LIVE entry requires the selected-side probability boundary; AI exits do not.
     const liveExecution = isLiveTask(task);
     const rulePaused = liveExecution ? false : blocked || reviewRequired || automaticRuleFailures.length > 0;
     let route = "SUGGESTION_PENDING";
@@ -2261,7 +2260,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
-          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型建议已保留，所选方向获利概率未达45%的入场边界" : "已记录受控动作";
+          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? `模型建议已保留，所选方向获利概率未达${MIN_PROFIT_PROBABILITY * 100}%的入场边界` : "已记录受控动作";
       const boundaryMessage = conditionalExitOnly ? (task.exitPlans?.length ? "AI 离场条件已交给独立行情监控，满足条件即执行" : "AI 未提供有效离场条件，已请求下一轮补充；收盘清仓独立执行") : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });

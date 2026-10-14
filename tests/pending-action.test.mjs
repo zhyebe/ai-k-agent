@@ -461,8 +461,8 @@ test("switching into live cancels stale paper suggestions", () => {
 });
 
 for (const action of ["BUY", "SELL"]) {
-  for (const probability of [undefined, 0.44, 0.45]) {
-    test(`live submit checks persisted ${action} probability ${probability} against 45%`, async () => {
+  for (const probability of [undefined, 0.39, 0.4, 0.44]) {
+    test(`live submit checks persisted ${action} probability ${probability} against 40%`, async () => {
       const task = insertTask(`task_probability_guard_${action}_${probability}_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
       task.decision = {
         ...task.decision,
@@ -478,7 +478,7 @@ for (const action of ["BUY", "SELL"]) {
         submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
       } });
       try {
-        if (probability >= 0.45) {
+        if (probability >= 0.4) {
           await submit();
           assert.equal(submitted, 1);
           assert.equal(task.pendingAction.status, "AWAITING_FILL");

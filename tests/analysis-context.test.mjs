@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
-test("入场仅要求所选方向获利概率达到45%，AI选择最大预期净收益或最小损失离场", () => {
+test("入场仅要求所选方向获利概率达到40%，AI选择最大预期净收益或最小损失离场", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
-  assert.equal(entry.minimumProbability, 0.45);
+  assert.equal(entry.minimumProbability, 0.4);
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");

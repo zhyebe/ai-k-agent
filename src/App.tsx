@@ -159,6 +159,7 @@ const riskLabels: Record<string, string> = {
   PROVIDER_NOT_READY: "模型配置未就绪",
   EMPTY_MODEL_RESPONSE: "模型未返回结论",
   INVALID_MODEL_JSON: "模型结果格式无效",
+  INCONSISTENT_ACTION_PROBABILITY: "AI概率与动作矛盾",
   ANALYSIS_INCOMPLETE: "模型分析未完成",
   MODEL_OUTPUT_LIMIT: "模型输出额度耗尽",
   TRADING_DISABLED: "交易动作已锁定",
@@ -1290,7 +1291,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
 function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
-  const analysisFailure = decision.riskFlags.find((flag) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].includes(flag));
+  const analysisFailure = decision.riskFlags.find((flag) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"].includes(flag));
   const actionText = analysisFailure ? displayLabel(analysisFailure, riskLabels, "分析未完成") : analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
   const bullishProbability = Number(decision.bullishProfitProbability ?? 0);
   const bearishProbability = Number(decision.bearishProfitProbability ?? 0);

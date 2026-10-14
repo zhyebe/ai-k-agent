@@ -42,7 +42,7 @@ export function attachDesktopAiSocket(userId, socket) {
       const message = JSON.parse(parsed);
       state.alive = true;
       if (message.type === "runtime.hello") {
-        state.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter((item) => item === "browser-v1") : [];
+        state.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter((item) => ["browser-v1", "browser-exit-v1"].includes(item)) : [];
         return;
       }
       handleDesktopAiMessage(message, socket);

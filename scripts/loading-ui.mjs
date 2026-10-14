@@ -267,6 +267,7 @@ for (const [riskFlags, label, invalidation] of [
   [["EMPTY_MODEL_RESPONSE", "MODEL_OUTPUT_LIMIT"], "模型未返回结论", "模型达到输出额度上限，未返回完整结论；继续监控并重新分析"],
   [["INVALID_MODEL_JSON"], "模型结果格式无效", "模型返回内容不是有效的决策 JSON；继续监控并重新分析"],
   [["ANALYSIS_INCOMPLETE"], "模型分析未完成", "模型分析未完成"],
+  [["INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"], "AI概率与动作矛盾", "AI方向盈利概率已达40%但仍返回HOLD，概率与动作矛盾；本轮决策未完成，等待AI重新分析"],
 ]) {
   test(`failed analysis shows ${label} without inventing probabilities`, async (t) => {
     const { page, navigate } = await openPage(t);

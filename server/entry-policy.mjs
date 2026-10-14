@@ -1,3 +1,5 @@
+export const MIN_PROFIT_PROBABILITY = 0.4;
+
 export function hasDirectionalProbabilities(decision) {
   if (decision?.directionalProbabilitiesComplete === false) return false;
   return [decision?.bullishProfitProbability, decision?.bearishProfitProbability].every((value) => {

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 
 const DEFAULT_DIRECT_CONTEXT_BYTES = 220000;
 const DEFAULT_SEGMENT_BYTES = 180000;
@@ -159,11 +160,11 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察→分析数据→给出结果→空仓入场买涨/买跌→继续观察分析→持仓离场转让/卖出。分析、两侧结果、是否入场、是否离场、以及内置浏览器上要点哪些可见控件，都由 AI 完成；主机只采集页面、喂上下文，仅按选中方向获利概率大于等于45%放行入场，并只点击 AI 点名且当前页可见的按钮；止盈止损离场不受入场概率门槛限制。",
+    summary: `观察→分析数据→给出结果→空仓入场买涨/买跌→继续观察分析→持仓离场转让/卖出。分析、两侧结果、是否入场、是否离场、以及内置浏览器上要点哪些可见控件，都由 AI 完成；主机只采集页面、喂上下文，仅按选中方向获利概率大于等于${MIN_PROFIT_PROBABILITY * 100}%放行入场，并只点击 AI 点名且当前页可见的按钮；止盈止损离场不受入场概率门槛限制。`,
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "GATE_ENTRY_TRIGGERS", "EXECUTE_VISIBLE_CLICKS"],
-    entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", minimumProbability: 0.45 },
+    entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", minimumProbability: MIN_PROFIT_PROBABILITY },
     exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "MAXIMIZE_EXPECTED_NET_PROFIT", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },

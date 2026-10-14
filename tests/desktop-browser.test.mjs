@@ -34,6 +34,34 @@ test("production browser calls require a capable desktop and never launch server
   assert.equal(oldDesktop.sent.length, 0);
 });
 
+test("execution quote monitoring routes to an exit-capable desktop and rejects an older runtime", async (t) => {
+  const previous = { AXIOM_REQUIRE_DESKTOP_BROWSER: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER, AXIOM_DESKTOP_AI_WAIT_MS: process.env.AXIOM_DESKTOP_AI_WAIT_MS };
+  process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+  process.env.AXIOM_DESKTOP_AI_WAIT_MS = "0";
+  t.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  t.after(resetDesktopAiForTests);
+  const capable = new Socket();
+  attachDesktopAiSocket("owner", capable);
+  capable.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1"] }));
+  const older = new Socket();
+  attachDesktopAiSocket("owner", older);
+  older.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
+  const task = { id: "t", symbol: "DGKZ", exitObservationIndex: [{ positionOrderId: "P-1" }] };
+  const operation = callBrowserMethod("observeExecutionMarket", "owner", { task });
+  await Promise.resolve();
+  const message = capable.sent[0];
+  assert.equal(message.type, "browser.call");
+  assert.equal(message.method, "observeExecutionMarket");
+  assert.deepEqual(message.input.task.exitObservationIndex, task.exitObservationIndex);
+  assert.equal(older.sent.length, 0);
+  const result = { ok: true, observedAt: "2026-10-14T07:00:00Z", positionsVerified: true };
+  capable.emit("message", JSON.stringify({ type: "browser.result", id: message.id, ok: true, result }));
+  assert.deepEqual(await operation, result);
+  capable.terminate();
+  await assert.rejects(callBrowserMethod("observeExecutionMarket", "owner", { task }), /DESKTOP_BROWSER_UPDATE_REQUIRED/);
+  assert.equal(older.sent.length, 0);
+});
+
 test("browser result is bound to its owning socket and pending calls fail immediately on disconnect", async (t) => {
   t.after(resetDesktopAiForTests);
   const owner = new Socket();
