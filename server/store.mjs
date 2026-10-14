@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { indexSkill } from "./rag.mjs";
+import { indexSkill, sortSkillsForConsideration } from "./rag.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
 import { publicProvider as formatPublicProvider, providerIdentityKey } from "./provider.mjs";
@@ -455,7 +455,7 @@ export function publicState({ taskIds = null, userId = null, includeEvents = fal
     : state.connectors;
   return {
     tasks: tasks.map(publicTask),
-    skills: state.skills.map((skill) => publicSkill(skill, normalizedUserId)),
+    skills: sortSkillsForConsideration(state.skills).map((skill) => publicSkill(skill, normalizedUserId)),
     providers: normalizedUserId ? publicProviderList(normalizedUserId) : state.providers.map((provider) => publicProvider(provider)),
     events: includeEvents ? visibleEvents : [],
     runs: visibleTaskIds ? state.runs.filter((run) => visibleTaskIds.has(String(run.taskId || ""))) : state.runs,

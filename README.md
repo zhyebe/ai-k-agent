@@ -67,6 +67,7 @@ MONGO_DB=axiom_agent
 
 项目内置 Skill：
 
+- `skills/dgkz-dgjj-entry-exit-analysis`：DGKZ / DGJJ 入场离场、净收益、风险与 AI 操盘证据研究全文。通过 `AXIOM_IMPORT_API_URL=http://服务器地址 node scripts/import-dgkz-dgjj-skill.mjs` 导入「经验与 Skills」并发布，使用环境中的 `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` 登录；重复执行核对全文，不覆盖不同版本，不删除已有经验。带「优先参考」标签的经验在共享列表和 AI 全文上下文中排在其他经验之前，AI 先核验其适用条件；优先级不能覆盖当前行情、用户收益目标、交易授权、收盘截止或系统 JSON 格式。
 - `skills/browser-operator`：白名单网站导航、数据提取和凭据引用。
 - `skills/desktop-operator`：macOS/Windows 白名单 App 控制与人工接管。
 - `skills/shell-executor`：参数数组、命令白名单、超时和审批。
