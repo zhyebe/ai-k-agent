@@ -78,6 +78,7 @@ import {
   setLocalProviderId,
   startTask,
   stopTask,
+  saveTradingSession,
   syncProviderModels,
   testConnector,
   testProvider,
@@ -87,7 +88,7 @@ import {
   userLogout,
   userSession,
 } from "./lib/api";
-import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, TradingSession, ViewKey, Workspace, WorkspaceUser } from "./types";
 import { BusyIcon, DataSkeleton, LoadError, LoadingStatus } from "./components/Loading";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
@@ -689,7 +690,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
       replaceTask(next);
       notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察并自动执行 LIVE 动作" : "启动未通过，等待连接恢复");
     } catch (error) {
-      notify(`启动失败：${error instanceof Error ? error.message : "请检查任务配置"}`);
+      notify(error instanceof Error && error.message === "不在开盘期间，不能使用" ? error.message : `启动失败：${error instanceof Error ? error.message : "请检查任务配置"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -817,7 +818,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
       else if (result.task.status === "PAUSED" || result.task.status === "BLOCKED") notify(`分析暂停：${displayLabel(flags[0] || result.route || result.task.status, { ...riskLabels, ...routeLabels, ...statusMetaLabels }, "需要处理")}`);
       else notify(`分析完成：${decisionTargetLabel(result.task.decision) ? `${decisionTargetLabel(result.task.decision)} · ` : ""}${displaySuggestion(result.task.decision.action)}`);
     } catch (error) {
-      notify(`分析失败：${error instanceof Error ? error.message : "请检查目标连接与模型配置"}`);
+      notify(error instanceof Error && error.message === "不在开盘期间，不能使用" ? error.message : `分析失败：${error instanceof Error ? error.message : "请检查目标连接与模型配置"}`);
     } finally { setBusyAction(null); }
   }
 
@@ -964,6 +965,18 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
     });
   }
 
+  async function handleTradingSessionSave(payload: { opensAt: string; closesAt: string }) {
+    await withBusy("trading-session", async () => {
+      try {
+        const tradingSession = await saveTradingSession(payload);
+        setWorkspace((current) => ({ ...current, tradingSession }));
+        notify("开盘时段已生效");
+      } catch (error) {
+        notify(error instanceof Error ? error.message : "保存失败");
+      }
+    });
+  }
+
   async function handleTaskCreate(payload: Record<string, unknown>) {
     await withBusy("task-create", async () => {
       try {
@@ -1066,7 +1079,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
           {view === "console" && (task ? <ConsoleView task={task} currentProviderId={currentProviderId} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
-          {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
+          {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} tradingSession={workspace.tradingSession} onSaveTradingSession={handleTradingSessionSave} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <><TradingSessionPanel session={workspace.tradingSession} busy={busyAction !== null} saving={busyAction === "trading-session"} onSave={handleTradingSessionSave} /><EmptyTaskState onCreate={() => setModal("task")} /></>)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} currentProviderId={currentProviderId} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
           {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
@@ -1401,10 +1414,32 @@ function AgentOutputDrawer({ task, lines, runs, loading, error, onRetry, onClose
   );
 }
 
-function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
+function shanghaiInputValue(iso?: string) {
+  if (!iso) return "";
+  const shifted = new Date(new Date(iso).getTime() + 8 * 3600000);
+  return Number.isNaN(shifted.getTime()) ? "" : shifted.toISOString().slice(0, 16);
+}
+
+function TradingSessionPanel({ session, busy, saving, onSave }: { session?: TradingSession; busy: boolean; saving: boolean; onSave: (payload: { opensAt: string; closesAt: string }) => Promise<void> }) {
+  const [opensAt, setOpensAt] = useState(shanghaiInputValue(session?.opensAt));
+  const [closesAt, setClosesAt] = useState(shanghaiInputValue(session?.closesAt));
+  useEffect(() => {
+    setOpensAt(shanghaiInputValue(session?.opensAt));
+    setClosesAt(shanghaiInputValue(session?.closesAt));
+  }, [session?.opensAt, session?.closesAt]);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!opensAt || !closesAt || closesAt <= opensAt) return;
+    void onSave({ opensAt, closesAt });
+  }
+  return <section className="panel trading-session-panel"><form className="trading-session-form" onSubmit={submit}><div><div className="panel-kicker"><Clock3 size={14} />开盘时段</div><h2>开盘与停盘</h2></div><label>开盘时间<input type="datetime-local" aria-label="开盘时间" required step={60} value={opensAt} disabled={busy} onChange={(event) => setOpensAt(event.target.value)} /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" required step={60} value={closesAt} disabled={busy} onChange={(event) => setClosesAt(event.target.value)} /></label><button type="submit" className="button button-primary" disabled={busy || !opensAt || !closesAt || closesAt <= opensAt}><BusyIcon busy={saving}><Check size={14} /></BusyIcon>{saving ? "保存中" : "保存并生效"}</button></form><p>北京时间，精确到分钟。未保存时每天 18:30 开盘、次日 16:00 停盘。保存后按所选日期时间立即对所有任务生效；不在此时段点击监控或分析会提示不能使用。</p></section>;
+}
+
+function WorkflowsView({ tasks, task, tradingSession, onSaveTradingSession, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; tradingSession?: TradingSession; onSaveTradingSession: (payload: { opensAt: string; closesAt: string }) => Promise<void>; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
   const isRunning = taskIsMonitoring(task);
   return <>
     <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />我的任务</div><h1>任务管理</h1><p>当前账号自行创建、切换、编辑和删除任务，其他账号无法访问。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
+    <TradingSessionPanel session={tradingSession} busy={busyAction !== null} saving={busyAction === "trading-session"} onSave={onSaveTradingSession} />
     <div className="task-management-grid">
       <section className="panel task-list-panel">
         <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />任务列表</div><h2>{tasks.length} 个任务</h2></div></div>

@@ -281,7 +281,7 @@ function createMemoryAdapter() {
     async loadAssignments() { return []; },
     async close() {},
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment", "saveTradingSession"]);
 }
 
 async function createMySqlAdapter() {
@@ -325,6 +325,11 @@ async function createMySqlAdapter() {
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
   )`);
   await pool.query("ALTER TABLE credentials ADD COLUMN owner_user_id VARCHAR(96) NOT NULL DEFAULT ''").catch(() => {});
+  await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key VARCHAR(64) PRIMARY KEY,
+    value_json JSON NOT NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  )`);
   await pool.query(`CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(96) PRIMARY KEY,
     username VARCHAR(80) NOT NULL UNIQUE,
@@ -644,6 +649,12 @@ async function createMySqlAdapter() {
     async deleteAssignment(assignment) {
       await pool.execute("DELETE FROM task_assignments WHERE user_id = ? AND task_id = ?", [assignment.userId, assignment.taskId]);
     },
+    async saveTradingSession(session) {
+      await pool.execute(
+        "INSERT INTO app_settings (setting_key, value_json) VALUES ('trading_session', ?) ON DUPLICATE KEY UPDATE value_json = VALUES(value_json)",
+        [json(session)],
+      );
+    },
     async loadState() {
       const [taskRows] = await pool.query("SELECT * FROM tasks");
       const [skillRows] = await pool.query("SELECT * FROM skills");
@@ -655,6 +666,7 @@ async function createMySqlAdapter() {
       ).catch(() => [[]]);
       const [userRows] = await pool.query("SELECT * FROM users");
       const [assignmentRows] = await pool.query("SELECT user_id, task_id FROM task_assignments");
+      const [settingRows] = await pool.query("SELECT value_json FROM app_settings WHERE setting_key = 'trading_session'").catch(() => [[]]);
       taskRows.sort(byDesc("updated_at"));
       skillRows.sort(byDesc("updated_at"));
       providerRows.sort(byDesc("updated_at"));
@@ -726,6 +738,7 @@ async function createMySqlAdapter() {
         analyses: [],
         agentRuns: [],
         agentOutput: [],
+        tradingSession: parse(settingRows?.[0]?.value_json, null),
       };
     },
     async loadCredentials() {
@@ -746,7 +759,7 @@ async function createMySqlAdapter() {
     },
     close: () => pool.end(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment", "saveTradingSession"]);
 }
 
 async function createMongoAdapter() {
@@ -766,6 +779,7 @@ async function createMongoAdapter() {
     users: database.collection("users"),
     sessions: database.collection("user_sessions"),
     assignments: database.collection("task_assignments"),
+    settings: database.collection("app_settings"),
     agentRuns: database.collection("agent_runs"),
     agentOutput: database.collection("agent_output"),
   };
@@ -831,8 +845,9 @@ async function createMongoAdapter() {
     clearTaskAssignments: () => collections.assignments.deleteMany({}),
     saveAssignment: (assignment) => collections.assignments.replaceOne({ _id: `${assignment.userId}:${assignment.taskId}` }, { ...assignment, _id: `${assignment.userId}:${assignment.taskId}` }, { upsert: true }),
     deleteAssignment: (assignment) => collections.assignments.deleteOne({ _id: `${assignment.userId}:${assignment.taskId}` }),
+    saveTradingSession: (session) => collections.settings.replaceOne({ _id: "trading_session" }, { ...session, _id: "trading_session" }, { upsert: true }),
     async loadState() {
-      const [tasks, skills, providers, connectors, orders, events, users, assignments] = await Promise.all([
+      const [tasks, skills, providers, connectors, orders, events, users, assignments, setting] = await Promise.all([
         collections.tasks.find().sort({ updatedAt: -1 }).toArray(),
         collections.skills.find().sort({ updatedAt: -1 }).toArray(),
         collections.providers.find().sort({ updatedAt: -1 }).toArray(),
@@ -841,8 +856,10 @@ async function createMongoAdapter() {
         collections.audit.find({ type: { $in: [...PERSISTED_AUDIT_TYPES] } }).sort({ createdAt: -1 }).limit(80).toArray(),
         collections.users.find().sort({ updatedAt: -1 }).toArray(),
         collections.assignments.find().toArray(),
+        collections.settings.findOne({ _id: "trading_session" }),
       ]);
-      return { tasks: tasks.map(({ _id, ...item }) => item), skills: skills.map(({ _id, ...item }) => item), providers: providers.map(({ _id, ...item }) => item), connectors: connectors.map(({ _id, ...item }) => item), orders: orders.map(({ _id, ...item }) => item), events: events.map(({ _id, ...item }) => item), users: users.map(({ _id, ...item }) => item), assignments: assignments.map(({ _id, ...item }) => item), analyses: [], agentRuns: [], agentOutput: [] };
+      const { _id: settingId, ...tradingSession } = setting || {};
+      return { tasks: tasks.map(({ _id, ...item }) => item), skills: skills.map(({ _id, ...item }) => item), providers: providers.map(({ _id, ...item }) => item), connectors: connectors.map(({ _id, ...item }) => item), orders: orders.map(({ _id, ...item }) => item), events: events.map(({ _id, ...item }) => item), users: users.map(({ _id, ...item }) => item), assignments: assignments.map(({ _id, ...item }) => item), analyses: [], agentRuns: [], agentOutput: [], tradingSession: settingId ? tradingSession : null };
     },
     async loadCredentials() {
       const rows = await collections.credentials.find().toArray();
@@ -859,7 +876,7 @@ async function createMongoAdapter() {
     },
     close: () => client.close(),
   };
-  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment"]);
+  return serializeWrites(adapter, ["recordAudit", "saveTask", "deleteTaskData", "saveSkill", "deleteSkill", "saveProvider", "deleteProvider", "saveConnector", "deleteConnector", "saveCredential", "saveOrder", "saveAnalysis", "saveAgentRun", "saveAgentOutput", "saveUser", "deleteUserData", "saveUserSession", "deleteUserSession", "clearTaskAssignments", "saveAssignment", "deleteAssignment", "saveTradingSession"]);
 }
 
 export async function createPersistence() {

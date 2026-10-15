@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { indexSkill, sortSkillsForConsideration } from "./rag.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
+import { effectiveTradingSession, parseTradingSession } from "./trading-session.mjs";
 import { publicProvider as formatPublicProvider, providerIdentityKey } from "./provider.mjs";
 
 const isoNow = () => new Date().toISOString();
@@ -176,6 +177,7 @@ export const state = {
   agentOutput: [],
   connectors: [],
   orders: [],
+  tradingSession: null,
 };
 
 for (const skill of state.skills) if (skill.status === "APPROVED") skill.chunks = indexSkill(skill);
@@ -238,6 +240,8 @@ export function hydrateState(snapshot) {
   if (Array.isArray(snapshot.analyses)) state.analyses = snapshot.analyses;
   if (Array.isArray(snapshot.agentRuns)) state.agentRuns = snapshot.agentRuns;
   if (Array.isArray(snapshot.agentOutput)) state.agentOutput = snapshot.agentOutput;
+  const tradingSession = parseTradingSession(snapshot.tradingSession);
+  if (tradingSession) state.tradingSession = tradingSession;
   for (const skill of state.skills) if (skill.status === "APPROVED") skill.chunks = indexSkill(skill);
 }
 
@@ -247,6 +251,10 @@ export function getTask(taskId) {
 
 export function getConnector(connectorId) {
   return state.connectors.find((connector) => connector.connectorId === connectorId);
+}
+
+export function persistTradingSession(session) {
+  return persistValue("saveTradingSession", session);
 }
 
 export function persistTask(task) {
@@ -464,5 +472,6 @@ export function publicState({ taskIds = null, userId = null, includeEvents = fal
     analyses: visibleTaskIds ? state.analyses.filter((item) => visibleTaskIds.has(item.taskId)) : state.analyses,
     agentRuns: visibleTaskIds ? state.agentRuns.filter((run) => visibleTaskIds.has(run.taskId)) : state.agentRuns,
     agentOutput: visibleTaskIds ? state.agentOutput.filter((line) => visibleTaskIds.has(line.taskId)) : state.agentOutput,
+    tradingSession: effectiveTradingSession(state.tradingSession),
   };
 }

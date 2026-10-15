@@ -6,10 +6,11 @@ import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
 import { DEFAULT_ENTRY_QUANTITY, parseEntryQuantity } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
+import { assertTradingSessionOpen, tradingSessionFromEnv, parseTradingSession } from "./trading-session.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, persistTradingSession, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
 import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMarketSelection, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
@@ -45,6 +46,9 @@ try {
   restoredState = null;
 }
 hydrateState(restoredState);
+if (!state.tradingSession && (process.env.DB_MODE || "memory") === "memory") {
+  state.tradingSession = tradingSessionFromEnv();
+}
 const restoredCredentials = await persistence.loadCredentials?.().catch(() => []);
 await initVault({ persistedRecords: restoredCredentials });
 setVaultPersistence(persistence);
@@ -570,6 +574,22 @@ app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAcc
   try { socket.send(JSON.stringify({ type: "ai.ready" })); } catch {}
 });
 
+app.put("/api/trading-session", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
+  const tradingSession = parseTradingSession(request.body);
+  if (!tradingSession) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
+  const previous = state.tradingSession;
+  state.tradingSession = tradingSession;
+  try {
+    await persistTradingSession(tradingSession);
+  } catch {
+    state.tradingSession = previous;
+    return reply.code(503).send({ error: "TRADING_SESSION_SAVE_FAILED" });
+  }
+  addEvent("trading_session_updated", "开盘时段已更新，立即对所有任务生效", { userId: request.auth.user.id, opensAt: tradingSession.opensAt, closesAt: tradingSession.closesAt });
+  broadcast();
+  return { tradingSession };
+});
+
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
@@ -727,6 +747,7 @@ app.delete("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reque
 
 app.post("/api/tasks/:taskId/start", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
+    assertTradingSessionOpen(state.tradingSession);
     if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const task = startTask(request.params.taskId);
     broadcast();
@@ -794,6 +815,7 @@ app.post("/api/tasks/:taskId/pending-action/takeover", { preHandler: requireTask
 });
 app.post("/api/tasks/:taskId/analyze", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
+    assertTradingSessionOpen(state.tradingSession);
     if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const result = await runAnalysis(request.params.taskId, request.body?.providerId || getTask(request.params.taskId)?.providerId || "", { trigger: "manual", userId: request.auth.user.id });
     broadcast();

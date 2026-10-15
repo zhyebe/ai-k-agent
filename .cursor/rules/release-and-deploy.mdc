@@ -1,0 +1,16 @@
+---
+description: After finishing a change, publish a version and deploy it
+alwaysApply: true
+---
+
+# Release and deploy when work is finished
+
+When a requested change is complete and verified, ship it in the same turn. Do not stop at a local edit.
+
+1. Bump the patch version in `package.json` and `package-lock.json`.
+2. Commit the change. Do not amend a commit that has already been pushed.
+3. Tag `vX.Y.Z` to match the package version.
+4. Push `main` and the tag with SSH: `GIT_SSH_COMMAND='ssh -F /dev/null -o IdentitiesOnly=yes' git push git@github.com:zhyebe/ai-k-agent.git`. HTTPS to github.com times out. Do not force-push.
+5. The `v*` tag runs `.github/workflows/release.yml`, which publishes the desktop release and then starts `deploy.yml`. Confirm the workflow was accepted.
+
+Skip this only when the user explicitly says not to release or deploy.

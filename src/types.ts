@@ -301,6 +301,11 @@ export interface MarketSnapshot {
   } | null;
 }
 
+export interface TradingSession {
+  opensAt: string;
+  closesAt: string;
+}
+
 export interface Task {
   id: string;
   name: string;
@@ -538,4 +543,5 @@ export interface Workspace {
   health?: { db: string; dbAvailable: boolean; persistentSecret: boolean };
   rag?: { indexedChunks: number; mode: string; vectorProvider: string };
   auth?: { type: "user" | "admin"; user?: WorkspaceUser; username?: string } | null;
+  tradingSession?: TradingSession;
 }
