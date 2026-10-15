@@ -621,7 +621,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
-    tradingSession: defaultTradingSession(),
+    tradingSession: tradingSessionFromEnv() || defaultTradingSession(),
     providerId: "",
     pendingAction: null,
     target: {
