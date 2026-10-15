@@ -132,14 +132,14 @@ test("closing never skips a manual WAITING form even when the last holdings snap
 });
 
 test("closing blocks both automatic entries and acknowledgements of stale manual entry forms", async () => {
-  const f = setup("closing-entry", [], { autoDecisionEnabled: true, sessionClose: { time: "09:00", leadMinutes: 5 } });
+  const f = setup("closing-entry", [], { autoDecisionEnabled: true, tradingSession: { opensAt: "2020-01-01T18:30", closesAt: "2020-01-02T09:00" }, sessionClose: { leadMinutes: 5, timezone: "Asia/Shanghai" } });
   f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
   await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /SESSION_CLOSING_NO_ENTRY/);
   assert.equal(f.submitted.length, 0);
 });
 
 test("unverified or frozen holdings cannot masquerade as successful closing", async () => {
-  const f = setup("closing-unknown", [long("P1")]);
+  const f = setup("closing-unknown", [long("P1")], { tradingSession: { opensAt: "2026-10-13T09:00", closesAt: "2026-10-13T16:00" } });
   f.market.account.positionsVerified = false;
   await runPositionExitCycle(f.task.id, { runtime: f.runtime, now: Date.parse("2026-10-13T16:01:00+08:00") });
   assert.equal(f.task.exitMonitor.status, "ACCOUNT_UNVERIFIED");
@@ -180,11 +180,11 @@ test("stopping aborts an in-flight fast observation and never submits its late r
 });
 
 test("daily close settings, explicit AI plans and position verification survive persistence", () => {
-  const f = setup("exit-persist", [long("P1")], { sessionClose: { time: "15:30", leadMinutes: 10, timezone: "Asia/Shanghai" } });
+  const f = setup("exit-persist", [long("P1")], { tradingSession: { opensAt: "2099-01-01T09:00", closesAt: "2099-01-01T15:30" }, sessionClose: { leadMinutes: 10, timezone: "Asia/Shanghai" } });
   f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 }] }, f.market, f.task).plans;
   f.task.lastPositionAudit = { positionsVerified: true, positions: [{ positionId: "P1", quantity: 1 }] };
   const runtime = JSON.parse(JSON.stringify(compactTaskRuntime(f.task)));
-  assert.equal(runtime.sessionClose.time, "15:30");
+  assert.equal(runtime.tradingSession.closesAt, "2099-01-01T15:30");
   assert.equal(runtime.exitPlans[0].positionId, "P1");
   assert.equal(runtime.lastPositionAudit.positionsVerified, true);
 });
@@ -270,7 +270,7 @@ test("stop during submission ignores a successful late browser response", async 
 });
 
 test("manual continuation receives the close deadline even for an already waiting entry", async () => {
-  const f = setup("closing-manual-continuation", [], { sessionClose: { time: "09:00", leadMinutes: 5 } });
+  const f = setup("closing-manual-continuation", [], { tradingSession: { opensAt: "2020-01-01T18:30", closesAt: "2020-01-02T09:00" }, sessionClose: { leadMinutes: 5, timezone: "Asia/Shanghai" } });
   f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
   let input;
   await runAnalysis(f.task.id, "", { runtime: {

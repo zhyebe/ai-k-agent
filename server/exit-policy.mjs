@@ -1,22 +1,21 @@
 import { summarizeOrderBook } from "./order-book.mjs";
+import { effectiveTradingSession } from "./trading-session.mjs";
 
-export const DEFAULT_SESSION_CLOSE = Object.freeze({ time: "16:00", leadMinutes: 5, timezone: "Asia/Shanghai" });
+export const DEFAULT_SESSION_CLOSE = Object.freeze({ leadMinutes: 5, timezone: "Asia/Shanghai" });
 
 export function parseSessionClose(value = DEFAULT_SESSION_CLOSE) {
-  if (!value || typeof value !== "object" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value.time)) return null;
+  if (!value || typeof value !== "object") return null;
   const leadMinutes = Number(value.leadMinutes);
-  const [hour, minute] = value.time.split(":").map(Number);
-  if (!Number.isSafeInteger(leadMinutes) || leadMinutes < 1 || leadMinutes >= hour * 60 + minute) return null;
+  if (!Number.isSafeInteger(leadMinutes) || leadMinutes < 1 || leadMinutes > 24 * 60) return null;
   if (value.timezone !== undefined && value.timezone !== "Asia/Shanghai") return null;
-  return { time: value.time, leadMinutes, timezone: "Asia/Shanghai" };
+  return { leadMinutes, timezone: "Asia/Shanghai" };
 }
 
 export function sessionCloseWindow(task, now = Date.now()) {
-  const config = parseSessionClose(task.sessionClose);
-  if (!config) throw new Error("INVALID_SESSION_CLOSE");
-  const date = new Date(now + 8 * 3600000).toISOString().slice(0, 10);
-  const closesAt = Date.parse(`${date}T${config.time}:00+08:00`);
+  const config = parseSessionClose(task?.sessionClose) || DEFAULT_SESSION_CLOSE;
+  const closesAt = Date.parse(effectiveTradingSession(task?.tradingSession, now).closesAt);
   const startsAt = closesAt - config.leadMinutes * 60000;
+  const date = new Date(closesAt + 8 * 3600000).toISOString().slice(0, 10);
   return { ...config, date, startsAt, closesAt, active: now >= startsAt, overdue: now >= closesAt };
 }
 

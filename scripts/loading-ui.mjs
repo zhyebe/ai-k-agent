@@ -153,9 +153,9 @@ for (const width of [1440, 390]) {
     await page.getByRole("button", { name: "任务管理", exact: true }).click();
     await page.getByRole("button", { name: "新建任务", exact: true }).click();
     let dialog = page.getByRole("dialog", { name: "创建任务", exact: true });
-    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "16:00");
     assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "5");
-    await dialog.getByLabel("每日收盘（北京时间）").fill("15:30");
+    assert.equal(await dialog.getByLabel("开盘时间").isDisabled(), true);
+    assert.equal(await dialog.getByLabel("停盘时间").isDisabled(), true);
     await dialog.getByLabel("提前清仓（分钟）").fill("10");
     await dialog.getByLabel("登录账号", { exact: true }).fill("ui-test-account");
     await dialog.getByLabel("登录密码", { exact: true }).fill("ui-test-password");
@@ -163,24 +163,25 @@ for (const width of [1440, 390]) {
     await capture(page, `close-settings-create-${width}`);
     await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
     await dialog.waitFor({ state: "detached" });
-    assert.deepEqual(createdPayload.sessionClose, { time: "15:30", leadMinutes: 10, timezone: "Asia/Shanghai" });
-    await page.getByText("收盘 15:30 · 提前 10 分钟清仓", { exact: true }).waitFor();
+    assert.deepEqual(createdPayload.sessionClose, { leadMinutes: 10, timezone: "Asia/Shanghai" });
+    assert.equal(createdPayload.tradingSession, undefined);
+    await page.getByText("提前 10 分钟清仓", { exact: false }).waitFor();
     if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
     await page.getByRole("button", { name: "任务管理", exact: true }).click();
     await page.getByRole("button", { name: "编辑", exact: true }).click();
     dialog = page.getByRole("dialog", { name: "编辑任务", exact: true });
-    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "15:30");
     assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "10");
-    await dialog.getByLabel("每日收盘（北京时间）").fill("15:45");
+    assert.equal(await dialog.getByLabel("停盘时间").isDisabled(), true);
     await dialog.getByLabel("提前清仓（分钟）").fill("8");
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await capture(page, `close-settings-edit-${width}`);
     await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
     await dialog.waitFor({ state: "detached" });
-    assert.deepEqual(updatedPayload.sessionClose, { time: "15:45", leadMinutes: 8, timezone: "Asia/Shanghai" });
+    assert.deepEqual(updatedPayload.sessionClose, { leadMinutes: 8, timezone: "Asia/Shanghai" });
+    assert.equal(updatedPayload.tradingSession, undefined);
     await page.getByRole("button", { name: "编辑", exact: true }).click();
-    assert.equal(await dialog.getByLabel("每日收盘（北京时间）").inputValue(), "15:45");
     assert.equal(await dialog.getByLabel("提前清仓（分钟）").inputValue(), "8");
+    assert.equal(await dialog.getByLabel("停盘时间").isDisabled(), true);
   });
 }
 

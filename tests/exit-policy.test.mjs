@@ -7,13 +7,15 @@ const position = { positionOrderId: "P-1", symbol: "DGKZ", side: "买入", quant
 const market = { symbol: "DGKZ", observedAt: new Date(observed).toISOString(), account: { positionsVerified: true, positions: [position] }, orderBook: { bids: [{ price: 104, volume: 20 }], asks: [{ price: 106, volume: 20 }] } };
 const source = { positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 };
 
-test("daily closing uses Beijing time, configurable lead, and resets the next day", () => {
-  assert.equal(sessionCloseWindow({}, Date.parse("2026-10-13T15:54:59+08:00")).active, false);
-  assert.equal(sessionCloseWindow({}, Date.parse("2026-10-13T15:55:00+08:00")).active, true);
-  assert.equal(sessionCloseWindow({}, Date.parse("2026-10-13T16:00:00+08:00")).overdue, true);
+test("closing uses the saved stop time, with the lead counted back from that instant", () => {
+  const saved = { tradingSession: { opensAt: "2026-10-13T09:00", closesAt: "2026-10-13T16:00" }, sessionClose: { leadMinutes: 5 } };
+  assert.equal(sessionCloseWindow(saved, Date.parse("2026-10-13T15:54:59+08:00")).active, false);
+  assert.equal(sessionCloseWindow(saved, Date.parse("2026-10-13T15:55:00+08:00")).active, true);
+  assert.equal(sessionCloseWindow(saved, Date.parse("2026-10-13T16:00:00+08:00")).overdue, true);
+  assert.equal(sessionCloseWindow({ tradingSession: { opensAt: "2026-10-13T09:00", closesAt: "2026-10-13T15:30" }, sessionClose: { leadMinutes: 10 } }, Date.parse("2026-10-13T15:20:00+08:00")).active, true);
   assert.equal(sessionCloseWindow({}, Date.parse("2026-10-14T09:00:00+08:00")).active, false);
-  assert.equal(sessionCloseWindow({ sessionClose: { time: "15:30", leadMinutes: 10 } }, Date.parse("2026-10-13T15:20:00+08:00")).active, true);
-  for (const value of [{ time: "25:00", leadMinutes: 5 }, { time: "16:00", leadMinutes: 0 }, { time: "16:00", leadMinutes: 1.5 }, null]) assert.equal(parseSessionClose(value), null);
+  for (const value of [{ leadMinutes: 0 }, { leadMinutes: 1.5 }, null]) assert.equal(parseSessionClose(value), null);
+  assert.deepEqual(parseSessionClose({ time: "16:00", leadMinutes: 5 }), { leadMinutes: 5, timezone: "Asia/Shanghai" });
 });
 
 test("AI validity starts at original observation; a slow response cannot renew expired plans", () => {

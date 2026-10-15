@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
 import { DEFAULT_ENTRY_QUANTITY, parseEntryQuantity } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
-import { assertTradingSessionOpen, parseTradingSession, tradingSessionFromEnv } from "./trading-session.mjs";
+import { assertTradingSessionOpen, defaultTradingSession, parseTradingSession, rolledTradingSession, tradingSessionFromEnv } from "./trading-session.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
@@ -575,7 +575,6 @@ app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) =>
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
-  if (body.tradingSession !== undefined && !parseTradingSession(body.tradingSession)) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const targetType = body.targetType === "app" ? "app" : "website";
   const targetInput = { type: targetType, name: body.targetName, url: body.url, installPath: body.installPath, appId: body.appId };
@@ -622,7 +621,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
-    tradingSession: parseTradingSession(body.tradingSession),
+    tradingSession: defaultTradingSession(),
     providerId: "",
     pendingAction: null,
     target: {
@@ -692,12 +691,10 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
   }
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
-  if (body.tradingSession !== undefined && !parseTradingSession(body.tradingSession)) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt };
   if (body.entryQuantity !== undefined) task.entryQuantity = parseEntryQuantity(body.entryQuantity);
   if (body.sessionClose !== undefined) task.sessionClose = parseSessionClose(body.sessionClose);
-  if (body.tradingSession !== undefined) task.tradingSession = parseTradingSession(body.tradingSession);
   task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
   task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;
@@ -1187,6 +1184,23 @@ app.get("/api/admin/summary", { preHandler: requireAdmin }, async () => {
 const port = Number(process.env.PORT || 8787);
 const host = String(process.env.HOST || "127.0.0.1");
 for (const task of state.tasks) if (task.monitoringEnabled === true || (task.monitoringEnabled === undefined && task.status === "MONITORING")) startController(task.id, { userId: task.ownerUserId || "" });
+
+async function rollStoredTradingSessions() {
+  const now = Date.now();
+  let changed = false;
+  for (const task of state.tasks) {
+    const next = rolledTradingSession(task.tradingSession, now);
+    if (!next) continue;
+    task.tradingSession = next;
+    changed = true;
+    await persistTask(task);
+  }
+  if (changed) broadcast();
+}
+const tradingSessionTimer = setInterval(() => { rollStoredTradingSessions().catch((error) => console.error("trading session roll failed", error)); }, 30_000);
+tradingSessionTimer.unref?.();
+rollStoredTradingSessions().catch((error) => console.error("trading session roll failed", error));
+
 try {
   await app.listen({ port, host });
   console.log(`Axiom API listening on http://${host}:${port}`);

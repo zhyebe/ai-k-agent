@@ -52,6 +52,12 @@ export function assertTradingSessionOpen(saved, now = Date.now()) {
   return session;
 }
 
+export function rolledTradingSession(saved, now = Date.now()) {
+  const parsed = parseTradingSession(saved);
+  if (parsed && now < Date.parse(parsed.closesAt)) return null;
+  return defaultTradingSession(now);
+}
+
 export function tradingSessionFromEnv(env = process.env) {
   const raw = String(env.AXIOM_TRADING_SESSION || "").trim();
   if (!raw) return null;

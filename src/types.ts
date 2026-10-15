@@ -346,7 +346,7 @@ export interface Task {
   monitorAllBoards?: boolean;
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
-  sessionClose?: { time: string; leadMinutes: number; timezone: "Asia/Shanghai" };
+  sessionClose?: { leadMinutes: number; timezone: "Asia/Shanghai" };
   tradingSession?: TradingSession;
   sessionCloseState?: { date: string; closesAt: string; status: string; remainingPositions: number | null; remainingOrders?: number; checkedAt: string } | null;
   exitMonitor?: { status: string; checkedAt: string; message: string } | null;

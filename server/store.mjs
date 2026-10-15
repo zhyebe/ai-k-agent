@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { indexSkill, sortSkillsForConsideration } from "./rag.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
-import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
+import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
 import { effectiveTradingSession } from "./trading-session.mjs";
 import { publicProvider as formatPublicProvider, providerIdentityKey } from "./provider.mjs";
 
@@ -90,7 +90,7 @@ export function publicTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
-    sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
+    sessionClose: parseSessionClose(task.sessionClose) || DEFAULT_SESSION_CLOSE,
     tradingSession: effectiveTradingSession(task.tradingSession),
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     monitorAllBoards: task.monitorAllBoards === true,
@@ -211,7 +211,7 @@ function sanitizeHydratedTask(task) {
     automationAuthorized: false,
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
-    sessionClose: task.sessionClose || DEFAULT_SESSION_CLOSE,
+    sessionClose: parseSessionClose(task.sessionClose) || DEFAULT_SESSION_CLOSE,
     autoDecisionCountdownSec: Number(task.autoDecisionCountdownSec || 30),
     providerId: "",
     pendingAction: task.pendingAction || null,

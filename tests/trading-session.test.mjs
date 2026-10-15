@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertTradingSessionOpen, defaultTradingSession, effectiveTradingSession, parseTradingSession, TRADING_SESSION_CLOSED_MESSAGE } from "../server/trading-session.mjs";
+import { assertTradingSessionOpen, defaultTradingSession, effectiveTradingSession, parseTradingSession, rolledTradingSession, TRADING_SESSION_CLOSED_MESSAGE } from "../server/trading-session.mjs";
 import { parseSessionClose } from "../server/exit-policy.mjs";
 
 const at = (value) => Date.parse(value);
@@ -27,6 +27,14 @@ test("saved date range replaces the default immediately and keeps minute precisi
   assert.equal(parseTradingSession({ opensAt: "2026-10-21T16:00", closesAt: "2026-10-20T18:30" }), null);
 });
 
+test("a saved session rolls only after its stop time", () => {
+  const current = { opensAt: new Date(at("2026-10-15T18:30:00+08:00")).toISOString(), closesAt: new Date(at("2026-10-16T16:00:00+08:00")).toISOString() };
+  assert.equal(rolledTradingSession(current, at("2026-10-16T15:59:00+08:00")), null);
+  const next = rolledTradingSession(current, at("2026-10-16T16:00:00+08:00"));
+  assert.equal(next.opensAt, new Date(at("2026-10-16T18:30:00+08:00")).toISOString());
+  assert.equal(next.closesAt, new Date(at("2026-10-17T16:00:00+08:00")).toISOString());
+});
+
 test("session close field stays a daily clock and lead time", () => {
-  assert.deepEqual(parseSessionClose({ time: "16:00", leadMinutes: 5, timezone: "Asia/Shanghai" }), { time: "16:00", leadMinutes: 5, timezone: "Asia/Shanghai" });
+  assert.deepEqual(parseSessionClose({ leadMinutes: 5, timezone: "Asia/Shanghai" }), { leadMinutes: 5, timezone: "Asia/Shanghai" });
 });
