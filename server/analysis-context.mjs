@@ -159,7 +159,7 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据→AI 识别趋势并给出买涨/买跌/持仓/离场动作→主机只按 AI 动作执行。概率仅作方向预测记录，不作为固定入场门槛；多单靠上涨盈利，空单靠下跌盈利。闪 K 排除，不因短暂出现又消失的 K 反转或止损；真实趋势失效仍及时保护。趋势延续时持仓等待 1–5 根 K 的盈利目标，真实入场价与可成交 bid/ask 未形成净盈利前不得止盈；趋势路径失效且继续持仓预计扩大亏损时才最小损失离场。",
+    summary: "观察实时数据→AI 先判断多周期大趋势，再大胆预测涨跌路径与持仓/离场时机→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利。下一根及近端K用于择时，不支配大趋势持仓；5根只是举例，不设固定持仓K数。疑似闪K及其瞬时显示价格不纳入趋势、概率、指标和离场点位分析；真实可成交bid/ask仍独立用于执行校验。趋势延续时争取最大预期净收益，真实趋势失效且继续持仓预计扩大亏损时最小损失离场。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "GATE_ENTRY_TRIGGERS", "EXECUTE_VISIBLE_CLICKS"],
@@ -168,7 +168,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     noSecondEntryWhileHolding: false,
   },
   kline: {
-    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，判断必须针对下一根将在第50秒打印的K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
+    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；持仓与离场以大趋势和AI预测的延续路径为主，不被单根反向K或闪K带偏。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
     periodMs: LIVE_KLINE_PERIOD_MS,
     printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,
@@ -177,6 +177,12 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     forecastTarget: "NEXT_CANDLE",
     doNotWaitForMinuteCloseAt00: true,
     liveQuotesMayUpdateEverySecond: true,
+    flashK: {
+      summary: "疑似闪K可能是假显示，其价格与派生指标排除分析；单次大幅波动不等于假K，不能把真实反向走势删掉。缺少连续观察时不能声称已确认真假。真实新鲜可成交bid/ask与显示闪价分开，仍执行AI事先确定的保护条件。",
+      excludeTransientDisplayPriceFromAnalysis: true,
+      priceSpikeAloneProvesFlash: false,
+      preserveVerifiedExecutableQuotes: true,
+    },
   },
   analysis: {
     summary: "等待本轮 AI 返回完整结果，不要因每分钟第50秒出K而中断分析。分析结束后按常规进入下一轮监控。",

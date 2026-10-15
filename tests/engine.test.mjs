@@ -433,9 +433,15 @@ test("持仓上下文提供持仓时长、浮动收益、峰值波动和回撤�
   assert.equal(position.maxAdverseExcursionPct, 0);
   assert.equal(context.account.positionContext[0].positionId, "P-1");
   assert.ok(task.positionTracking["P-1"]);
+  task.exitPlans = [{ positionId: "P-1", heldSide: "LONG", quantity: 1, takeProfitPrice: 135, stopLossPrice: 110, status: "ARMED", expiresAt: new Date(Date.now() + 60000).toISOString(), rationale: "大趋势向上，容忍正常回撤" }];
 
   const pullbackMarket = { ...market, latest: { price: 121 }, books: [{ symbol: "DGKZ", latest: { price: 121 } }] };
   const pullbackContext = buildDecisionContext(task, pullbackMarket, [], "monitor", pullbackMarket);
+  assert.deepEqual(pullbackContext.previousAnalysis.exitPlans, task.exitPlans);
+  assert.notEqual(pullbackContext.previousAnalysis.exitPlans, task.exitPlans);
+  assert.notEqual(pullbackContext.previousAnalysis.exitPlans[0], task.exitPlans[0]);
+  task.exitPlans[0].status = "TRIGGERED";
+  assert.equal(pullbackContext.previousAnalysis.exitPlans[0].status, "ARMED");
   assert.equal(pullbackContext.market.positions[0].currentPrice, 121);
   assert.ok(pullbackContext.market.positions[0].pullbackFromBestPct > 1.5);
   assert.ok(pullbackContext.market.positions[0].maxFavorableExcursionPct > 2.4);
@@ -1251,6 +1257,7 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
   process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
   const task = insertNorthstarTask(`client_analysis_${Date.now()}`);
   const market = testMarketSnapshot("client-snapshot", 100);
+  task.exitPlans = [{ positionId: "existing", status: "ARMED", takeProfitPrice: 110, stopLossPrice: 94, rationale: "大趋势延续" }];
   let calls = 0;
   try {
     const result = await runAnalysis(task.id, "", { runtime: {
@@ -1263,6 +1270,9 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
         calls++;
         assert.equal(context.market, undefined);
         assert.equal(context.marketRef.fingerprint, market.fingerprint);
+        assert.deepEqual(context.previousAnalysis.exitPlans, task.exitPlans);
+        assert.notEqual(context.previousAnalysis.exitPlans, task.exitPlans);
+        assert.notEqual(context.previousAnalysis.exitPlans[0], task.exitPlans[0]);
         return { market, decision: { action: "HOLD", confidence: 0.5, profitProbability: 0.5, riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } };
       },
     } });

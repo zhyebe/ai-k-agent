@@ -1600,6 +1600,16 @@ function decisionExecutionPolicy(task) {
   } : undefined;
 }
 
+function previousAnalysisContext(task) {
+  return {
+    fingerprint: task.lastAnalyzedFingerprint || null,
+    succeeded: task.lastAnalysisSucceeded !== false,
+    decision: task.decision,
+    analyzedAt: task.lastAnalysisAt || null,
+    exitPlans: (task.exitPlans || []).map(plan => ({ ...plan })),
+  };
+}
+
 export function buildDecisionContext(task, market, evidence, trigger, analysisMarket = market) {
   const layered = analysisMarket?.analysisLayers ? analysisMarket : buildLayeredAnalysisMarket(analysisMarket || task.market);
   const positionContext = updatePositionTracking(task, market, Date.now());
@@ -1656,12 +1666,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
     experiencePrompt: buildApprovedExperiencePrompt(evidence),
     evidence: evidence.map(({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash }) => ({ evidenceId, type, excerpt, chunkId, skillId, version, title, score, tags, segmentId, rowStart, rowEnd, rowCount, contentHash })),
     evidenceIds: evidence.map((item) => item.evidenceId).filter(Boolean),
-    previousAnalysis: {
-      fingerprint: task.lastAnalyzedFingerprint || null,
-      succeeded: task.lastAnalysisSucceeded !== false,
-      decision: task.decision,
-      analyzedAt: task.lastAnalysisAt || null,
-    },
+    previousAnalysis: previousAnalysisContext(task),
     conversation: {
       round: Number(task.monitoringRound || 0) + 1,
       trigger,
@@ -1992,7 +1997,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           evidence,
           experiencePrompt,
           evidenceIds: evidence.map((item) => item.evidenceId),
-          previousAnalysis: { fingerprint: task.lastAnalyzedFingerprint, decision: task.decision, analyzedAt: task.lastAnalysisAt },
+          previousAnalysis: previousAnalysisContext(task),
           conversation: { round: Number(task.monitoringRound || 0) + 1, trigger, recentRounds: recentAnalysisRounds(task.id) },
           monitoringWindow: recentOnly ? "last_1h" : "layered",
         }, analysisOptions);

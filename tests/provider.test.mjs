@@ -444,10 +444,10 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     const prompt = seen[0].body.system;
     assert.match(prompt, /40% 不再是入场硬门、上限或 HOLD 触发器/);
     assert.doesNotMatch(prompt, /selected probability must be >=|hard entry requirement|BUY requires bullish_profit_probability >=/);
-    assert.match(prompt, /AI recognizes trend and chooses BUY, SELL or HOLD/);
+    assert.match(prompt, /AI recognizes the broad market trend first/);
     assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
-    assert.match(prompt, /路径内部允许反向波动/);
-    assert.match(prompt, /target 1-5 K when trend remains valid/);
+    assert.match(prompt, /趋势内回撤/);
+    assert.match(prompt, /5 K is only an example, never a target or required wait/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
     assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
     assert.match(prompt, /STOP_LOSS requires profitable path invalidation and expected further loss/);
@@ -646,7 +646,7 @@ for (const [bullish, bearish, selectedAction, management] of [
     assert.equal(bodies.length, 1);
     const messages = bodies[0].messages;
     assert.match(messages[0].content, /40% 不再是入场硬门/);
-    assert.match(messages[0].content, /AI recognizes trend and chooses BUY, SELL or HOLD/);
+    assert.match(messages[0].content, /AI recognizes the broad market trend first/);
     assert.equal(result.action, "HOLD");
     assert.equal(result.exitType, null);
     assert.equal(result.bullishProfitProbability, bullish);
@@ -843,6 +843,64 @@ test("provider decision preserves next-K, ten-K and AI holding-duration forecast
   }
 });
 
+test("monitoring history preserves each position's trend exit plan and closing decision", () => {
+  const plan = { positionId: "P-long", heldSide: "LONG", quantity: 1, validForSec: 1800, takeProfitPrice: 112, stopLossPrice: 94, rationale: "大趋势向上，96-99 为预期回撤，94 为结构失效" };
+  const messages = buildConversationMessages({ conversation: { recentRounds: [
+    { round: 1, decision: { action: "HOLD", holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", maxHoldK: 18, rationale: "小时趋势向上，下一K回撤不改变盈利路径", invalidation: "大趋势结构失效" }, exitPlans: [plan] } },
+    { round: 2, decision: { action: "SELL", exit_type: "STOP_LOSS", target_position_ids: ["P-long"], exit_plans: [{ position_id: "P-long", held_side: "LONG", quantity: 1, valid_for_sec: 60, take_profit_price: null, stop_loss_price: 94, rationale: "实际跌破原趋势失效边界" }] } },
+  ] } });
+  const held = JSON.parse(messages[1].content);
+  assert.deepEqual(held.exitPlans, [plan]);
+  assert.equal(held.holdingPlan.maxHoldK, 18);
+  const closed = JSON.parse(messages[3].content);
+  assert.equal(closed.exitType, "STOP_LOSS");
+  assert.deepEqual(closed.targetPositionIds, ["P-long"]);
+  assert.equal(closed.exitPlans[0].stopLossPrice, 94);
+});
+
+for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
+  test(`${apiFormat} fast decisions receive broad-trend guidance, flash-price exclusions and prior exit plans`, async t => {
+    const bodies = [];
+    const plan = { positionId: "P-long", heldSide: "LONG", quantity: 1, validForSec: 1800, takeProfitPrice: 112, stopLossPrice: 94, rationale: "大趋势向上，96-99 回撤不失效" };
+    const final = JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.61, bearish_profit_probability: 0.24,
+      forecast_horizon: { next_k: { direction: "DOWN" }, next_10k: { direction: "UP" } },
+      holding_plan: { decision: "HOLD_THROUGH_PULLBACK", max_hold_k: 18, rationale: "大趋势延续" }, exit_plans: [plan] });
+    t.mock.method(globalThis, "fetch", async (_url, options) => {
+      bodies.push(JSON.parse(options.body));
+      const payload = apiFormat === "anthropic" ? { content: [{ type: "text", text: final }] }
+        : apiFormat === "responses" ? { output_text: final }
+          : apiFormat === "gemini" ? { candidates: [{ content: { parts: [{ text: final }] } }] }
+            : { choices: [{ message: { content: final } }] };
+      return new Response(JSON.stringify(payload));
+    });
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test/v1", model: "compatible-model", apiFormat }, {
+      previousAnalysis: { exitPlans: [{ ...plan, status: "ARMED", expiresAt: "2026-10-15T07:00:00Z" }] },
+      conversation: { recentRounds: [{ decision: { action: "HOLD", exitPlans: [plan] } }] },
+    }, { fastAnalysis: true });
+    assert.equal(bodies.length, 1);
+    const body = bodies[0];
+    const messages = body.input || body.messages || body.contents.map(item => ({ ...item, content: item.parts[0].text }));
+    const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
+    assert.match(prompt, /AI recognizes the broad market trend first/);
+    assert.match(prompt, /5 K is only an example, never a target or required wait/);
+    assert.match(prompt, /exclude its price and derived high\/low\/return/);
+    assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
+    assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
+    assert.match(prompt, /Lead with broad trend/);
+    assert.doesNotMatch(prompt, /target 1-5 K when trend remains valid|favorable exit over the next 1-5 K/);
+    const context = JSON.parse(messages.at(-1).content);
+    assert.equal(context.previousAnalysis.exitPlans[0].rationale, plan.rationale);
+    assert.equal(context.previousAnalysis.exitPlans[0].status, "ARMED");
+    const history = messages.find(item => ["assistant", "model"].includes(item.role));
+    assert.deepEqual(JSON.parse(history.content).exitPlans, [plan]);
+    assert.equal(result.holdingPlan.maxHoldK, 18);
+    assert.equal(result.forecastHorizon.nextK.direction, "DOWN");
+    assert.equal(result.forecastHorizon.next10K.direction, "UP");
+    assert.equal(result.action, "HOLD");
+    assert.equal(result.bullishProfitProbability, 0.61);
+  });
+}
+
 test("continuous monitoring sends prior rounds as bounded conversation context", async () => {
   let received;
   const server = http.createServer(async (request, response) => {
@@ -897,6 +955,8 @@ test("provider reviews a complete market segment and binds the returned review t
     assert.equal(result.contentHash, segment.contentHash);
     assert.equal(result.rowCount, segment.rowCount);
     assert.equal(received.messages[0].role, "system");
+    assert.match(received.messages[0].content, /First assess broad multi-bar trend/);
+    assert.match(received.messages[0].content, /exclude its price from trend, levels, returns/);
     assert.equal(JSON.parse(received.messages[1].content).segment.segmentId, segment.segmentId);
   } finally {
     await new Promise((resolve) => server.close(resolve));

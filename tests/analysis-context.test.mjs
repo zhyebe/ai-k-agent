@@ -14,6 +14,11 @@ test("入场由 AI 趋势识别，离场优先最大预期净收益并在失效�
   assert.equal(exit.onExitDecision, "EXECUTE_IMMEDIATELY");
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["转让"]);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /5根只是举例/);
+  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, true);
+  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
+  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);
 });
 
 function history(size, start = 1700000000000, step = 60000) {

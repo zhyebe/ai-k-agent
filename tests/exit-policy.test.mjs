@@ -49,6 +49,25 @@ test("unknown holdings, changed quantity, absent or stale quotes cannot trigger 
   assert.equal(invalid.plans.length, 0);
 });
 
+for (const heldSide of ["LONG", "SHORT"]) {
+  test(`${heldSide} ignores flash display prices but still executes AI conditions on verified bid/ask`, () => {
+    const long = heldSide === "LONG";
+    const observedMarket = { ...market, account: { positionsVerified: true, positions: [{ ...position, side: long ? "买入" : "卖出" }] } };
+    const plan = validateExitPlans({ exitPlans: [{ ...source, heldSide, takeProfitPrice: long ? 110 : 95, stopLossPrice: long ? 95 : 110 }] }, observedMarket, {}, observed).plans[0];
+    for (const flashPrice of [90, 120]) {
+      const displayed = { ...observedMarket, latest: { price: flashPrice }, quote: { price: flashPrice }, history: [{ timestamp: observed, close: flashPrice }], ticks: [{ timestamp: observed, price: flashPrice }] };
+      assert.equal(evaluateExitPlan(plan, displayed, observed).status, "ARMED");
+      for (const [price, exitType] of [[long ? 110 : 95, "TAKE_PROFIT"], [long ? 95 : 110, "STOP_LOSS"]]) {
+        const executable = { ...displayed, orderBook: { bids: [{ price: long ? price : price - 1, volume: 20 }], asks: [{ price: long ? price + 1 : price, volume: 20 }] } };
+        const result = evaluateExitPlan(plan, executable, observed);
+        assert.equal(result.status, "TRIGGERED");
+        assert.equal(result.decision.exitType, exitType);
+        assert.equal(result.decision.action, long ? "SELL" : "BUY");
+      }
+    }
+  });
+}
+
 test("止盈计划必须高于真实多单入场价，不能把亏损当止盈", () => {
   const result = validateExitPlans({ exitPlans: [{ ...source, takeProfitPrice: 99, stopLossPrice: 95 }] }, market, {}, observed);
   assert.equal(result.plans.length, 1);
