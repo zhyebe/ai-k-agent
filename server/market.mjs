@@ -1193,10 +1193,10 @@ export function resolveObservedHaohanSymbol(pageInstrument, taskSymbol) {
   return pageSymbol || configured;
 }
 
-export async function observeExecutionMarket(task, connector) {
+export async function observeExecutionMarket(task, connector, { accountScope = "full" } = {}) {
   if (connector?.reviewStatus !== "APPROVED" || connector.adapterId !== "haohan-readonly" || !connector.capabilities?.includes("read_visible_market")) return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED" };
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
-  const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true });
+  const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true, accountScope });
   if (!snapshot.ok) return snapshot;
   if (!isHaohanTarget(snapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH" };
   const primary = parseHaohanPageSnapshot(snapshot, { symbol: extractHaohanPageInstrument(snapshot).symbol });
@@ -1234,11 +1234,11 @@ export async function observeMarket(task, connector, { withBrowser = async (oper
   };
   const timeframe = task.timeframe || "15m";
   const initial = await withBrowser(async () => {
-    let pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+    let pageSnapshot = await readVisiblePage(sessionId);
     if (!pageSnapshot.ok) {
       const opened = await openMarketBrowser(task, connector);
       if (!opened.ok) return opened;
-      pageSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+      pageSnapshot = await readVisiblePage(sessionId);
       if (!pageSnapshot.ok) return pageSnapshot;
     }
     if (!isHaohanTarget(pageSnapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前浏览器页面不是浩瀚数贸目标" };
@@ -1247,7 +1247,7 @@ export async function observeMarket(task, connector, { withBrowser = async (oper
       if (!samePageInstrument(currentInstrument, selectedTarget)) {
         const switched = await selectPageBoardInstrument(sessionId, selectedTarget);
         if (switched) {
-          const switchedSnapshot = await readVisiblePage(sessionId, { inspectPositions: true });
+          const switchedSnapshot = await readVisiblePage(sessionId);
           if (switchedSnapshot?.ok) pageSnapshot = switchedSnapshot;
         }
       }

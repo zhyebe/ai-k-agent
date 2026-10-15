@@ -20,6 +20,13 @@ async function findControl(root, labels, selector = BUTTONS) {
 export async function activateTradeControl(page, label) {
   const control = await findControl(page, [label], TABS);
   if (!control) return false;
+  const active = ["当前委托", "持仓明细", "历史委托"].includes(label) && await control.evaluate((node) => {
+    return node.getAttribute("aria-selected") === "true"
+      || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active");
+  }).catch(() => false);
+  // The trading site refreshes tab data when a tab is mounted. Avoid clicking
+  // an already active tab: its live DOM is already updating by itself.
+  if (active) return true;
   await control.click({ timeout: 5000 });
   return true;
 }

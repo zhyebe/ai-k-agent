@@ -198,6 +198,24 @@ test("slow history releases the browser queue while DOM phases remain serial and
   assert.deepEqual(events, ["initial-dom", "quick-dom-start", "quick-dom-finish", "refreshed-dom"]);
 });
 
+for (const accountScope of ["positions", "full"]) {
+  test(`desktop execution observation passes ${accountScope} account scope from message options to market`, async () => {
+    const runtime = loadRuntime("browser-runtime.cjs", {}, "\nmodule.exports.useModules = (value) => { modulesPromise = Promise.resolve(value); };\n");
+    let captured;
+    runtime.useModules({
+      browser: { closeBrowserSession: async () => {} },
+      market: { observeExecutionMarket: async (_task, _connector, options) => { captured = options; return { ok: true }; } },
+    });
+    const result = await runtime.executeBrowserCall({}, {
+      userId: "owner", method: "observeExecutionMarket", options: { accountScope },
+      input: { task: { id: "one", target: { browserSessionId: "task:one" } } }, deadlineAt: Date.now() + 10000,
+    }, "https://example.test", new AbortController().signal);
+    assert.equal(result.ok, true);
+    assert.equal(captured.accountScope, accountScope);
+    assert.equal(typeof captured.withBrowser, "function");
+  });
+}
+
 test("logout during history waits prevents every later DOM read and cache write", async () => {
   const started = deferred(), finish = deferred();
   let refreshed = false;

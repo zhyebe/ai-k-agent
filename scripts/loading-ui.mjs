@@ -281,7 +281,7 @@ for (const [riskFlags, label, invalidation] of [
     const panel = page.locator(".decision-panel");
     assert.equal(await panel.locator(".decision-action strong").innerText(), label);
     assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["--", "--"]);
-    assert.equal(await panel.locator(".invalidation").innerText(), `失效条件：${invalidation}`);
+    assert.equal(await panel.locator(".invalidation").innerText(), `趋势失效位：${invalidation}`);
     assert.match(await panel.locator(".decision-action").innerText(), /未获得有效模型结果/);
     assert.equal(await page.getByRole("alertdialog").count(), 0);
   });

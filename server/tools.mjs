@@ -357,6 +357,16 @@ export function isTradeWriteResponse(url, method) {
   }
 }
 
+export function isOrderCancellationResponse(url, method) {
+  if (String(method || "GET").toUpperCase() !== "POST") return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname === "smyw.haohandahan.cn" && /\/intraday-trade\/trade\/cancel\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function watchTradeResponse(page, matches = isTradeWriteResponse) {
   let matched = null;
   const listener = (response) => {
@@ -556,9 +566,7 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   const results = [];
   for (const orderId of [...new Set(orderIds.map(String).map((id) => id.trim()).filter(Boolean))]) {
     const baselineToken = await markTradePageHints(page);
-    const response = watchTradeResponse(page, (url, method) => {
-      try { return method === "POST" && new URL(url).pathname === "/intraday-trade/trade/cancel"; } catch { return false; }
-    });
+    const response = watchTradeResponse(page, isOrderCancellationResponse);
     const nativeDialog = (dialog) => {
       if (/撤单|撤销.*委托/.test(dialog.message()) && !/所有|全撤/.test(dialog.message())) dialog.accept().catch(() => {});
     };
@@ -569,15 +577,26 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
         results.push({ orderId, ok: false, cancelled: false, code: clicked.code });
         continue;
       }
-      await completeTradeDialogs(page, { cancelOrder: true, baselineToken, finished: () => Boolean(response.peek()) });
-      const hint = await readTradePageHint(page, baselineToken);
+      const dialogs = await completeTradeDialogs(page, { cancelOrder: true, baselineToken, finished: () => Boolean(response.peek()) });
+      let hint = await readTradePageHint(page, baselineToken);
+      let status = "";
+      if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
+        status = await readHistoricalOrderStatus(page, orderId);
+        // Closing the confirmation is not the cancellation result. A slow request
+        // can still be pending when the first historical-order query completes.
+        if (!/^(已撤单|部分成交后撤单|已成交)$/.test(status) && (dialogs.confirmed || response.peek())) {
+          hint = (await observeTradeFeedback(page, response, baselineToken)).pageHint;
+          if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
+            status = await readHistoricalOrderStatus(page, orderId);
+          }
+        }
+      }
       if (tradePageHintKind(hint) === "rejected") {
         results.push({ orderId, ok: false, cancelled: false, code: "ORDER_CANCEL_REJECTED", message: hint });
       } else if (/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted") {
         results.push({ orderId, ok: true, cancelled: true, code: "ORDER_CANCELLED", message: hint });
       } else {
         // A vanished live row may have filled while cancellation was pending. Verify history.
-        const status = await readHistoricalOrderStatus(page, orderId);
         const cancelled = /^(已撤单|部分成交后撤单)$/.test(status);
         results.push({ orderId, ok: cancelled, cancelled, code: cancelled ? "ORDER_CANCELLED" : status === "已成交" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCEL_UNVERIFIED", status });
       }

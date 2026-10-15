@@ -155,6 +155,161 @@ test("format correction shares the original timeout rather than starting a new d
   assert.equal(calls, 2);
 });
 
+function decisionEnvelope(apiFormat, decision) {
+  const text = typeof decision === "string" ? decision : JSON.stringify(decision);
+  if (apiFormat === "anthropic") return { content: [{ type: "text", text }], stop_reason: "end_turn" };
+  if (apiFormat === "responses") return { output: [{ type: "message", content: [{ type: "output_text", text }] }], status: "completed" };
+  if (apiFormat === "gemini") return { candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }] };
+  return { choices: [{ message: { content: text }, finish_reason: "stop" }] };
+}
+
+for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
+  for (const [action, exitType, missingOrderDecision, frozenQuantity = 0] of [
+    ["BUY", null, "KEEP"], ["SELL", null, "CANCEL"],
+    ["SELL", "STOP_LOSS", "CANCEL"], ["BUY", "TAKE_PROFIT", "KEEP"],
+    ["SELL", "STOP_LOSS", "CANCEL", 1], ["BUY", "TAKE_PROFIT", "KEEP", 1],
+  ]) {
+    const needsSupplement = !exitType || frozenQuantity > 0;
+    test(`${apiFormat} ${needsSupplement ? "supplements one omitted order" : "does not delay an unfrozen exit for omitted orders"} without changing ${action} ${exitType || "entry"}${frozenQuantity ? " with frozen holdings" : ""}`, async (t) => {
+      const original = {
+        action, exit_type: exitType, target_position_ids: exitType ? ["P-1"] : [], target_symbol: "DGKZ", target_price: 1363,
+        bullish_profit_probability: 0.58, bearish_profit_probability: 0.31, profit_probability: 0.58,
+        holding_plan: { decision: exitType ? "EXIT_NOW" : "UNKNOWN" },
+        exit_plans: exitType ? [{ position_id: "P-1", held_side: action === "SELL" ? "LONG" : "SHORT", quantity: 1, valid_for_sec: 300,
+          take_profit_price: exitType === "TAKE_PROFIT" ? 1363 : null, stop_loss_price: exitType === "STOP_LOSS" ? 1363 : null, rationale: "original position plan" }] : [],
+        order_assessments: [
+          { order_id: "O-keep", decision: "KEEP", reason: "original waiting opportunity" },
+          { order_id: "O-cancel", decision: "CANCEL", reason: "original margin decision" },
+          { order_id: "O-keep-2", decision: "KEEP", reason: "original fill opportunity" },
+        ],
+      };
+      const supplemental = {
+        action: "HOLD", bullish_profit_probability: 0.01, bearish_profit_probability: 0.99,
+        target_symbol: "OTHER", order_assessments: [
+          { order_id: "O-keep", decision: "CANCEL", reason: "must not rewrite assessed order" },
+          { order_id: "O-cancel", decision: "KEEP", reason: "must not undo existing cancellation" },
+          { order_id: "O-missing", decision: missingOrderDecision, reason: "compare expected fill and released margin" },
+          { order_id: "O-unknown", decision: "CANCEL", reason: "not supplied" },
+        ], cancel_order_ids: ["O-unknown", "O-keep"],
+      };
+      let calls = 0;
+      t.mock.method(globalThis, "fetch", async () => {
+        calls++;
+        return new Response(JSON.stringify(decisionEnvelope(apiFormat, calls === 1 ? original : supplemental)));
+      });
+      const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test", apiFormat, model: "same-model" }, {
+        executionPolicy: { conditionalExits: true },
+        account: { positionsVerified: true, positions: exitType ? [{ positionOrderId: "P-1", quantity: 1, frozenQuantity, side: action === "SELL" ? "买" : "卖", orderPrice: 1400 }] : [],
+          openOrders: ["O-keep", "O-cancel", "O-keep-2", "O-missing"].map(orderId => ({ orderId, remainingQuantity: 1 })) },
+      }, { fastAnalysis: true });
+      assert.equal(calls, needsSupplement ? 2 : 1);
+      assert.equal(result.action, action);
+      assert.equal(result.exitType, exitType);
+      assert.deepEqual(result.targetPositionIds, original.target_position_ids);
+      assert.equal(result.targetSymbol, "DGKZ");
+      assert.equal(result.targetPrice, 1363);
+      assert.equal(result.bullishProfitProbability, 0.58);
+      assert.equal(result.bearishProfitProbability, 0.31);
+      assert.equal(result.profitProbability, 0.58);
+      assert.deepEqual(result.orderAssessments.map(item => [item.orderId, item.decision]), [
+        ["O-keep", "KEEP"], ["O-cancel", "CANCEL"], ["O-keep-2", "KEEP"], ...(needsSupplement ? [["O-missing", missingOrderDecision]] : []),
+      ]);
+      assert.equal(result.orderAssessments[0].reason, "original waiting opportunity");
+      assert.deepEqual(result.cancelOrderIds, needsSupplement && missingOrderDecision === "CANCEL" ? ["O-cancel", "O-missing"] : ["O-cancel"]);
+      assert.deepEqual(result.orderAssessmentMissingIds, needsSupplement ? [] : ["O-missing"]);
+      assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+      if (exitType) {
+        assert.equal(result.holdingPlan.decision, "EXIT_NOW");
+        assert.equal(result.exitPlans[0].positionId, "P-1");
+        assert.equal(result.exitPlans[0].rationale, "original position plan");
+      }
+    });
+  }
+}
+
+for (const [failure, exitType] of ["transport", "malformed", "omitted"].flatMap(failure => [null, "STOP_LOSS"].map(exitType => [failure, exitType]))) {
+  test(`order supplement ${failure} preserves a complete ${exitType || "entry"} and records only missing order IDs`, async (t) => {
+    const original = { action: exitType ? "SELL" : "BUY", exit_type: exitType, target_position_ids: exitType ? ["P-1"] : [],
+      bullish_profit_probability: 0.58, bearish_profit_probability: 0.31,
+      order_assessments: [{ order_id: "O-keep", decision: "KEEP", reason: "original waiting opportunity" }] };
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      calls++;
+      if (calls === 2 && failure === "transport") throw new Error("private transport detail");
+      return new Response(JSON.stringify(decisionEnvelope("chat", calls === 1 ? original
+        : failure === "malformed" ? '{"action":"HOLD",' : { action: "HOLD", order_assessments: [] })));
+    });
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
+      account: { openOrders: [{ orderId: "O-keep" }, { orderId: "O-missing" }] },
+    }, { fastAnalysis: true });
+    assert.equal(calls, 2);
+    assert.equal(result.action, original.action);
+    assert.equal(result.exitType, exitType);
+    assert.deepEqual(result.targetPositionIds, original.target_position_ids);
+    assert.equal(result.bullishProfitProbability, 0.58);
+    assert.equal(result.bearishProfitProbability, 0.31);
+    assert.deepEqual(result.orderAssessments.map(item => [item.orderId, item.decision]), [["O-keep", "KEEP"]]);
+    assert.deepEqual(result.cancelOrderIds, []);
+    assert.deepEqual(result.orderAssessmentMissingIds, ["O-missing"]);
+    assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+    assert.equal(result.riskFlags.includes("INVALID_MODEL_JSON"), false);
+    assert.doesNotMatch(JSON.stringify(result.modelDiagnostics), /private transport detail/);
+  });
+}
+
+test("complete order assessments keep HOLD and cancellation without an additional model request", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(JSON.stringify(decisionEnvelope("chat", { action: "HOLD", bullish_profit_probability: 0.48, bearish_profit_probability: 0.35,
+      order_assessments: [{ order_id: "O-keep", decision: "KEEP", reason: "waiting still better" }, { order_id: "O-cancel", decision: "CANCEL", reason: "margin release is better" }],
+      cancel_order_ids: ["O-cancel-direct"],
+    })));
+  });
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
+    account: { openOrders: ["O-keep", "O-cancel", "O-cancel-direct"].map(orderId => ({ orderId })) },
+  }, { fastAnalysis: true });
+  assert.equal(calls, 1);
+  assert.equal(result.action, "HOLD");
+  assert.deepEqual(result.cancelOrderIds, ["O-cancel", "O-cancel-direct"]);
+  assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+});
+
+test("order supplement timeout preserves the valid first decision", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    calls++;
+    if (calls === 1) return new Response(JSON.stringify(decisionEnvelope("chat", { action: "SELL", bullish_profit_probability: 0.31, bearish_profit_probability: 0.58 })));
+    return new Promise((resolve, reject) => {
+      const keepAlive = setTimeout(() => reject(new Error("supplement did not time out")), 2500);
+      options.signal.addEventListener("abort", () => { clearTimeout(keepAlive); reject(options.signal.reason); }, { once: true });
+    });
+  });
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
+    account: { openOrders: [{ orderId: "O-missing" }] },
+  }, { fastAnalysis: true, timeoutMs: 1000 });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "SELL");
+  assert.equal(result.bearishProfitProbability, 0.58);
+  assert.deepEqual(result.orderAssessmentMissingIds, ["O-missing"]);
+  assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+});
+
+test("external cancellation during order supplementation still cancels the entire request", async (t) => {
+  const controller = new AbortController();
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    if (calls === 1) return new Response(JSON.stringify(decisionEnvelope("chat", { action: "BUY", bullish_profit_probability: 0.58, bearish_profit_probability: 0.31 })));
+    controller.abort(new Error("USER_STOPPED_TASK"));
+    throw controller.signal.reason;
+  });
+  await assert.rejects(requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
+    account: { openOrders: [{ orderId: "O-missing" }] },
+  }, { fastAnalysis: true, signal: controller.signal }), /USER_STOPPED_TASK/);
+  assert.equal(calls, 2);
+});
+
 test("conflicting complete outputs and truncated nested JSON never become a trade", async (t) => {
   const buy = JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3 });
   const sell = JSON.stringify({ action: "SELL", bullish_profit_probability: 0.3, bearish_profit_probability: 0.6 });
@@ -455,6 +610,10 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /Price response outranks static displayed depth/);
     assert.match(prompt, /correct persistent directional bias/);
     assert.match(prompt, /Report UNKNOWN if evidence is insufficient/);
+    assert.match(prompt, /invalidation field is one structural price/);
+    assert.match(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
+    assert.doesNotMatch(prompt, /下次可行动条件/);
+    assert.doesNotMatch(prompt, /数据过期或风险超限时失效/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
     assert.ok(seen[1].body.systemInstruction);
@@ -477,6 +636,7 @@ test("below 40% HOLD is preserved without a second AI request even when probabil
     const before = calls;
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test", model: "demo", apiFormat: "chat" }, { account: { positions: [] } });
     assert.equal(result.action, "HOLD");
+    assert.equal(result.invalidation, "");
     assert.equal(result.bullishProfitProbability, bullish);
     assert.equal(result.bearishProfitProbability, bearish);
     assert.equal(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"), false);

@@ -13,7 +13,7 @@ const methods = { openMarketBrowser, observeMarket, observeExecutionMarket, brow
 export async function callBrowserMethod(method, userId, input = {}, options = {}) {
   if (!Object.hasOwn(methods, method)) throw new Error("BROWSER_METHOD_UNKNOWN");
   if (!desktopBrowserRequired()) {
-    if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(method)) return methods[method](input.task, input.connector);
+    if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(method)) return methods[method](input.task, input.connector, options);
     if (method === "closeBrowserSession") return closeBrowserSession(input.sessionId);
     return methods[method](input);
   }

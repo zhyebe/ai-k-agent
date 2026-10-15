@@ -871,6 +871,74 @@ for (const autoDecisionEnabled of [false, true]) {
   });
 }
 
+for (const autoDecisionEnabled of [false, true]) {
+  for (const action of ["BUY", "SELL"]) {
+    test(`${autoDecisionEnabled ? "自动" : "手动"}模式 ${action} 入场先按 AI 撤销旧委托且保留部分成交持仓`, async () => {
+      const task = insertNorthstarTask(`entry_after_cancel_${autoDecisionEnabled}_${action}_${Date.now()}`);
+      Object.assign(task, { mode: "LIVE", autoDecisionEnabled, entryQuantity: 1, status: "MONITORING", monitoringEnabled: true });
+      const market = testMarketSnapshot(`entry-after-cancel-${autoDecisionEnabled}-${action}`, 101);
+      market.account = {
+        ...market.account,
+        positionsVerified: true,
+        openOrdersVerified: true,
+        positions: [{ positionOrderId: "P-partial", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", quantity: 1, orderPrice: 100 }],
+        openOrders: [
+          { orderId: "O-cancel", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 2, filledQuantity: 1, remainingQuantity: 1 },
+          { orderId: "O-keep", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 1, filledQuantity: 0, remainingQuantity: 1 },
+        ],
+      };
+      const events = [];
+      try {
+        await runMonitoringCycle(task.id, {
+          runtime: {
+            openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
+            browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+            observeMarket: async () => market,
+            requestDecision: async (_provider, context) => {
+              assert.equal(context.account.positions.some((position) => position.positionOrderId === "P-partial"), true);
+              assert.equal(context.account.openOrders.some((order) => order.orderId === "O-cancel"), true);
+              return {
+                action,
+                targetSymbol: "BTC/USDT",
+                orderAssessments: [
+                  { orderId: "O-cancel", decision: "CANCEL", reason: "等待不如释放保证金" },
+                  { orderId: "O-keep", decision: "KEEP", reason: "仍有成交优势" },
+                ],
+                bullishProfitProbability: action === "BUY" ? 0.6 : 0.3,
+                bearishProfitProbability: action === "SELL" ? 0.6 : 0.3,
+                profitProbability: 0.6,
+                evidenceIds: [context.evidenceIds[0]],
+                riskFlags: [],
+              };
+            },
+            cancelOpenOrders: async ({ orderIds }) => {
+              events.push(["cancel", ...orderIds]);
+              assert.deepEqual(orderIds, ["O-cancel"]);
+              return { ok: true, results: [{ orderId: "O-cancel", cancelled: true }] };
+            },
+            fillSuggestionForm: async (input) => {
+              events.push(["fill", input.action]);
+              assert.equal(input.action, action);
+              return { ok: true, filled: true, submitted: false };
+            },
+            submitSuggestionForm: async (input) => {
+              events.push(["submit", input.action]);
+              assert.equal(input.action, action);
+              return { ok: true, filled: true, submitted: true };
+            },
+          },
+        });
+        assert.deepEqual(events, autoDecisionEnabled ? [["cancel", "O-cancel"], ["submit", action]] : [["cancel", "O-cancel"], ["fill", action]]);
+        assert.equal(task.market.account.positions.some((position) => position.positionOrderId === "P-partial"), true);
+        assert.equal(task.pendingAction.action, action);
+        assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
+      } finally {
+        state.tasks = state.tasks.filter((item) => item.id !== task.id);
+      }
+    });
+  }
+}
+
 for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
   for (const autoDecisionEnabled of [false, true]) {
     test(`${apiFormat}格式失败后恢复入场、离场、撤单，保留${autoDecisionEnabled ? "自动" : "手动"}模式和历史订单`, async (t) => {
@@ -895,8 +963,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const exit_plans = market.account.positions.map(position => ({ position_id: position.positionOrderId, held_side: "LONG", quantity: position.quantity, valid_for_sec: 300, take_profit_price: 104, stop_loss_price: 100 }));
       const answers = [
         '{"action":"BUY",',
-        JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol, exit_plans }),
-        JSON.stringify({ action: "SELL", exit_type: "TAKE_PROFIT", target_position_ids: ["P-active"], target_symbol: task.symbol, bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, exit_plans }),
+        JSON.stringify({ action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, target_symbol: task.symbol, exit_plans, order_assessments: [{ order_id: "O-cancel", decision: "KEEP", reason: "entry thesis still valid" }] }),
+        JSON.stringify({ action: "SELL", exit_type: "TAKE_PROFIT", target_position_ids: ["P-active"], target_symbol: task.symbol, bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, exit_plans, order_assessments: [{ order_id: "O-cancel", decision: "KEEP", reason: "closing path does not require cancellation" }] }),
         JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.2, bearish_profit_probability: 0.2, cancel_order_ids: ["O-cancel"], exit_plans }),
       ];
       t.mock.method(globalThis, "fetch", async () => {

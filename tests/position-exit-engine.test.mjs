@@ -27,14 +27,108 @@ const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbo
 test("closing clears all three long/short positions and verifies actual flatness next observation", async () => {
   const f = setup("closing-three", [long("P1"), long("P2", 2), { ...long("P3"), side: "卖出" }]);
   f.market.account.openOrders = [{ orderId: "entry-old", orderKind: "订立", remainingQuantity: 1 }];
+  const scopes = [];
+  const runtime = { ...f.runtime, observeExecutionMarket: async (task, connector, options) => { scopes.push(options.accountScope); return f.runtime.observeExecutionMarket(task, connector, options); } };
   const now = Date.parse("2026-10-13T15:56:00+08:00");
-  await runPositionExitCycle(f.task.id, { runtime: f.runtime, now });
+  await runPositionExitCycle(f.task.id, { runtime, now });
+  assert.deepEqual(scopes, ["full", "full"], "closing must read all orders initially and again after cancellation");
   assert.deepEqual(f.cancelled, ["entry-old"]);
   assert.deepEqual(f.submitted.map(s => [s.action, s.targetPositionIds[0], s.quantity]), [["SELL", "P1", 1], ["SELL", "P2", 2], ["BUY", "P3", 1]]);
   assert.equal(f.task.sessionCloseState.status, "CLOSING");
-  await runPositionExitCycle(f.task.id, { runtime: f.runtime, now });
+  await runPositionExitCycle(f.task.id, { runtime, now });
+  assert.deepEqual(scopes, ["full", "full", "full"]);
   assert.equal(f.task.sessionCloseState.status, "FLAT_VERIFIED");
   assert.equal(f.submitted.length, 3);
+});
+
+for (const autoDecisionEnabled of [false, true]) {
+  for (const heldSide of ["LONG", "SHORT"]) {
+    for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
+      test(`${autoDecisionEnabled ? "automatic" : "manual"} entry mode executes ${heldSide} ${exitType} from verified positions without an order-table read`, async () => {
+        const f = setup(`positions-only-${autoDecisionEnabled}-${heldSide}-${exitType}`, [{ ...long("P1"), side: heldSide === "LONG" ? "买入" : "卖出" }], { autoDecisionEnabled });
+        const price = exitType === "TAKE_PROFIT" ? (heldSide === "LONG" ? 105 : 95) : (heldSide === "LONG" ? 99 : 101);
+        f.market.orderBook = { bids: [{ price: heldSide === "LONG" ? price : price - 1, volume: 100 }], asks: [{ price: heldSide === "LONG" ? price + 1 : price, volume: 100 }] };
+        f.market.account.openOrdersVerified = false;
+        f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide, quantity: 1, validForSec: 120,
+          takeProfitPrice: exitType === "TAKE_PROFIT" ? price : null, stopLossPrice: exitType === "STOP_LOSS" ? price : null }] }, f.market, f.task).plans;
+        const scopes = [];
+        await runPositionExitCycle(f.task.id, { runtime: { ...f.runtime,
+          observeExecutionMarket: async (task, connector, options) => { scopes.push(options.accountScope); return f.runtime.observeExecutionMarket(task, connector, options); },
+          cancelOpenOrders: async () => assert.fail("a position-only exit must not cancel unread orders"),
+        } });
+        assert.deepEqual(scopes, ["positions"]);
+        assert.equal(f.submitted.length, 1);
+        assert.equal(f.submitted[0].exitType, exitType);
+        assert.equal(f.submitted[0].action, heldSide === "LONG" ? "SELL" : "BUY");
+        assert.deepEqual(f.submitted[0].targetPositionIds, ["P1"]);
+      });
+    }
+  }
+}
+
+for (const unverifiedField of ["positionsVerified", "openOrdersVerified"]) {
+  test(`crossing into closing rereads full scope and cannot mark an empty ${unverifiedField} snapshot flat`, async () => {
+    const f = setup(`crossing-unverified-${unverifiedField}`, []);
+    const scopes = [];
+    const result = await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:54:59.950+08:00"), runtime: { ...f.runtime,
+      observeExecutionMarket: async (_task, _connector, options) => {
+        scopes.push(options.accountScope);
+        if (scopes.length === 1) {
+          await new Promise(resolve => setTimeout(resolve, 65));
+          return { ...f.market, account: { ...f.market.account, openOrdersVerified: false } };
+        }
+        return { ...f.market, account: { ...f.market.account, [unverifiedField]: false } };
+      },
+    } });
+    assert.deepEqual(scopes, ["positions", "full"]);
+    assert.equal(result.code, "ACCOUNT_UNVERIFIED");
+    assert.equal(f.task.exitMonitor.status, "ACCOUNT_UNVERIFIED");
+    assert.notEqual(f.task.sessionCloseState.status, "FLAT_VERIFIED");
+    assert.equal(f.task.sessionCloseState.remainingPositions, null);
+    assert.equal(f.submitted.length, 0);
+  });
+}
+
+test("manual WAITING skips a verified empty account without disturbing the entry form", async () => {
+  const f = setup("manual-waiting-flat", []);
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  const result = await runPositionExitCycle(f.task.id, { runtime: { ...f.runtime,
+    observeExecutionMarket: async () => assert.fail("verified flat manual entry must keep its form in place"),
+  } });
+  assert.equal(result.reason, "MANUAL_ENTRY_WAITING");
+  assert.equal(f.task.pendingAction.status, "WAITING");
+});
+
+for (const observation of ["unverified-market", "unverified-audit"]) {
+  test(`manual WAITING with ${observation} still reads and exits an existing holding`, async () => {
+    const f = setup(`manual-waiting-${observation}`, [long("P1")]);
+    f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105 }] }, f.market, f.task).plans;
+    f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+    const current = structuredClone(f.market);
+    if (observation === "unverified-market") f.market.account = { ...f.market.account, positionsVerified: false, positions: [] };
+    else f.task.lastPositionAudit = { positionsVerified: false, positions: [] };
+    let reads = 0;
+    await runPositionExitCycle(f.task.id, { runtime: { ...f.runtime,
+      observeExecutionMarket: async (_task, _connector, options) => { reads++; assert.equal(options.accountScope, "positions"); return current; },
+    } });
+    assert.equal(reads, 1);
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitType, "TAKE_PROFIT");
+    assert.deepEqual(f.submitted[0].targetPositionIds, ["P1"]);
+  });
+}
+
+test("closing never skips a manual WAITING form even when the last holdings snapshot was empty", async () => {
+  const f = setup("closing-manual-waiting-flat", []);
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  f.market.account.openOrders = [{ orderId: "entry-pending", orderKind: "订立", remainingQuantity: 1 }];
+  const scopes = [];
+  await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: { ...f.runtime,
+    observeExecutionMarket: async (task, connector, options) => { scopes.push(options.accountScope); return f.runtime.observeExecutionMarket(task, connector, options); },
+  } });
+  assert.deepEqual(scopes, ["full", "full"]);
+  assert.deepEqual(f.cancelled, ["entry-pending"]);
+  assert.equal(f.task.sessionCloseState.status, "FLAT_VERIFIED");
 });
 
 test("closing blocks both automatic entries and acknowledgements of stale manual entry forms", async () => {

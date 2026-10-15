@@ -3,7 +3,7 @@ import test, { after, before } from "node:test";
 import { chromium } from "playwright";
 import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSessionFactory } from "../server/browser.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
-import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
+import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
@@ -53,6 +53,23 @@ test("initial empty table waits for Haohan holdings query without a loading mask
   assert.equal(account.positionsVerified, true);
   assert.equal(account.positionEmpty, false);
   assert.equal(account.positions.length, 3);
+});
+
+test("positions-only reads use the live active tab without remounting current orders", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const tab = document.querySelector(".header_l_item");
+    tab.classList.add("s");
+    window.orderPaneCalls = [];
+    const original = window.orderPane;
+    window.orderPane = (name) => { window.orderPaneCalls.push(name); original(name); };
+  });
+  const snapshot = await readVisiblePage("trade-fixture", { inspectPositions: true, quick: true, accountScope: "positions" });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(await page.evaluate(() => window.orderPaneCalls), []);
+  const account = parseHaohanAccount(snapshot.visibleText, snapshot.tables);
+  assert.equal(account.positionsVerified, true);
+  assert.equal(account.openOrdersVerified, false);
 });
 
 test("empty current orders verify emptiness while loading orders stay unverified", async () => {
@@ -106,6 +123,7 @@ test("missing exact order never cancels an order with a similar ID", async () =>
 test("unfinished cancellation dialog is dismissed automatically and a later attempt can complete", async () => {
   await page.reload();
   await page.evaluate(() => {
+    document.querySelector("#history table").__vue__ = { pageData: { total: 0 }, isNetWrong: false };
     window.cancelObserver = new MutationObserver(() => {
       const box = document.querySelector(".el-dialog");
       if (!box || box.dataset.testDisabled) return;
@@ -129,6 +147,7 @@ test("silent cancellation is verified across historical-order pages", async () =
   await page.evaluate(() => {
     window.silentCancellation = true;
     const history = document.querySelector("#history");
+    history.querySelector("table").__vue__ = { pageData: { total: 1 }, isNetWrong: false };
     const pagination = document.createElement("div");
     pagination.className = "el-pagination";
     pagination.innerHTML = '<button class="btn-prev" disabled>previous</button><ul class="el-pager"><li class="number active">1</li><li class="number">2</li></ul><button class="btn-next">next</button>';
@@ -148,6 +167,103 @@ test("silent cancellation is verified across historical-order pages", async () =
   });
   const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
   assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+});
+
+test("historical-order verification waits for the query after its empty table mounts", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    window.silentCancellation = true;
+    const table = document.querySelector("#history table");
+    table.__vue__ = { pageData: { total: null }, isNetWrong: false };
+    const tab = [...document.querySelectorAll(".head_l_btns")].find((node) => node.textContent === "历史委托");
+    tab.onclick = () => {
+      orderPane("history");
+      const rows = [...table.querySelector("tbody").children];
+      table.querySelector("tbody").replaceChildren();
+      setTimeout(() => {
+        table.querySelector("tbody").append(...rows);
+        table.__vue__.pageData.total = rows.length;
+      }, 600);
+    };
+  });
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
+});
+
+test("cancellation history queries today when the website initially excludes today's orders", async () => {
+  await page.reload();
+  const dates = await page.evaluate(() => {
+    window.silentCancellation = true;
+    window.historyQueries = [];
+    const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const today = dateString(new Date());
+    const previousDay = new Date();
+    previousDay.setDate(previousDay.getDate() - 1);
+    const yesterday = dateString(previousDay);
+    const section = document.querySelector("#history");
+    const table = section.querySelector("table");
+    const root = document.createElement("div");
+    root.id = "hisPage";
+    root.innerHTML = '<div class="el-date-editor--daterange"><input placeholder="开始日期"><input placeholder="结束日期"></div><button>查询</button>';
+    section.append(root);
+    root.append(table);
+    for (const input of root.querySelectorAll("input")) input.value = yesterday;
+    table.__vue__ = { pageData: { total: 0 }, tableData: [], isNetWrong: false };
+    let rows = [];
+    const tab = [...document.querySelectorAll(".head_l_btns")].find((node) => node.textContent === "历史委托");
+    tab.onclick = () => {
+      orderPane("history");
+      rows = [...table.querySelector("tbody").children];
+      table.querySelector("tbody").replaceChildren();
+    };
+    root.querySelector("button").onclick = () => {
+      const range = [...root.querySelectorAll("input")].map((input) => input.value);
+      window.historyQueries.push(range);
+      setTimeout(() => {
+        const matching = range[0] <= today && range[1] >= today ? rows : [];
+        table.querySelector("tbody").replaceChildren(...matching);
+        table.__vue__.tableData = matching;
+        table.__vue__.pageData.total = matching.length;
+      }, 400);
+    };
+    return { today, yesterday };
+  });
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.historyQueries), [[dates.yesterday, dates.today]]);
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
+});
+
+test("cancellation waits for the result when confirmation closes before the request finishes", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    document.querySelector("#history table").__vue__ = { pageData: { total: 0 }, isNetWrong: false };
+    const original = window.cancelSelected;
+    window.cancelSelected = () => {
+      original();
+      const dialog = document.querySelector(".el-dialog");
+      const confirm = dialog.querySelector("button");
+      const complete = confirm.onclick;
+      confirm.onclick = () => {
+        dialog.remove();
+        setTimeout(complete, 700);
+      };
+    };
+  });
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
+});
+
+test("cancellation response matching accepts the production prefix and excludes other writes", () => {
+  const base = "https://smyw.haohandahan.cn";
+  assert.equal(isOrderCancellationResponse(`${base}/intraday-trade/trade/cancel`, "POST"), true);
+  assert.equal(isOrderCancellationResponse(`${base}/qtfront_tq/intraday-trade/trade/cancel`, "POST"), true);
+  assert.equal(isOrderCancellationResponse(`${base}/qtfront_tq/intraday-trade/trade/cancelAll`, "POST"), false);
+  assert.equal(isOrderCancellationResponse(`${base}/qtfront_tq/intraday-trade/trade/make`, "POST"), false);
+  assert.equal(isOrderCancellationResponse(`${base}/qtfront_tq/intraday-trade/trade/cancel`, "GET"), false);
+  assert.equal(isOrderCancellationResponse("https://other.example/intraday-trade/trade/cancel", "POST"), false);
 });
 
 test("current-order pagination collects every page and locates cancellation by ID", async () => {

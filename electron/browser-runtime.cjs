@@ -80,7 +80,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     try {
       if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(message.method)) {
         const task = { ...input.task, target: { ...input.task?.target, browserSessionId: sessionId } };
-        const result = await market[message.method](task, input.connector, { withBrowser });
+        const result = await market[message.method](task, input.connector, { ...(message.options || {}), withBrowser });
         signal.throwIfAborted();
         // The public session ID stays stable across desktop installs and reconnects.
         if (result.sessionId) result.sessionId = input.task?.target?.browserSessionId || `task:${input.task?.id}`;

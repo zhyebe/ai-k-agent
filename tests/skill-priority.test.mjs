@@ -33,6 +33,8 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /5 根只是示例，不是盈利目标或持仓上限/);
   assert.match(content, /疑似闪 K 及其瞬时显示价格不纳入方向、概率/);
   assert.match(content, /不能仅凭一次剧烈波动就认定假 K/);
+  assert.match(content, /趋势向上且买涨可执行就本轮返回 BUY/);
+  assert.doesNotMatch(content, /具体阻断证据|下次可行动条件/);
   const evidence = approvedKnowledgeForAnalysis([
     { id: "other", title: "其他经验", status: "APPROVED", version: "v2", content: "保留其他经验全文", updatedAt: "2026-10-15" },
     { id: "dgkz-dgjj", title: "DGKZ / DGJJ 入场离场分析", status: "APPROVED", version: "v1", content, tags: [PRIORITY_SKILL_TAG], updatedAt: "2026-10-14" },

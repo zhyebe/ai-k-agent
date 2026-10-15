@@ -2108,6 +2108,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
     task.decision.positionAudit = { observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true, positions: updatePositionTracking(task, market), holdingPlan: decision.holdingPlan || null };
     appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "positions", message: market.account?.positionsVerified === true ? `持仓已核实：${openPositionCount(market)} 笔；AI ${decision.holdingPlan?.decision || "UNKNOWN"}；有效条件离场计划 ${(task.exitPlans || []).length} 个` : "持仓尚未核实，禁止将缺失数据认定为空仓", data: task.decision.positionAudit });
+    if (decision.orderAssessmentMissingIds?.length) appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "order", message: `AI 本轮尚未评估 ${decision.orderAssessmentMissingIds.length} 笔委托，下轮继续逐笔评估；本轮已明确动作继续执行`, data: { orderIds: decision.orderAssessmentMissingIds } });
     const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && item.jsonStatus !== "COMPLETE_JSON");
     if (modelFailure) task.lastModelFailure = {
       runId: run.id, providerId: provider?.id || task.providerId || "", createdAt: task.decision.createdAt,
@@ -2383,20 +2384,45 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     const connector = getConnector(task.target.connectorId);
     const observationStartedAt = Date.now();
     const currentTime = () => now + Date.now() - observationStartedAt;
-    let market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal });
+    const firstClosingWindow = sessionCloseWindow(task, currentTime());
+    const waitingManualEntry = task.pendingAction?.status === "WAITING"
+      && !task.pendingAction.exitType && task.autoDecisionEnabled !== true;
+    const latestAccount = task.lastPositionAudit?.positionsVerified === true
+      && new Date(task.lastPositionAudit.observedAt).getTime() >= new Date(task.market?.observedAt || 0).getTime()
+      ? task.lastPositionAudit : task.market?.account;
+    // A manual entry form is waiting for the user's one click. Do not switch
+    // the browser to the holdings tab while no existing position needs exit
+    // monitoring; the target page keeps its own live data updated.
+    if (!firstClosingWindow.active && waitingManualEntry && latestAccount?.positionsVerified === true
+      && Array.isArray(latestAccount.positions) && !latestAccount.positions.some(position => Number(position.quantity) > 0)) {
+      return { skipped: true, reason: "MANUAL_ENTRY_WAITING" };
+    }
+    let market = await runtime.observeExecutionMarket(task, connector, {
+      signal: exitAbort.signal,
+      accountScope: firstClosingWindow.active ? "full" : "positions",
+    });
     assertCurrent();
     task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
     if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
     if (actionPhaseLocks.has(taskId) || pendingConfirmLocks.has(taskId)) return { skipped: true };
     let closing = sessionCloseWindow(task, currentTime());
+    // The observation can straddle the daily closing boundary. Read orders
+    // before assessing that boundary, without treating an omitted table as empty.
+    if (closing.active && !firstClosingWindow.active) {
+      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope: "full" });
+      assertCurrent();
+      if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
+      closing = sessionCloseWindow(task, currentTime());
+    }
     reconcilePendingPosition(task, market);
     task.lastPositionAudit = {
       observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true,
       positions: (market.account?.positions || []).map(p => ({ positionId: p.positionOrderId, symbol: p.symbol, symbolName: p.symbolName, side: heldDirection(p), quantity: p.quantity, entryPrice: p.orderPrice, frozenQuantity: p.frozenQuantity })),
-      openOrdersVerified: market.account?.openOrdersVerified === true, openOrderCount: market.account?.openOrders?.length || 0,
+      openOrdersVerified: market.account?.openOrdersVerified === true,
+      openOrderCount: market.account?.openOrdersVerified === true ? market.account.openOrders?.length || 0 : null,
       observationDurationMs: Date.now() - observationStartedAt,
     };
-    if (market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {
+    if (market.account?.positionsVerified !== true || (closing.active && market.account?.openOrdersVerified !== true)) {
       task.exitMonitor = { status: "ACCOUNT_UNVERIFIED", checkedAt: new Date().toISOString(), message: "持仓或委托未核实，不能认定空仓或执行离场" };
       if (closing.active) task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: closing.overdue ? "OVERDUE" : "CLOSING", remainingPositions: null, checkedAt: market.observedAt };
       persistTask(task);
@@ -2419,7 +2445,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
         if (pending.entrustedOrderIds?.length && pending.entrustedOrderIds.every(id => cancelledIds.has(id))) pending.status = "CANCELLED";
       }
       task.unsettledActions = (task.unsettledActions || []).filter(p => p.status !== "CANCELLED");
-      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal });
+      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope: "full" });
       assertCurrent();
       closing = sessionCloseWindow(task, currentTime());
       if (!market.ok || market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {

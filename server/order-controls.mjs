@@ -159,7 +159,38 @@ export async function clickOrderCancellation(page, orderId) {
 
 export async function readHistoricalOrderStatus(page, orderId) {
   if (!await activateTradeControl(page, "历史委托")) return "";
-  await page.waitForFunction(() => [...document.querySelectorAll("th")].some((node) => node.textContent.trim() === "委托单号" && node.getBoundingClientRect().height > 0), null, { timeout: 1500 }).catch(() => {});
+  if (!await waitForAccountTable(page, "委托单号")) return "";
+  const history = page.locator("#hisPage:visible");
+  if (await history.count()) {
+    // Haohan's history defaults to yesterday. Query today's orders through its
+    // visible date fields, including when a prior query preceded cancellation.
+    const today = await page.evaluate(() => {
+      const date = new Date();
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    });
+    const start = history.locator(".el-date-editor--daterange input[placeholder='开始日期']");
+    const end = history.locator(".el-date-editor--daterange input[placeholder='结束日期']");
+    const startDate = await start.inputValue();
+    await end.fill(today);
+    await end.press("Tab");
+    await end.press("Escape");
+    if (await start.inputValue() !== startDate || await end.inputValue() !== today) return "";
+    const queryState = await history.locator(".el-table, table").first().evaluateHandle((table) => {
+      let owner = table.__vue__;
+      while (owner && !owner.pageData) owner = owner.$parent;
+      return { owner, rows: owner?.tableData };
+    });
+    try {
+      await history.getByRole("button", { name: "查询", exact: true }).click({ timeout: 5000 });
+      // A refresh keeps the old total. Wait for this query's new data before
+      // reading rows, rather than accepting the preceding empty result.
+      await page.waitForFunction((state) => state.owner?.tableData !== state.rows
+        && state.owner?.pageData?.total != null && state.owner.isNetWrong !== true, queryState, { timeout: 8000 });
+    } finally {
+      await queryState.dispose();
+    }
+    if (!await waitForAccountTable(page, "委托单号")) return "";
+  }
   const row = await findOrderOnAllPages(page, orderId);
   if (!row) return "";
   return row.evaluate((node) => {

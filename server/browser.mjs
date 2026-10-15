@@ -469,11 +469,11 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
   }
 }
 
-export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false } = {}) {
+export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false, accountScope = "full" } = {}) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
-    const orderTables = inspectPositions ? await collectCurrentOrderTables(session.page, collectTables) : [];
+    const orderTables = inspectPositions && accountScope !== "positions" ? await collectCurrentOrderTables(session.page, collectTables) : [];
     const positionTables = inspectPositions ? await collectPositionTables(session.page, collectTables) : [];
     const raw = await session.page.evaluate(() => ({
       url: location.href,

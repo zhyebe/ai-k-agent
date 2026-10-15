@@ -47,12 +47,13 @@ test("execution quote monitoring routes to an exit-capable desktop and rejects a
   attachDesktopAiSocket("owner", older);
   older.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
   const task = { id: "t", symbol: "DGKZ", exitObservationIndex: [{ positionOrderId: "P-1" }] };
-  const operation = callBrowserMethod("observeExecutionMarket", "owner", { task });
+  const operation = callBrowserMethod("observeExecutionMarket", "owner", { task }, { accountScope: "full" });
   await Promise.resolve();
   const message = capable.sent[0];
   assert.equal(message.type, "browser.call");
   assert.equal(message.method, "observeExecutionMarket");
   assert.deepEqual(message.input.task.exitObservationIndex, task.exitObservationIndex);
+  assert.equal(message.options.accountScope, "full");
   assert.equal(older.sent.length, 0);
   const result = { ok: true, observedAt: "2026-10-14T07:00:00Z", positionsVerified: true };
   capable.emit("message", JSON.stringify({ type: "browser.result", id: message.id, ok: true, result }));
