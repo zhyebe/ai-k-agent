@@ -347,6 +347,7 @@ export interface Task {
   automationAuthorized?: boolean;
   autoDecisionEnabled?: boolean;
   sessionClose?: { time: string; leadMinutes: number; timezone: "Asia/Shanghai" };
+  tradingSession?: TradingSession;
   sessionCloseState?: { date: string; closesAt: string; status: string; remainingPositions: number | null; remainingOrders?: number; checkedAt: string } | null;
   exitMonitor?: { status: string; checkedAt: string; message: string } | null;
   exitPlans?: Array<{ positionId: string; heldSide: "LONG" | "SHORT"; quantity: number; takeProfitPrice: number | null; stopLossPrice: number | null; expiresAt: string; status: string }>;
@@ -543,5 +544,4 @@ export interface Workspace {
   health?: { db: string; dbAvailable: boolean; persistentSecret: boolean };
   rag?: { indexedChunks: number; mode: string; vectorProvider: string };
   auth?: { type: "user" | "admin"; user?: WorkspaceUser; username?: string } | null;
-  tradingSession?: TradingSession;
 }

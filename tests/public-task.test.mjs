@@ -31,3 +31,14 @@ test("publicTask keeps ticks and latest objects so desktop workspace can render"
   assert.deepEqual(task.decision.evidenceIds, []);
   assert.equal(task.metrics.dayPnlPct, 0);
 });
+
+test("public task keeps the saved open window separate from the daily close field", () => {
+  const opensAt = new Date(Date.parse("2026-10-20T18:30:00+08:00")).toISOString();
+  const closesAt = new Date(Date.parse("2026-10-21T16:00:00+08:00")).toISOString();
+  const task = publicTask({
+    sessionClose: { time: "15:30", leadMinutes: 8, timezone: "Asia/Shanghai" },
+    tradingSession: { opensAt: "2026-10-20T18:30", closesAt: "2026-10-21T16:00" },
+  });
+  assert.deepEqual(task.sessionClose, { time: "15:30", leadMinutes: 8, timezone: "Asia/Shanghai" });
+  assert.deepEqual(task.tradingSession, { opensAt, closesAt });
+});

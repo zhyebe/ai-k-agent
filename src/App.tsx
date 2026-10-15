@@ -78,7 +78,6 @@ import {
   setLocalProviderId,
   startTask,
   stopTask,
-  saveTradingSession,
   syncProviderModels,
   testConnector,
   testProvider,
@@ -88,7 +87,7 @@ import {
   userLogout,
   userSession,
 } from "./lib/api";
-import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, TradingSession, ViewKey, Workspace, WorkspaceUser } from "./types";
+import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
 import { BusyIcon, DataSkeleton, LoadError, LoadingStatus } from "./components/Loading";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
@@ -965,18 +964,6 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
     });
   }
 
-  async function handleTradingSessionSave(payload: { opensAt: string; closesAt: string }) {
-    await withBusy("trading-session", async () => {
-      try {
-        const tradingSession = await saveTradingSession(payload);
-        setWorkspace((current) => ({ ...current, tradingSession }));
-        notify("开盘时段已生效");
-      } catch (error) {
-        notify(error instanceof Error ? error.message : "保存失败");
-      }
-    });
-  }
-
   async function handleTaskCreate(payload: Record<string, unknown>) {
     await withBusy("task-create", async () => {
       try {
@@ -1079,7 +1066,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
           {view === "console" && (task ? <ConsoleView task={task} currentProviderId={currentProviderId} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
-          {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} tradingSession={workspace.tradingSession} onSaveTradingSession={handleTradingSessionSave} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <><TradingSessionPanel session={workspace.tradingSession} busy={busyAction !== null} saving={busyAction === "trading-session"} onSave={handleTradingSessionSave} /><EmptyTaskState onCreate={() => setModal("task")} /></>)}
+          {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
           {view === "connectors" && <ConnectorsView task={task} currentProviderId={currentProviderId} providers={workspace.providers} onConnectorTest={handleConnectorTest} onConnectorDiscover={handleConnectorDiscover} onProviderCreate={() => { setEditingProvider(null); setModal("provider"); }} onProviderEdit={(provider) => { setEditingProvider(provider); setModal("provider"); }} onProviderTest={handleProviderTest} onProviderModels={handleProviderModels} onProviderDelete={handleProviderDelete} onSelectProvider={handleSelectProvider} onCreateTask={() => setModal("task")} busyAction={busyAction} />}
           {view === "runs" && <RunsView runs={workspace.runs} agentRuns={workspace.agentRuns || []} orders={workspace.orders || []} />}
@@ -1420,26 +1407,19 @@ function shanghaiInputValue(iso?: string) {
   return Number.isNaN(shifted.getTime()) ? "" : shifted.toISOString().slice(0, 16);
 }
 
-function TradingSessionPanel({ session, busy, saving, onSave }: { session?: TradingSession; busy: boolean; saving: boolean; onSave: (payload: { opensAt: string; closesAt: string }) => Promise<void> }) {
-  const [opensAt, setOpensAt] = useState(shanghaiInputValue(session?.opensAt));
-  const [closesAt, setClosesAt] = useState(shanghaiInputValue(session?.closesAt));
-  useEffect(() => {
-    setOpensAt(shanghaiInputValue(session?.opensAt));
-    setClosesAt(shanghaiInputValue(session?.closesAt));
-  }, [session?.opensAt, session?.closesAt]);
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!opensAt || !closesAt || closesAt <= opensAt) return;
-    void onSave({ opensAt, closesAt });
-  }
-  return <section className="panel trading-session-panel"><form className="trading-session-form" onSubmit={submit}><div><div className="panel-kicker"><Clock3 size={14} />开盘时段</div><h2>开盘与停盘</h2></div><label>开盘时间<input type="datetime-local" aria-label="开盘时间" required step={60} value={opensAt} disabled={busy} onChange={(event) => setOpensAt(event.target.value)} /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" required step={60} value={closesAt} disabled={busy} onChange={(event) => setClosesAt(event.target.value)} /></label><button type="submit" className="button button-primary" disabled={busy || !opensAt || !closesAt || closesAt <= opensAt}><BusyIcon busy={saving}><Check size={14} /></BusyIcon>{saving ? "保存中" : "保存并生效"}</button></form><p>北京时间，精确到分钟。未保存时每天 18:30 开盘、次日 16:00 停盘。保存后按所选日期时间立即对所有任务生效；不在此时段点击监控或分析会提示不能使用。</p></section>;
+function defaultSessionInputs(now = Date.now()) {
+  const today = new Date(now + 8 * 3600000).toISOString().slice(0, 10);
+  const openDay = now < Date.parse(`${today}T16:00:00+08:00`)
+    ? new Date(Date.parse(`${today}T00:00:00+08:00`) - 86400000 + 8 * 3600000).toISOString().slice(0, 10)
+    : today;
+  const closeDay = new Date(Date.parse(`${openDay}T00:00:00+08:00`) + 86400000 + 8 * 3600000).toISOString().slice(0, 10);
+  return { opensAt: `${openDay}T18:30`, closesAt: `${closeDay}T16:00` };
 }
 
-function WorkflowsView({ tasks, task, tradingSession, onSaveTradingSession, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; tradingSession?: TradingSession; onSaveTradingSession: (payload: { opensAt: string; closesAt: string }) => Promise<void>; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
+function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
   const isRunning = taskIsMonitoring(task);
   return <>
     <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />我的任务</div><h1>任务管理</h1><p>当前账号自行创建、切换、编辑和删除任务，其他账号无法访问。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
-    <TradingSessionPanel session={tradingSession} busy={busyAction !== null} saving={busyAction === "trading-session"} onSave={onSaveTradingSession} />
     <div className="task-management-grid">
       <section className="panel task-list-panel">
         <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />任务列表</div><h2>{tasks.length} 个任务</h2></div></div>
@@ -1518,21 +1498,23 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
   const [entryQuantity, setEntryQuantity] = useState(String(task.entryQuantity ?? 1));
   const [closeTime, setCloseTime] = useState(task.sessionClose?.time || "16:00");
   const [closeLeadMinutes, setCloseLeadMinutes] = useState(String(task.sessionClose?.leadMinutes ?? 5));
+  const [opensAt, setOpensAt] = useState(shanghaiInputValue(task.tradingSession?.opensAt) || defaultSessionInputs().opensAt);
+  const [closesAt, setClosesAt] = useState(shanghaiInputValue(task.tradingSession?.closesAt) || defaultSessionInputs().closesAt);
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (lock.current || !name.trim() || !symbol.trim() || !Number.isSafeInteger(Number(entryQuantity)) || Number(entryQuantity) < 1) return;
+    if (lock.current || !name.trim() || !symbol.trim() || !Number.isSafeInteger(Number(entryQuantity)) || Number(entryQuantity) < 1 || !opensAt || !closesAt || closesAt <= opensAt) return;
     lock.current = true;
     setBusy(true);
     try {
-      await onSave({ name, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), sessionClose: { time: closeTime, leadMinutes: Number(closeLeadMinutes), timezone: "Asia/Shanghai" } });
+      await onSave({ name, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), sessionClose: { time: closeTime, leadMinutes: Number(closeLeadMinutes), timezone: "Asia/Shanghai" }, tradingSession: { opensAt, closesAt } });
     } catch {
       lock.current = false;
       setBusy(false);
     }
   }
-  return <ModalShell title="编辑任务" subtitle="修改任务名称和分析参数。运行中的任务请先停止后再编辑。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label><div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label><div className="form-row"><label>每日收盘（北京时间）<input type="time" required value={closeTime} onChange={(event) => setCloseTime(event.target.value)} disabled={busy} /></label><label>提前清仓（分钟）<input type="number" min="1" step="1" required value={closeLeadMinutes} onChange={(event) => setCloseLeadMinutes(event.target.value)} disabled={busy} /></label></div><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div></form></ModalShell>;
+  return <ModalShell title="编辑任务" subtitle="修改任务名称和分析参数。运行中的任务请先停止后再编辑。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label><div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div><label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label><div className="form-row"><label>每日收盘（北京时间）<input type="time" required value={closeTime} onChange={(event) => setCloseTime(event.target.value)} disabled={busy} /></label><label>提前清仓（分钟）<input type="number" min="1" step="1" required value={closeLeadMinutes} onChange={(event) => setCloseLeadMinutes(event.target.value)} disabled={busy} /></label></div><div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" required step={60} value={opensAt} onChange={(event) => setOpensAt(event.target.value)} disabled={busy} /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" required step={60} value={closesAt} onChange={(event) => setClosesAt(event.target.value)} disabled={busy} /></label></div><label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div></form></ModalShell>;
 }
 
 function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void>; savedCredentials?: SavedCredential[] }) {
@@ -1554,17 +1536,20 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   const [entryQuantity, setEntryQuantity] = useState("1");
   const [closeTime, setCloseTime] = useState("16:00");
   const [closeLeadMinutes, setCloseLeadMinutes] = useState("5");
+  const initialSession = defaultSessionInputs();
+  const [opensAt, setOpensAt] = useState(initialSession.opensAt);
+  const [closesAt, setClosesAt] = useState(initialSession.closesAt);
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
   const saved = savedCredentialForTarget(savedCredentials, targetType, url, installPath);
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (lock.current || !Number.isSafeInteger(Number(entryQuantity)) || Number(entryQuantity) < 1) return;
+    if (lock.current || !Number.isSafeInteger(Number(entryQuantity)) || Number(entryQuantity) < 1 || !opensAt || !closesAt || closesAt <= opensAt) return;
     if (!saved && (!username.trim() || !password)) return;
     lock.current = true;
     setBusy(true);
     try {
-      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), sessionClose: { time: closeTime, leadMinutes: Number(closeLeadMinutes), timezone: "Asia/Shanghai" }, analysisName, analysisUrl, analysisUsername, analysisPassword });
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), sessionClose: { time: closeTime, leadMinutes: Number(closeLeadMinutes), timezone: "Asia/Shanghai" }, tradingSession: { opensAt, closesAt }, analysisName, analysisUrl, analysisUsername, analysisPassword });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1579,7 +1564,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
           <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
         </div>
         <label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>
-        <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label><div className="form-row"><label>每日收盘（北京时间）<input type="time" required value={closeTime} onChange={(event) => setCloseTime(event.target.value)} disabled={busy} /></label><label>提前清仓（分钟）<input type="number" min="1" step="1" required value={closeLeadMinutes} onChange={(event) => setCloseLeadMinutes(event.target.value)} disabled={busy} /></label></div>
+        <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label><div className="form-row"><label>每日收盘（北京时间）<input type="time" required value={closeTime} onChange={(event) => setCloseTime(event.target.value)} disabled={busy} /></label><label>提前清仓（分钟）<input type="number" min="1" step="1" required value={closeLeadMinutes} onChange={(event) => setCloseLeadMinutes(event.target.value)} disabled={busy} /></label></div><div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" required step={60} value={opensAt} onChange={(event) => setOpensAt(event.target.value)} disabled={busy} /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" required step={60} value={closesAt} onChange={(event) => setClosesAt(event.target.value)} disabled={busy} /></label></div>
         {targetType === "website"
           ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label>
           : <><label>App 安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}

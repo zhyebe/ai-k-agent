@@ -6,11 +6,11 @@ import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
 import { DEFAULT_ENTRY_QUANTITY, parseEntryQuantity } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
-import { assertTradingSessionOpen, tradingSessionFromEnv, parseTradingSession } from "./trading-session.mjs";
+import { assertTradingSessionOpen, parseTradingSession, tradingSessionFromEnv } from "./trading-session.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
 import { searchKnowledge, getRagStats, indexSkill, removeSkill } from "./rag.mjs";
 import { discoverConnector, listConnectorAdapters } from "./connectors.mjs";
-import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, persistTradingSession, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
+import { addEvent, collapseDuplicateProviders, findOwnedProviderMatch, findProviderForUser, getAgentOutput, getAgentRuns, getTask, hydrateState, persistConnector, persistDeletedConnector, persistDeletedProvider, persistDeletedSkill, persistDeletedTask, persistProvider, persistSkill, persistTask, publicConnector, publicProviderList, publicSkill, publicState, publicTask, setPersistence, state, subscribeState } from "./store.mjs";
 import { autoJudge, cancelPendingAction, claimManual, confirmPendingAction, runAnalysis, setAutoDecision, setTaskMarketSelection, setTaskMode, setTaskProvider, startController, startTask, stopAllControllers, stopController, stopTask, takeoverPendingAction } from "./engine.mjs";
 import { callBrowserMethod } from "./desktop-browser.mjs";
 import { hasPersistentSecret } from "./crypto.mjs";
@@ -46,9 +46,6 @@ try {
   restoredState = null;
 }
 hydrateState(restoredState);
-if (!state.tradingSession && (process.env.DB_MODE || "memory") === "memory") {
-  state.tradingSession = tradingSessionFromEnv();
-}
 const restoredCredentials = await persistence.loadCredentials?.().catch(() => []);
 await initVault({ persistedRecords: restoredCredentials });
 setVaultPersistence(persistence);
@@ -574,26 +571,11 @@ app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAcc
   try { socket.send(JSON.stringify({ type: "ai.ready" })); } catch {}
 });
 
-app.put("/api/trading-session", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
-  const tradingSession = parseTradingSession(request.body);
-  if (!tradingSession) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
-  const previous = state.tradingSession;
-  state.tradingSession = tradingSession;
-  try {
-    await persistTradingSession(tradingSession);
-  } catch {
-    state.tradingSession = previous;
-    return reply.code(503).send({ error: "TRADING_SESSION_SAVE_FAILED" });
-  }
-  addEvent("trading_session_updated", "开盘时段已更新，立即对所有任务生效", { userId: request.auth.user.id, opensAt: tradingSession.opensAt, closesAt: tradingSession.closesAt });
-  broadcast();
-  return { tradingSession };
-});
-
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
+  if (body.tradingSession !== undefined && !parseTradingSession(body.tradingSession)) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const targetType = body.targetType === "app" ? "app" : "website";
   const targetInput = { type: targetType, name: body.targetName, url: body.url, installPath: body.installPath, appId: body.appId };
@@ -640,6 +622,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
+    tradingSession: parseTradingSession(body.tradingSession),
     providerId: "",
     pendingAction: null,
     target: {
@@ -709,10 +692,12 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
   }
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
+  if (body.tradingSession !== undefined && !parseTradingSession(body.tradingSession)) return reply.code(400).send({ error: "停盘时间必须晚于开盘时间" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
-  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, updatedAt: task.updatedAt };
+  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt };
   if (body.entryQuantity !== undefined) task.entryQuantity = parseEntryQuantity(body.entryQuantity);
   if (body.sessionClose !== undefined) task.sessionClose = parseSessionClose(body.sessionClose);
+  if (body.tradingSession !== undefined) task.tradingSession = parseTradingSession(body.tradingSession);
   task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
   task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;
@@ -747,11 +732,13 @@ app.delete("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reque
 
 app.post("/api/tasks/:taskId/start", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
-    assertTradingSessionOpen(state.tradingSession);
+    const task = getTask(request.params.taskId);
+    if (!task) throw new Error("TASK_NOT_FOUND");
+    assertTradingSessionOpen(parseTradingSession(task.tradingSession) || tradingSessionFromEnv());
     if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
-    const task = startTask(request.params.taskId);
+    const started = startTask(request.params.taskId);
     broadcast();
-    return { task: publicTask(task) };
+    return { task: publicTask(started) };
   } catch (error) { return reply.code(400).send({ error: error.message }); }
 });
 app.post("/api/tasks/:taskId/stop", { preHandler: requireTaskAccess }, async (request, reply) => {
@@ -815,7 +802,9 @@ app.post("/api/tasks/:taskId/pending-action/takeover", { preHandler: requireTask
 });
 app.post("/api/tasks/:taskId/analyze", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
-    assertTradingSessionOpen(state.tradingSession);
+    const task = getTask(request.params.taskId);
+    if (!task) throw new Error("TASK_NOT_FOUND");
+    assertTradingSessionOpen(parseTradingSession(task.tradingSession) || tradingSessionFromEnv());
     if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const result = await runAnalysis(request.params.taskId, request.body?.providerId || getTask(request.params.taskId)?.providerId || "", { trigger: "manual", userId: request.auth.user.id });
     broadcast();

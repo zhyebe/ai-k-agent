@@ -248,10 +248,6 @@ export async function updateTask(taskId: string, payload: Record<string, unknown
   return (await request<{ task: Task }>(`/api/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify(payload) })).task;
 }
 
-export async function saveTradingSession(payload: { opensAt: string; closesAt: string }) {
-  return (await request<{ tradingSession: { opensAt: string; closesAt: string } }>("/api/trading-session", { method: "PUT", body: JSON.stringify(payload) })).tradingSession;
-}
-
 export async function deleteTask(taskId: string) {
   return request<{ ok: boolean }>(`/api/tasks/${taskId}`, { method: "DELETE" });
 }
