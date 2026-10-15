@@ -11,7 +11,7 @@ import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } 
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
-import { evaluateExitPlan, executableExitQuote, heldDirection, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
+import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -297,6 +297,13 @@ export function attachPositionExit(decision, market = {}) {
   const wrongDirection = matched.some((item) => closingActionForPositions([item]) !== decision.action);
   if (wrongDirection) return fail("EXIT_DIRECTION_MISMATCH");
   const primary = matched[0];
+  if (decision.exitType === "TAKE_PROFIT" && market.account?.positionsVerified === true) {
+    const unverifiedProfit = matched.some((position) => {
+      const quote = executableExitQuote(market, position, Date.now());
+      return !quote || !isProfitableExit(position, quote.price);
+    });
+    if (unverifiedProfit) return fail("EXIT_PROFIT_NOT_VERIFIED");
+  }
   const targeted = {
     ...decision,
     targetPositionIds: matched.every((item) => String(item.positionOrderId || "").trim())
@@ -324,7 +331,7 @@ export function profitSignalTier(value) {
 }
 
 export function profitSignalLabel(tier) {
-  return ({ EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示" })[tier] || "观望";
+  return ({ AI_RECOGNITION: "AI 趋势决策", EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示" })[tier] || "观望";
 }
 
 function profitProbabilityLabel(value) {
@@ -350,14 +357,17 @@ function chosenSideProbability(decision) {
 }
 
 function signalTierForDecision(decision) {
-  return profitSignalTier(chosenSideProbability(decision));
+  return ["BUY", "SELL"].includes(decision?.action) ? "AI_RECOGNITION" : "HOLD";
 }
 
 export function meetsOrderBoundary(decision) {
   if (decision?.exitType === "SCHEDULED_CLOSE") return true;
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
   if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
-  return chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
+  // AI owns directional recognition. Probabilities remain required, normalized
+  // evidence, but a fixed percentage must not turn an AI BUY/SELL into HOLD.
+  return decision.directionalProbabilitiesComplete !== false
+    && hasDirectionalProbabilities(decision);
 }
 
 export function applyEntryBoundary(decision, market = {}) {
@@ -372,7 +382,7 @@ export function applyEntryBoundary(decision, market = {}) {
 export function enforceProfitProbability(decision) {
   const next = {
     ...decision,
-    directionalProbabilitiesComplete: hasDirectionalProbabilities(decision),
+    directionalProbabilitiesComplete: decision?.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision),
     profitProbability: normalizeUnitProbability(decision?.profitProbability),
     bullishProfitProbability: normalizeUnitProbability(decision?.bullishProfitProbability),
     bearishProfitProbability: normalizeUnitProbability(decision?.bearishProfitProbability),
@@ -381,7 +391,7 @@ export function enforceProfitProbability(decision) {
   if (meetsOrderBoundary(next)) {
     next.riskFlags = (next.riskFlags || []).filter((flag) => flag !== "LOW_PROFIT_PROBABILITY");
   } else if (next.action === "BUY" || next.action === "SELL") {
-    next.riskFlags = [...new Set([...(next.riskFlags || []), "LOW_PROFIT_PROBABILITY"])];
+    next.riskFlags = [...new Set([...(next.riskFlags || []), "INCOMPLETE_DIRECTIONAL_PROBABILITIES"])];
   }
   return next;
 }
@@ -411,6 +421,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     takeProfitPrice: positivePrice(decision.takeProfitPrice),
     stopLossPrice: positivePrice(decision.stopLossPrice),
     profitProbability: decisionProbability,
+    directionalProbabilitiesComplete: decision.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision),
     bullishProfitProbability: Number(decision.bullishProfitProbability || 0),
     bearishProfitProbability: Number(decision.bearishProfitProbability || 0),
     signalTier,
@@ -766,7 +777,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (isLiveTask(task) && !task.pendingAction.exitType && sessionCloseWindow(task).active) throw new Error("SESSION_CLOSING_NO_ENTRY");
-  if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("BELOW_ENTRY_THRESHOLD");
+  if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("INCOMPLETE_DIRECTIONAL_PROBABILITIES");
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
@@ -1248,6 +1259,9 @@ export function startTask(taskId) {
   task.lastObservedFingerprint = "";
   task.lastAnalyzedFingerprint = "";
   task.lastAnalysisSucceeded = false;
+  // A new monitoring lifecycle must analyze existing holdings before arming exits.
+  task.exitPlans = [];
+  task.positionTracking = {};
   task.nextPollAt = null;
   task.monitoringRound = Number(task.monitoringRound || 0);
   transitionWorkflow(task, "connect", "启动检查通过，准备连接目标");
@@ -2112,7 +2126,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const blocked = task.rules.some((rule) => rule.status === "pending" && rule.mode === "BLOCK");
     const reviewRequired = task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
     // Rule results remain visible evidence, but they do not replace the AI's directional decision.
-    // LIVE entry requires the selected-side probability boundary; AI exits do not.
+    // LIVE entries follow the AI action with complete direction fields; exits target existing positions.
     const liveExecution = isLiveTask(task);
     const rulePaused = liveExecution ? false : blocked || reviewRequired || automaticRuleFailures.length > 0;
     let route = "SUGGESTION_PENDING";
@@ -2226,7 +2240,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         skipped: true,
         reason: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
         route,
-        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : conditionalExitOnly ? "EXIT_CONDITION_MONITORING" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "BELOW_ENTRY_THRESHOLD",
+        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : conditionalExitOnly ? "EXIT_CONDITION_MONITORING" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
@@ -2260,7 +2274,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
-          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? `模型建议已保留，所选方向获利概率未达${MIN_PROFIT_PROBABILITY * 100}%的入场边界` : "已记录受控动作";
+          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
       const boundaryMessage = conditionalExitOnly ? (task.exitPlans?.length ? "AI 离场条件已交给独立行情监控，满足条件即执行" : "AI 未提供有效离场条件，已请求下一轮补充；收盘清仓独立执行") : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });

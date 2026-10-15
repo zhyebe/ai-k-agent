@@ -32,6 +32,40 @@ function sameInstrument(a, b) {
   return values(b).some(v => av.includes(v));
 }
 
+function numericValue(...values) {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const number = Number(value);
+    if (Number.isFinite(number) && number >= 0) return number;
+  }
+  return null;
+}
+
+export function positionEntryPrice(position) {
+  const price = Number(position?.orderPrice ?? position?.entryPrice);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+export function exitNetPnl(position, exitPrice) {
+  const entryPrice = positionEntryPrice(position);
+  const price = Number(exitPrice);
+  const quantity = Number(position?.quantity || 0);
+  if (entryPrice === null || !Number.isFinite(price) || price <= 0 || !Number.isFinite(quantity) || quantity <= 0) return null;
+  const direction = heldDirection(position);
+  if (direction !== "LONG" && direction !== "SHORT") return null;
+  const gross = (direction === "LONG" ? price - entryPrice : entryPrice - price) * quantity;
+  // Only explicitly supplied whole-position round-trip costs have this unit.
+  // Missing cost data is unknown, never a claim that trading is free.
+  const fees = numericValue(position?.roundTripFee, position?.totalFees);
+  return { entryPrice, exitPrice: price, quantity, grossPnl: gross, netPnl: fees === null ? null : gross - fees, fees };
+}
+
+export function isProfitableExit(position, exitPrice) {
+  const pnl = exitNetPnl(position, exitPrice);
+  // Price sanity check; the AI must also assess costs absent from account data.
+  return Boolean(pnl && pnl.grossPnl > 0 && (pnl.netPnl === null || pnl.netPnl > 0));
+}
+
 export function executableExitQuote(market, position, now = Date.now()) {
   const book = (market.books || []).find(book => sameInstrument(book, position)) || (sameInstrument(market, position) ? market : null);
   const observedAt = Date.parse(book?.observedAt || market.observedAt || "");
@@ -64,7 +98,7 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
   const seen = new Set();
   for (const source of normalizeExitPlans(decision.exitPlans)) {
     const position = market.account?.positions?.find(p => p.positionOrderId === source.positionId);
-    const tp = source.takeProfitPrice === null ? null : Number(source.takeProfitPrice);
+    let tp = source.takeProfitPrice === null ? null : Number(source.takeProfitPrice);
     const sl = source.stopLossPrice === null ? null : Number(source.stopLossPrice);
     const expiresAt = Math.min(observedAt + source.validForSec * 1000, closing.startsAt);
     let code = null;
@@ -73,9 +107,14 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
     else if (source.heldSide !== heldDirection(position) || !["LONG", "SHORT"].includes(source.heldSide) || source.quantity !== Number(position.quantity)) code = "EXIT_PLAN_POSITION_MISMATCH";
     else if (!Number.isFinite(observedAt) || !Number.isSafeInteger(source.validForSec) || source.validForSec <= 0 || source.validForSec > 3600 || !Number.isFinite(expiresAt) || expiresAt <= now) code = "EXIT_PLAN_EXPIRED";
     else if ((tp === null && sl === null) || (tp !== null && (!Number.isFinite(tp) || tp <= 0)) || (sl !== null && (!Number.isFinite(sl) || sl <= 0)) || (tp !== null && sl !== null && (source.heldSide === "LONG" ? tp <= sl : tp >= sl))) code = "EXIT_PLAN_PRICE_INVALID";
+    if (!code && tp !== null && !isProfitableExit(position, tp)) {
+      tp = null;
+      if (sl === null) code = "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE";
+      else rejected.push({ positionId: source.positionId, code: "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE" });
+    }
     if (code) { rejected.push({ positionId: source.positionId, code }); continue; }
     seen.add(source.positionId);
-    plans.push({ ...source, takeProfitPrice: tp, stopLossPrice: sl, observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
+    plans.push({ ...source, entryPrice: positionEntryPrice(position), takeProfitPrice: tp, stopLossPrice: sl, observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
   }
   return { plans, rejected };
 }
@@ -86,16 +125,20 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
   const position = market.account.positions.find(p => p.positionOrderId === plan.positionId);
   if (!position) return { status: "POSITION_CLOSED" };
   if (heldDirection(position) !== plan.heldSide || Number(position.quantity) !== plan.quantity) return { status: "POSITION_CHANGED" };
+  if (plan.entryPrice !== undefined && plan.entryPrice !== positionEntryPrice(position)) return { status: "POSITION_CHANGED" };
   const quote = executableExitQuote(market, position, now);
   if (!quote) return { status: "QUOTE_UNVERIFIED" };
   const long = plan.heldSide === "LONG";
   const stop = plan.stopLossPrice !== null && (long ? quote.price <= plan.stopLossPrice : quote.price >= plan.stopLossPrice);
-  const profit = plan.takeProfitPrice !== null && (long ? quote.price >= plan.takeProfitPrice : quote.price <= plan.takeProfitPrice);
+  const pnl = exitNetPnl(position, quote.price);
+  const profit = plan.takeProfitPrice !== null
+    && (long ? quote.price >= plan.takeProfitPrice : quote.price <= plan.takeProfitPrice)
+    && isProfitableExit(position, quote.price);
   if (!stop && !profit) return { status: "ARMED", quotePrice: quote.price };
   const exitType = stop ? "STOP_LOSS" : "TAKE_PROFIT";
   const triggerPrice = stop ? plan.stopLossPrice : plan.takeProfitPrice;
   return {
-    status: "TRIGGERED", position, quotePrice: quote.price,
+    status: "TRIGGERED", position, quotePrice: quote.price, netPnl: pnl?.netPnl ?? null, grossPnl: pnl?.grossPnl ?? null,
     decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType, targetPositionIds: [plan.positionId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
       exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && profit) || (!long && stop) ? "GTE" : "LTE" } },
   };

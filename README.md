@@ -30,7 +30,7 @@ npm run dev:desktop
 
 生产环境里，账号、任务、Provider 配置和密钥保存在服务端；内嵌浏览器、登录、行情及盘口采集、指标整理与模型请求全部运行在客户端。已审核经验全文随本轮行情直接交给 AI，后端不做分片分析或 RAG 索引。桌面必须保持登录在线，旧版本会提示升级，禁止回退到服务端浏览器。GitHub Actions 构建发布镜像，服务器只加载镜像并运行账号与数据服务。
 
-「开始观察」启动的是服务端持续控制循环：首轮立即执行，普通轮次完成后立即开始下一轮。监控轮次只把最近 1 小时的分钟数据交给 AI；手动分析仍可使用按上海时区分层的历史 K 线。AI 自己决定是否在下一根 K 入场、持仓期间继续等待、到达止盈或止损条件时离场；已有持仓不阻止下一根 K 再次入场。只有 AI 返回 `BUY` / `SELL` 以及对应方向盈利概率达到 40% 才进入执行链。LIVE 由桌面浏览器自动提交，单笔入场数量上限为 1；网页明确拒单后记录原因，下一根 K 可重新判断；已点击但页面没有明确结果时继续等待持仓核实。规范化行情未变化时，同一 K 跳过重复 AI 请求；下一 K、行情变化、首轮或上轮失败时开启新分析，并把最近轮次作为多轮上下文。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可显式增加轮询间隔，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读采集范围。观察 / 影子模式不会实盘下单。`AXIOM_TRADING_ENABLED=0` 可整机关闭实盘提交。
+「开始观察」启动的是服务端持续控制循环：首轮立即执行，普通轮次完成后立即开始下一轮。监控轮次只把最近 1 小时的分钟数据交给 AI；手动分析仍可使用按上海时区分层的历史 K 线。AI 自己决定是否在下一根 K 入场、持仓期间继续等待、到达止盈或止损条件时离场；已有持仓不阻止下一根 K 再次入场。AI 根据趋势与可执行优势返回 `BUY` / `SELL` 后进入执行链，概率仅作预测记录，不设 40% 或其他执行阈值。启动已有持仓与本轮新持仓均逐笔监控：多单上涨、空单下跌盈利；趋势中的正常回撤或反弹不单独触发止损，优先寻找未来 1–5 根 K 的盈利点。止盈核对真实入场价和可成交 bid/ask 价差及已知费用，费用未知时不能把毛收益声称为净收益；趋势失效且继续持有预计扩大亏损时才保护离场，用户配置的收盘清仓仍优先执行。LIVE 由桌面浏览器自动提交，单笔入场数量上限为 1；网页明确拒单后记录原因，下一根 K 可重新判断；已点击但页面没有明确结果时继续等待持仓核实。规范化行情未变化时，同一 K 跳过重复 AI 请求；下一 K、行情变化、首轮或上轮失败时开启新分析，并把最近轮次作为多轮上下文。用户点击「停止观察」前不会因为一轮完成而结束。`MONITOR_POLL_INTERVAL_MS` 可显式增加轮询间隔，`HAOHAN_ANALYSIS_TIMEFRAMES` 与 `HAOHAN_KLINE_COUNT` 控制浩瀚数贸只读采集范围。观察 / 影子模式不会实盘下单。`AXIOM_TRADING_ENABLED=0` 可整机关闭实盘提交。
 
 后台默认入口：`http://127.0.0.1:5173/admin.html`。使用 `.env` 中的 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 登录；未加载 `.env` 时开发回退值为 `admin` / `local-admin`，不要用于共享环境。
 
@@ -65,14 +65,9 @@ MONGO_DB=axiom_agent
 
 用户端可上传 Markdown/TXT/JSON，或直接粘贴专家经验、规则和红线。内容先保存为 `REVIEW` 草稿。生产环境中，审核后的经验全文携带版本和 evidence ID，与行情一起直接交给客户端 AI；不建立切片索引。Skills 与经验为共享知识库，所有登录用户均可读取（包括草稿）；已审核内容不按创建账号过滤，会进入各用户的 AI 分析上下文，草稿不参与分析。审核和删除仍限创建者；删除账号保留共享知识。经验超出上下文上限时明确返回 `AI_KNOWLEDGE_TOO_LARGE`，不会静默截断。
 
-项目内置 Skill：
+项目仅保留一条交易 Skill：`skills/dgkz-dgjj-entry-exit-analysis/SKILL.md`，整合 12 条已审核经验与用户 MACD/KDJ 指标公式，覆盖主动趋势预测、多空持仓、闪 K 排除、真实成本、条件离场和收盘清仓。带「优先参考」标签，在所有用户的 AI 上下文中传递完整正文。合并取舍见 [交易知识合并说明](docs/trading-knowledge-merge.md)。
 
-- `skills/dgkz-dgjj-entry-exit-analysis`：DGKZ / DGJJ 入场离场、净收益、风险与 AI 操盘证据研究全文。通过 `AXIOM_IMPORT_API_URL=http://服务器地址 node scripts/import-dgkz-dgjj-skill.mjs` 导入「经验与 Skills」并发布，使用环境中的 `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` 登录；重复执行核对全文，不覆盖不同版本，不删除已有经验。带「优先参考」标签的经验在共享列表和 AI 全文上下文中排在其他经验之前，AI 先核验其适用条件；优先级不能覆盖当前行情、用户收益目标、交易授权、收盘截止或系统 JSON 格式。
-- `skills/browser-operator`：白名单网站导航、数据提取和凭据引用。
-- `skills/desktop-operator`：macOS/Windows 白名单 App 控制与人工接管。
-- `skills/shell-executor`：参数数组、命令白名单、超时和审批。
-- `skills/rag-knowledge`：专家经验切片、审核、版本与检索。
-- `skills/trade-decision-router`：`AUTO`、`REVIEW`、`BLOCK` 规则路由。
+`AXIOM_IMPORT_API_URL=http://服务器地址 AXIOM_MERGE_BASELINE=原12条备份路径 node scripts/import-dgkz-dgjj-skill.mjs` 只读预检；增加 `--apply` 执行合并。使用环境中的 `DESKTOP_USERNAME` / `DESKTOP_PASSWORD` 登录。脚本核对归属、内容与版本，先备份并审核新条目，再移除核对一致的旧条目；可中断续跑，不处理清单外记录。
 
 ## MCP
 

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
-test("入场仅要求所选方向获利概率达到40%，AI选择最大预期净收益或最小损失离场", () => {
+test("入场由 AI 趋势识别，离场优先最大预期净收益并在失效时最小损失", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
-  assert.equal(entry.minimumProbability, 0.4);
+  assert.equal(entry.minimumProbability, null);
+  assert.equal(entry.decisionMode, "AI_RECOGNITION");
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");

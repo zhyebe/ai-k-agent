@@ -1,3 +1,5 @@
+// Legacy signal-label/API value. Entry routing is AI-action driven; this is no
+// longer a hard execution threshold.
 export const MIN_PROFIT_PROBABILITY = 0.4;
 
 export function hasDirectionalProbabilities(decision) {

@@ -1,7 +1,7 @@
 import "./fixtures/open-market-clock.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { buildPendingAction, confirmPendingAction, runAnalysis, runPositionExitCycle, stopAllControllers, stopTask } from "../server/engine.mjs";
+import { buildPendingAction, confirmPendingAction, runAnalysis, runPositionExitCycle, startTask, stopAllControllers, stopController, stopTask } from "../server/engine.mjs";
 import { validateExitPlans } from "../server/exit-policy.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
 import { state } from "../server/store.mjs";
@@ -188,3 +188,60 @@ test("manual continuation receives the close deadline even for an already waitin
   assert.ok(input.entryDeadlineAt < Date.now());
   assert.equal(f.submitted.length, 0);
 });
+
+for (const side of ["LONG", "SHORT"]) {
+  for (const ending of ["TAKE_PROFIT", "STOP_LOSS"]) {
+    test(`启动已有 ${side} 持仓先分析，容忍回撤，${ending} 按 AI 条件执行`, async (t) => {
+      const p = { ...long(`startup-${side}-${ending}`), side: side === "LONG" ? "买入" : "卖出" };
+      const f = setup(`startup-${side}-${ending}`, [p], { status: "MANUAL_CONTROL", monitoringEnabled: false });
+      const connectorId = `connector-${f.task.id}`;
+      state.connectors.unshift({ connectorId, reviewStatus: "APPROVED", adapterId: "haohan-readonly", capabilities: ["read_visible_market"] });
+      f.task.target.connectorId = connectorId;
+      t.after(() => {
+        stopController(f.task.id);
+        state.connectors = state.connectors.filter(item => item.connectorId !== connectorId);
+        state.tasks = state.tasks.filter(item => item.id !== f.task.id);
+      });
+      const setPrice = (price) => {
+        f.market.orderBook = { bids: [{ price: side === "LONG" ? price : price - 1, volume: 10 }], asks: [{ price: side === "LONG" ? price + 1 : price, volume: 10 }] };
+        f.market.latest.price = price;
+        f.market.quote.price = price;
+        f.market.observedAt = new Date().toISOString();
+      };
+      setPrice(side === "LONG" ? 99 : 101);
+      // A persisted pre-restart plan is deliberately already triggered.
+      f.task.exitPlans = [{ positionId: p.positionOrderId, heldSide: side, quantity: 1, takeProfitPrice: null, stopLossPrice: 100, expiresAt: new Date(Date.now() + 60000).toISOString() }];
+      startTask(f.task.id);
+      stopController(f.task.id);
+      assert.equal(f.task.status, "MONITORING");
+      assert.deepEqual(f.task.exitPlans, []);
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.equal(f.submitted.length, 0);
+      assert.equal(f.task.exitMonitor.status, "PLAN_MISSING");
+      let analyzed = 0;
+      await runAnalysis(f.task.id, "", { runtime: {
+        ...f.runtime, openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => f.market,
+        requestDecision: async (_provider, context) => {
+          analyzed++;
+          assert.equal(context.account.positions[0].positionOrderId, p.positionOrderId);
+          assert.equal(context.market.positions[0].entryPrice, 100);
+          assert.equal(context.market.positions[0].side, side);
+          return { action: "HOLD", bullishProfitProbability: 0.5, bearishProfitProbability: 0.5, riskFlags: [], evidenceIds: ["market:test"], holdingPlan: { decision: "HOLD_THROUGH_PULLBACK" },
+            exitPlans: [{ positionId: p.positionOrderId, heldSide: side, quantity: 1, validForSec: 120, takeProfitPrice: side === "LONG" ? 105 : 95, stopLossPrice: side === "LONG" ? 96 : 104, rationale: "趋势仍支持盈利目标，96/104 为盈利路径失效边界" }] };
+        },
+      } });
+      assert.equal(analyzed, 1);
+      assert.equal(f.task.exitPlans.length, 1);
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.equal(f.submitted.length, 0, "正常回撤不能直接平掉旧持仓");
+      setPrice(ending === "TAKE_PROFIT" ? (side === "LONG" ? 105 : 95) : (side === "LONG" ? 96 : 104));
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.equal(f.submitted.length, 1);
+      assert.equal(f.submitted[0].exitType, ending);
+      assert.equal(f.submitted[0].action, side === "LONG" ? "SELL" : "BUY");
+      assert.deepEqual(f.submitted[0].targetPositionIds, [p.positionOrderId]);
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.equal(f.submitted.length, 1);
+    });
+  }
+}

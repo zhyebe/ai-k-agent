@@ -34,7 +34,7 @@ test("获利概率分档：大于等于 40% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
-test("模型动作和概率原样保留，主机只判断 AI 选中方向的入场边界", () => {
+test("模型动作和概率原样保留，主机不使用固定概率门槛阻断 AI 方向", () => {
   const kept = enforceProfitProbability({
     action: "BUY",
     profitProbability: "45%",
@@ -46,7 +46,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   assert.equal(kept.profitProbability, 0.45);
   assert.equal(kept.bullishProfitProbability, 0.45);
   assert.equal(kept.bearishProfitProbability, 0.22);
-  assert.equal(kept.signalTier, "EXPLORATORY");
+  assert.equal(kept.signalTier, "AI_RECOGNITION");
   assert.equal(meetsOrderBoundary(kept), true);
 
   const longPlan = applyEntryBoundary(enforceProfitProbability({
@@ -74,8 +74,8 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
     riskFlags: [],
   });
   assert.equal(below.action, "SELL");
-  assert.equal(meetsOrderBoundary(below), false);
-  assert.ok(below.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
+  assert.equal(meetsOrderBoundary(below), true);
+  assert.equal(below.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
 
   const hold = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
@@ -104,8 +104,8 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   }));
   assert.equal(conflictingAction.action, "BUY");
   assert.equal(conflictingAction.profitProbability, 0.39);
-  assert.equal(meetsOrderBoundary(conflictingAction), false);
-  assert.equal(conflictingAction.riskFlags.includes("LOW_PROFIT_PROBABILITY"), true);
+  assert.equal(meetsOrderBoundary(conflictingAction), true);
+  assert.equal(conflictingAction.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
 
   const missingSelectedSide = enforceProfitProbability({
     action: "BUY",
@@ -113,7 +113,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
     riskFlags: [],
   });
   assert.equal(meetsOrderBoundary(missingSelectedSide), false);
-  assert.ok(missingSelectedSide.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
+  assert.ok(missingSelectedSide.riskFlags.includes("INCOMPLETE_DIRECTIONAL_PROBABILITIES"));
 
   const belowBothSides = applyEntryBoundary(enforceProfitProbability({
     action: "SELL",
@@ -122,7 +122,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
     bearishProfitProbability: 0.39,
   }));
   assert.equal(belowBothSides.action, "SELL");
-  assert.equal(meetsOrderBoundary(belowBothSides), false);
+  assert.equal(meetsOrderBoundary(belowBothSides), true);
 
   const noSides = applyEntryBoundary(enforceProfitProbability({
     action: "HOLD",
@@ -185,7 +185,7 @@ test("模型动作和概率原样保留，主机只判断 AI 选中方向的入�
   assert.equal(meetsOrderBoundary(exit), true);
 });
 
-test("入场硬性检查所选方向至少40%，不比较多空差值，不改写AI方向或概率", () => {
+test("入场检查只要求方向概率完整，不比较多空差值或固定百分比", () => {
   for (const action of ["BUY", "SELL"]) {
     for (const probability of [0, 0.03, 0.21, 0.39, 0.399999, 0.4, 0.400001, 0.41, 0.44, 0.45]) {
       for (const otherProbability of [probability, Math.max(0, probability - 0.02), 0.9]) {
@@ -198,9 +198,9 @@ test("入场硬性检查所选方向至少40%，不比较多空差值，不改�
         }));
         assert.equal(decision.action, action);
         assert.equal(decision.profitProbability, probability);
-        assert.equal(meetsOrderBoundary(decision), probability >= 0.4);
-        assert.equal(decision.signalTier, probability >= 0.4 ? "EXPLORATORY" : "HOLD");
-        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), probability < 0.4);
+        assert.equal(meetsOrderBoundary(decision), true);
+        assert.equal(decision.signalTier, "AI_RECOGNITION");
+        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
       }
     }
   }
@@ -223,7 +223,7 @@ test("已核实持仓可以立即离场，不要求它仍在入场监测盘口�
 for (const autoDecisionEnabled of [false, true]) {
   for (const action of ["BUY", "SELL"]) {
     for (const probability of [0.39, 0.4, 0.44]) {
-      test(`${probability * 100}% ${action}入场硬性门槛遵守${autoDecisionEnabled ? "自动" : "手动"}提交策略`, async () => {
+      test(`${probability * 100}% ${action}由 AI 决定，遵守${autoDecisionEnabled ? "自动" : "手动"}提交策略`, async () => {
         const taskId = `threshold_${probability}_${action}_${autoDecisionEnabled}_${Date.now()}`;
         const task = insertNorthstarTask(taskId);
         Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
@@ -246,13 +246,6 @@ for (const autoDecisionEnabled of [false, true]) {
         try {
           await runMonitoringCycle(taskId, { runtime });
           assert.equal(task.decision.action, action);
-          if (probability < 0.4) {
-            assert.equal(task.pendingAction, undefined);
-            assert.equal(filled, 0);
-            assert.equal(submitted, 0);
-            assert.ok(task.decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"));
-            return;
-          }
           assert.equal(task.pendingAction.action, action);
           assert.equal(task.pendingAction.suggestedQty, 1);
           assert.equal(task.pendingAction.formFilled, true);
@@ -879,9 +872,10 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
       task.rules = [{ id: "review", mode: "REVIEW", status: "pending" }, { id: "block", mode: "BLOCK", status: "pending" }];
       const market = testMarketSnapshot("recovery-0", 103);
+      market.orderBook = { bids: [{ price: 103, volume: 10 }], asks: [{ price: 104, volume: 10 }] };
       market.account = { positionsVerified: true, openOrdersVerified: true, positions: [
-        { positionOrderId: "P-legacy", symbol: task.symbol, side: "买", quantity: 1 },
-        { positionOrderId: "P-active", symbol: task.symbol, side: "买", quantity: 2 },
+        { positionOrderId: "P-legacy", symbol: task.symbol, side: "买", quantity: 1, orderPrice: 100 },
+        { positionOrderId: "P-active", symbol: task.symbol, side: "买", quantity: 2, orderPrice: 100 },
       ], openOrders: [{ orderId: "O-cancel", symbol: task.symbol, side: "买", remainingQuantity: 1 }] };
       task.market = structuredClone(market);
       task.pendingAction = { ...buildPendingAction(task, { action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-legacy"], targetSymbol: task.symbol }), status: "AWAITING_FILL", decisionRunId: "old-run", createdAt: "2026-10-10T00:00:00Z" };
@@ -2092,5 +2086,21 @@ test("默认等待分析返回后立即进入下一轮", async () => {
     if (previous === undefined) delete process.env.ANALYSIS_TIMEOUT_MS;
     else process.env.ANALYSIS_TIMEOUT_MS = previous;
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
+test("已核实多空持仓的直接止盈必须比较真实入场价和可成交报价", () => {
+  for (const side of ["买入", "卖出"]) {
+    const position = { positionOrderId: "startup-old", symbol: "DGKZ", side, quantity: 1, orderPrice: 100 };
+    const action = side === "买入" ? "SELL" : "BUY";
+    const decision = { action, exitType: "TAKE_PROFIT", targetPositionIds: [position.positionOrderId] };
+    const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), latest: { price: side === "买入" ? 110 : 90 },
+      account: { positionsVerified: true, positions: [position] }, orderBook: { bids: [{ price: 99, volume: 10 }], asks: [{ price: 101, volume: 10 }] } };
+    assert.ok(attachPositionExit(decision, market).riskFlags.includes("EXIT_PROFIT_NOT_VERIFIED"));
+    assert.equal(attachPositionExit({ ...decision, exitType: "STOP_LOSS" }, market).action, action);
+    market.orderBook = { bids: [{ price: side === "买入" ? 105 : 94, volume: 10 }], asks: [{ price: side === "买入" ? 106 : 95, volume: 10 }] };
+    assert.equal(attachPositionExit(decision, market).action, action);
+    position.orderPrice = null;
+    assert.ok(attachPositionExit(decision, market).riskFlags.includes("EXIT_PROFIT_NOT_VERIFIED"));
   }
 });

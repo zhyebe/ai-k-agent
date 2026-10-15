@@ -97,9 +97,10 @@ export interface PendingAction {
   takeProfitPrice?: number | null;
   stopLossPrice?: number | null;
   profitProbability?: number;
+  directionalProbabilitiesComplete?: boolean;
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
-  signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
+  signalTier?: "AI_RECOGNITION" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   status: "WAITING" | "SUBMITTING" | "AWAITING_FILL" | "UNVERIFIED" | "REJECTED" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
   baselinePositionQty?: number;
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
@@ -133,9 +134,10 @@ export interface Decision {
   stopLossPrice?: number | null;
   confidence: number;
   profitProbability?: number;
+  directionalProbabilitiesComplete?: boolean;
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
-  signalTier?: "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
+  signalTier?: "AI_RECOGNITION" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   targetPositionPct: number;
   maxOrderValuePct: number;
   reasonCodes: string[];

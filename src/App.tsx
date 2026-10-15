@@ -117,7 +117,7 @@ const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { m
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买涨", SELL: "买跌", HOLD: "观望" };
 const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买涨", SELL: "建议买跌", HOLD: "保持观望" };
-const profitSignalLabels: Record<string, string> = { EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
+const profitSignalLabels: Record<string, string> = { AI_RECOGNITION: "AI 趋势决策", EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
 const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（可自动下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
 const stageLabels: Record<string, string> = { connect: "连接目标", login: "登录验证", collect: "数据采集", analyze: "趋势分析", rules: "规则裁决", action: "动作建议", system: "系统" };
@@ -168,7 +168,9 @@ const riskLabels: Record<string, string> = {
   TARGET_BOARD_REQUIRED: "买卖建议未指定具体盘",
   TARGET_BOARD_NOT_MONITORED: "建议盘不在当前监控范围",
   BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
-  LOW_PROFIT_PROBABILITY: "未达入场边界",
+  LOW_PROFIT_PROBABILITY: "历史概率提示",
+  INCOMPLETE_DIRECTIONAL_PROBABILITIES: "AI 方向预测字段不完整",
+  EXIT_PROFIT_NOT_VERIFIED: "入场成本或可成交盈利未核实",
 };
 const reasonLabels: Record<string, string> = {
   EMA_SLOPE_POSITIVE: "EMA20 斜率为正",

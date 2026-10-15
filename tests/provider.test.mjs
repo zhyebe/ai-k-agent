@@ -79,13 +79,13 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
   });
 }
 
-test("live format retry is bounded even when the corrected decision is inconsistent", async (t) => {
+test("live format retry is bounded and preserves an AI HOLD when probabilities are complete", async (t) => {
   let calls = 0;
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: calls++ === 0 ? '{"action":' : '{"action":"HOLD","bullish_profit_probability":0.6,"bearish_profit_probability":0.3}' }, finish_reason: "stop" }] })));
   const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {}, { fastAnalysis: true });
   assert.equal(calls, 2);
   assert.equal(result.action, "HOLD");
-  assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
+  assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
 });
 
 test("format retry never runs on output exhaustion or after cancellation", async (t) => {
@@ -210,7 +210,7 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }));
   });
   const provider = { apiKey: "test", baseUrl: "https://provider.example.test" };
-  const context = { executionPolicy: { conditionalExits: true }, account: { positionsVerified: true, positions: [{ positionOrderId: "P-1", side: "买涨", quantity: 2, frozenQuantity: 0 }] } };
+  const context = { executionPolicy: { conditionalExits: true }, account: { positionsVerified: true, positions: [{ positionOrderId: "P-1", side: "买涨", quantity: 2, orderPrice: 100, frozenQuantity: 0 }] } };
   const corrected = await requestDecision(provider, context, { fastAnalysis: true });
   assert.equal(calls, 2);
   assert.deepEqual(corrected.exitPlans, [{ positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 90, takeProfitPrice: 105, stopLossPrice: 99, rationale: plan.rationale }]);
@@ -441,36 +441,20 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.equal(seen[0].headers["anthropic-version"], "2023-06-01");
     assert.equal(seen[0].body.model, "claude-custom");
     assert.ok(seen[0].body.system);
-    assert.match(seen[0].body.system, />= 0\.4/);
-    assert.match(seen[0].body.system, /do not wait for a finished/);
-    assert.match(seen[0].body.system, /second 50/);
-    assert.match(seen[0].body.system, /approved Skills/);
-    assert.match(seen[0].body.system, /MUST be BUY/);
-    assert.match(seen[0].body.system, /selected probability must be >= 0\.4/);
-    assert.match(seen[0].body.system, /hard entry requirement/);
-    assert.match(seen[0].body.system, /BUY requires bullish_profit_probability >= 0\.4; SELL requires bearish_profit_probability >= 0\.4/);
-    assert.doesNotMatch(seen[0].body.system, /differ by less than 0\.05|narrow-gap trigger/);
-    assert.match(seen[0].body.system, /short can capture 20 -> 19/);
-    assert.match(seen[0].body.system, /Each new K can enter the configured quantity/);
-    assert.match(seen[0].body.system, /a prior position.*do not waive this entry rule/);
-    assert.match(seen[0].body.system, /profit_probability equals the selected direction/);
-    assert.match(seen[0].body.system, /User-configured entry quantity: 1 per new order/);
-    assert.match(seen[0].body.system, /Never leave an AI-identified maximum-profit or minimum-loss exit as HOLD/);
-    assert.match(seen[0].body.system, /BROWSER_PLAN/);
-    assert.match(seen[0].body.system, /host only fills the target form/);
-    assert.match(seen[0].body.system, /Never swap these meanings/);
-    assert.match(seen[0].body.system, /Price response outranks static displayed depth/);
-    assert.match(seen[0].body.system, /correct persistent directional bias/);
-    assert.match(seen[0].body.system, /Finish the round's JSON fully/);
-    assert.match(seen[0].body.system, /monitoring continues next round/);
-    assert.doesNotMatch(seen[0].body.system, /aborts this round at 50s/);
-    assert.match(seen[0].body.system, /maximizes expected net profit or minimizes expected loss/);
-    assert.match(seen[0].body.system, /Exit timing is an AI forecast, not a fixed immediate-profit rule/);
-    assert.match(seen[0].body.system, /A positive current mark alone is not an exit signal/);
-    assert.match(seen[0].body.system, /Do not wait for another K after you explicitly decide that exit now is optimal/);
-    assert.doesNotMatch(seen[0].body.system, /any positive net proceeds after known fees and slippage/);
-    assert.match(seen[0].body.system, /Both manual-entry and auto-entry modes automate exits/);
-    assert.match(seen[0].body.system, /never lower them to justify HOLD/);
+    const prompt = seen[0].body.system;
+    assert.match(prompt, /40% 不再是入场硬门、上限或 HOLD 触发器/);
+    assert.doesNotMatch(prompt, /selected probability must be >=|hard entry requirement|BUY requires bullish_profit_probability >=/);
+    assert.match(prompt, /AI recognizes trend and chooses BUY, SELL or HOLD/);
+    assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
+    assert.match(prompt, /路径内部允许反向波动/);
+    assert.match(prompt, /target 1-5 K when trend remains valid/);
+    assert.match(prompt, /User-configured entry quantity: 1 per new order/);
+    assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
+    assert.match(prompt, /STOP_LOSS requires profitable path invalidation and expected further loss/);
+    assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
+    assert.match(prompt, /Price response outranks static displayed depth/);
+    assert.match(prompt, /correct persistent directional bias/);
+    assert.match(prompt, /Report UNKNOWN if evidence is insufficient/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
     assert.equal(seen[1].url, "/v1beta/models/gemini-custom:generateContent");
     assert.ok(seen[1].body.systemInstruction);
@@ -646,7 +630,7 @@ for (const [bullish, bearish, selectedAction, management] of [
   [0.35, 0.41, "SELL", "KEEP"],
   [0.48, 0.53, "BUY", "KEEP"],
 ]) {
-  test(`qualifying HOLD ${bullish}/${bearish} with ${management} is corrected by AI to ${selectedAction}`, async (t) => {
+  test(`AI HOLD ${bullish}/${bearish} with ${management} is preserved without a probability threshold`, async (t) => {
     const bodies = [];
     const original = { action: "HOLD", bullish_profit_probability: bullish, bearish_profit_probability: bearish,
       holding_plan: { decision: "HOLD_FOR_TARGET", rationale: "existing position can continue holding" },
@@ -654,29 +638,20 @@ for (const [bullish, bearish, selectedAction, management] of [
         : { order_assessments: [{ order_id: "O-1", decision: management, reason: "independent existing-order assessment", target_position_ids: ["P-1"] }] }) };
     t.mock.method(globalThis, "fetch", async (_url, options) => {
       bodies.push(JSON.parse(options.body));
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(bodies.length === 1 ? original : {
-        ...original, action: selectedAction, profit_probability: selectedAction === "BUY" ? bullish : bearish,
-      }) } }] }));
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(original) } }] }));
     });
     const context = { experiencePrompt: "Source research recommends waiting for extra confirmation.",
       account: { positions: [{ positionOrderId: "P-1", quantity: 1 }], openOrders: [{ orderId: "O-1", instrumentId: "OTHER" }] } };
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, context, { fastAnalysis: true });
-    assert.equal(bodies.length, 2);
+    assert.equal(bodies.length, 1);
     const messages = bodies[0].messages;
-    assert.equal(messages.at(-2).role, "system");
-    assert.match(messages.at(-2).content, /所选方向盈利概率 >=40%（包含40%）必须明确 BUY 或 SELL，不能理解为 HOLD/);
-    assert.match(messages.at(-2).content, /not confidence|不是 confidence/);
-    assert.match(messages.at(-2).content, /do not add a 50%\/60% threshold/);
-    assert.match(messages.at(-2).content, /order KEEP\/CANCEL assessments do not waive/);
-    assert.match(messages.at(-2).content, /project action rule takes precedence over source Skills/);
-    assert.ok(messages.findIndex(message => message.content === messages.at(-2).content) > messages.findIndex(message => message.content.includes(context.experiencePrompt)));
-    assert.deepEqual(JSON.parse(bodies[1].messages.at(-2).content), original);
-    assert.match(bodies[1].messages.at(-1).content, /Top-level HOLD with either probability >= 0\.4 is an incomplete, contradictory decision/);
-    assert.equal(result.action, selectedAction);
+    assert.match(messages[0].content, /40% 不再是入场硬门/);
+    assert.match(messages[0].content, /AI recognizes trend and chooses BUY, SELL or HOLD/);
+    assert.equal(result.action, "HOLD");
     assert.equal(result.exitType, null);
     assert.equal(result.bullishProfitProbability, bullish);
     assert.equal(result.bearishProfitProbability, bearish);
-    assert.equal(result.profitProbability, selectedAction === "BUY" ? bullish : bearish);
+    assert.equal(result.profitProbability, 0);
     assert.equal(result.holdingPlan.decision, "HOLD_FOR_TARGET");
     if (management === "CANCEL_IDS") assert.deepEqual(result.cancelOrderIds, ["O-1"]);
     else {
@@ -688,65 +663,48 @@ for (const [bullish, bearish, selectedAction, management] of [
   });
 }
 
-test("unchanged qualifying HOLD with order assessments is incomplete, preserves probabilities and never fabricates an order", async (t) => {
+test("unchanged HOLD with order assessments preserves probabilities and never fabricates an order", async (t) => {
   let calls = 0;
-  let correctionFails = false;
   const original = { action: "HOLD", bullish_profit_probability: 0.48, bearish_profit_probability: 0.35,
     order_assessments: [{ order_id: "O-1", decision: "KEEP" }] };
   t.mock.method(globalThis, "fetch", async () => {
     calls++;
-    if (correctionFails && calls % 2 === 0) throw new Error("TEST_PROVIDER_FAILURE");
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(original) } }] }));
   });
-  for (correctionFails of [false, true]) {
+  for (const _round of [1, 2]) {
     const before = calls;
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {}, { fastAnalysis: true });
-    assert.equal(calls, before + 2);
+    assert.equal(calls, before + 1);
     assert.equal(result.action, "HOLD");
     assert.equal(result.bullishProfitProbability, 0.48);
     assert.equal(result.bearishProfitProbability, 0.35);
     assert.equal(result.orderAssessments[0].decision, "KEEP");
-    assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
-    assert.ok(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"));
-    assert.match(result.invalidation, /概率与动作矛盾；本轮决策未完成/);
-    if (correctionFails) assert.equal(result.modelDiagnostics.retryError, "REQUEST_FAILED");
+    assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+    assert.equal(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"), false);
   }
 });
 
-test("HOLD above 40% is returned to AI for correction even with open positions", async () => {
+test("HOLD above 40% remains an AI decision and is not forced into an entry", async () => {
   let calls = 0;
-  let correct = true;
-  const correctionMessages = [];
   const server = http.createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
     calls += 1;
     const messages = JSON.parse(body).messages;
-    if (calls % 2 === 0) correctionMessages.push(messages.at(-1).content);
     response.setHeader("content-type", "application/json");
-    const decision = calls % 2 === 0 && correct
-      ? { action: "SELL", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 }
-      : { action: "HOLD", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 };
+    const decision = { action: "HOLD", bullish_profit_probability: 0.41, bearish_profit_probability: 0.53, profit_probability: 0.53 };
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(decision) } }] }));
   });
   const port = await listen(server);
   try {
     const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "demo", apiKey: "key" });
-    const corrected = await requestDecision(provider, { account: { positions: [] } });
-    assert.equal(corrected.action, "SELL");
-    assert.equal(corrected.bearishProfitProbability, 0.53);
-    assert.equal(calls, 2);
-    correct = false;
-    const inconsistent = await requestDecision(provider, { account: { positions: [] } });
-    assert.equal(inconsistent.action, "HOLD");
-    assert.ok(inconsistent.riskFlags.includes("ANALYSIS_INCOMPLETE"));
-    assert.ok(inconsistent.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"));
-    assert.equal(calls, 4);
-    correct = true;
+    const first = await requestDecision(provider, { account: { positions: [] } });
+    assert.equal(first.action, "HOLD");
+    assert.equal(first.bearishProfitProbability, 0.53);
+    assert.equal(calls, 1);
     const holding = await requestDecision(provider, { account: { positions: [{ quantity: 1, side: "买" }] } });
-    assert.equal(holding.action, "SELL");
-    assert.equal(calls, 6);
-    assert.ok(correctionMessages.every((message) => /selected direction's profit probability >= 0\.4/.test(message)));
+    assert.equal(holding.action, "HOLD");
+    assert.equal(calls, 2);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
