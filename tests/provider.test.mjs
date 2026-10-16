@@ -392,7 +392,8 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
     calls += 1;
     if (calls % 2 === 0) {
       assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
-      assert.match(body.messages.at(-1).content, /profit targets and planned exits only within the next 5 K/);
+      assert.match(body.messages.at(-1).content, /with immediate minimum-loss protection when verified losses keep widening or AI forecasts further expansion/);
+      assert.match(body.messages.at(-1).content, /持仓可长于5根/);
       assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
       assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
     } else {
@@ -639,20 +640,20 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /AI recognizes the broad market trend first/);
     assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
     assert.match(prompt, /趋势内回撤/);
-    assert.match(prompt, /Profit targets and planned exits must stay within the next 5 K/);
-    assert.match(prompt, /2 K is sufficient, while AI may choose 3–5 K/);
-    assert.match(prompt, /Never force an exit or delay it solely because of a candle count/);
-    assert.match(prompt, /盈利吃到2–5根K后立即兑现正的可成交净收益/);
-    assert.match(prompt, /持仓超过约5根K仍亏损/);
-    assert.match(prompt, /没有新的、具体、近期可核实的恢复证据就立即STOP_LOSS/);
-    assert.match(prompt, /不能每轮把亏损单等待期重置为再等5根/);
-    assert.match(prompt, /LONG用bid减入场价，SHORT用入场价减ask/);
-    assert.match(prompt, /未平仓浮亏也是风险/);
-    assert.doesNotMatch(prompt, /下一根及 1–5 根 K 只用于择时|STOP_LOSS only when the multi-horizon/);
-    assert.doesNotMatch(prompt, /TAKE_PROFIT only when exiting now is forecast to maximize|hold for that move rather than/);
+    assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
+    assert.match(prompt, /5根只是举例，不设固定持仓K数/);
+    assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
+    assert.match(prompt, /长线持仓的亏损保护优先执行/);
+    assert.match(prompt, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
+    assert.match(prompt, /不要求大趋势完全反转，不等下一根K/);
+    assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
+    assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
+    assert.match(prompt, /-1点变-3点是扩大，从-3点变-1点是收窄/);
+    assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
+    assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
     assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
-    assert.match(prompt, /STOP_LOSS applies when the short-term recovery thesis has failed/);
+    assert.match(prompt, /STOP_LOSS is required when verified losses keep widening or further loss expansion is forecast/);
     assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(prompt, /Price response outranks static displayed depth/);
     assert.match(prompt, /correct persistent directional bias/);
@@ -766,7 +767,11 @@ test("AI EXIT_NOW缺少可执行离场动作时交还AI补全，不作为新入�
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     calls += 1;
     const payload = JSON.parse(options.body);
-    if (calls === 2) assert.match(payload.messages.at(-1).content, /EXIT_NOW/);
+    if (calls === 2) {
+      assert.match(payload.messages.at(-1).content, /EXIT_NOW/);
+      assert.match(payload.messages.at(-1).content, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
+      assert.doesNotMatch(payload.messages.at(-1).content, /minimum expected loss only when the profitable path is invalidated/);
+    }
     const result = calls === 1
       ? { action: "BUY", bullish_profit_probability: 0.6, holding_plan: { decision: "EXIT_NOW" } }
       : { action: "SELL", exit_type: "STOP_LOSS", target_position_ids: ["P-1"], holding_plan: { decision: "EXIT_NOW" } };
@@ -1069,6 +1074,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
   test(`${apiFormat} fast decisions receive broad-trend guidance, flash-price exclusions and prior exit plans`, async t => {
     const bodies = [];
     const plan = { positionId: "P-long", heldSide: "LONG", quantity: 1, validForSec: 1800, takeProfitPrice: 112, stopLossPrice: 94, rationale: "大趋势向上，96-99 回撤不失效" };
+    const previousPosition = { positionId: "P-long", side: "LONG", quantity: 1, entryPrice: 100, exitQuotePrice: 97, exitQuotePnlPoints: -3, lastObservedAt: "2026-10-15T06:00:00Z" };
+    const currentPosition = { ...previousPosition, exitQuotePrice: 99, exitQuotePnlPoints: -1, lastObservedAt: "2026-10-15T06:01:00Z" };
     const final = JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.61, bearish_profit_probability: 0.24,
       forecast_horizon: { next_k: { direction: "DOWN" }, next_10k: { direction: "UP" } },
       holding_plan: { decision: "HOLD_THROUGH_PULLBACK", max_hold_k: 18, rationale: "大趋势延续" }, exit_plans: [plan] });
@@ -1081,7 +1088,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       return new Response(JSON.stringify(payload));
     });
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test/v1", model: "compatible-model", apiFormat }, {
-      previousAnalysis: { exitPlans: [{ ...plan, status: "ARMED", expiresAt: "2026-10-15T07:00:00Z" }] },
+      account: { positionContext: [currentPosition] },
+      previousAnalysis: { decision: { positionAudit: { observedAt: previousPosition.lastObservedAt, positionsVerified: true, positions: [previousPosition] } }, exitPlans: [{ ...plan, status: "ARMED", expiresAt: "2026-10-15T07:00:00Z" }] },
       conversation: { recentRounds: [{ decision: { action: "HOLD", exitPlans: [plan] } }] },
     }, { fastAnalysis: true });
     assert.equal(bodies.length, 1);
@@ -1089,22 +1097,24 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const messages = body.input || body.messages || body.contents.map(item => ({ ...item, content: item.parts[0].text }));
     const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
     assert.match(prompt, /AI recognizes the broad market trend first/);
-    assert.match(prompt, /Profit targets and planned exits must stay within the next 5 K/);
-    assert.match(prompt, /2 K is sufficient, while AI may choose 3–5 K/);
-    assert.match(prompt, /Never force an exit or delay it solely because of a candle count/);
-    assert.doesNotMatch(prompt, /TAKE_PROFIT only when exiting now is forecast to maximize|hold for that move rather than/);
+    assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
+    assert.match(prompt, /5根只是举例，不设固定持仓K数/);
+    assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
+    assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /exclude its price and derived high\/low\/return/);
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
-    assert.match(prompt, /盈利吃到2–5根K后立即兑现正的可成交净收益/);
-    assert.match(prompt, /持仓超过约5根K仍亏损/);
-    assert.match(prompt, /不能每轮把亏损单等待期重置为再等5根/);
-    assert.match(prompt, /LONG用bid减入场价，SHORT用入场价减ask/);
+    assert.match(prompt, /长线持仓的亏损保护优先执行/);
+    assert.match(prompt, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
+    assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
+    assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
     assert.match(prompt, /Lead with broad trend/);
     assert.doesNotMatch(prompt, /target 1-5 K when trend remains valid|favorable exit over the next 1-5 K/);
     const context = JSON.parse(messages.at(-1).content);
     assert.equal(context.previousAnalysis.exitPlans[0].rationale, plan.rationale);
     assert.equal(context.previousAnalysis.exitPlans[0].status, "ARMED");
+    assert.deepEqual(context.previousAnalysis.decision.positionAudit.positions, [previousPosition]);
+    assert.deepEqual(context.account.positionContext, [currentPosition]);
     const history = messages.find(item => ["assistant", "model"].includes(item.role));
     assert.deepEqual(JSON.parse(history.content).exitPlans, [plan]);
     assert.equal(result.holdingPlan.maxHoldK, 18);

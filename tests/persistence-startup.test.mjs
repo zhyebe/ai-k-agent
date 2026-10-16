@@ -21,29 +21,33 @@ function databaseMode(t, mode) {
   t.after(() => { if (previous === undefined) delete process.env.DB_MODE; else process.env.DB_MODE = previous; });
 }
 
-async function oldTradingSkill() {
+async function oldTradingSkill(version = "v0.3.76") {
   return {
-    id: "skill_04ef36d5-3002-40fd-b51f-3914867e29f1", status: "APPROVED", version: "v0.3.76",
+    id: "skill_04ef36d5-3002-40fd-b51f-3914867e29f1", status: "APPROVED", version,
     owner_user_id: "author", title: "AI 趋势交易：入场、持仓与离场（合并版）", tags_json: '["优先参考"]',
-    content: (await readFile(new URL("./fixtures/trading-skill-v0.3.76.md", import.meta.url), "utf8")).trim(),
+    content: (await readFile(new URL(`./fixtures/trading-skill-${version}.md`, import.meta.url), "utf8")).trim(),
   };
 }
 
-test("only the exact reviewed legacy Skill is eligible for the short-term correction", async () => {
-  const previous = await oldTradingSkill();
-  const revision = await tradingSkillUpgrade(previous);
-  assert.equal(revision.version, "v0.3.84");
-  assert.match(revision.content, /盈利吃到 2–5 根 K 就及时离场/);
-  assert.match(revision.content, /持仓超过约 5 根 K 仍亏损/);
-  assert.equal(await tradingSkillUpgrade({ ...previous, ...revision }), null);
-  for (const change of [{ id: "unrelated" }, { status: "REVIEW" }, { version: "newer" }, { content: `${previous.content}\n用户新增内容` }]) {
-    assert.equal(await tradingSkillUpgrade({ ...previous, ...change }), null);
+test("only exact reviewed legacy and short-term Skills receive trend restoration and loss protection", async () => {
+  const bundled = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
+  for (const version of ["v0.3.76", "v0.3.84"]) {
+    const previous = await oldTradingSkill(version);
+    const revision = await tradingSkillUpgrade(previous);
+    assert.equal(revision.version, "v0.3.85");
+    assert.equal(revision.content, bundled);
+    assert.match(revision.content, /5 根只是示例，不是盈利目标或持仓上限/);
+    assert.match(revision.content, /已核实亏损持续扩大/);
+    assert.equal(await tradingSkillUpgrade({ ...previous, ...revision }), null);
+    for (const change of [{ id: "unrelated" }, { status: "REVIEW" }, { version: "newer" }, { content: `${previous.content}\n用户新增内容` }, { version: version === "v0.3.84" ? "v0.3.76" : "v0.3.84" }]) {
+      assert.equal(await tradingSkillUpgrade({ ...previous, ...change }), null);
+    }
   }
 });
 
 test("MySQL upgrades the reviewed Skill once and loads the persisted revision into AI context", async t => {
   databaseMode(t, "mysql");
-  const old = await oldTradingSkill();
+  const old = await oldTradingSkill("v0.3.84");
   let row = { ...old };
   let writes = 0;
   mysqlPool = {
@@ -64,20 +68,20 @@ test("MySQL upgrades the reviewed Skill once and loads the persisted revision in
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
     hydrateState({ skills: snapshot.skills });
-    assert.equal(state.skills[0].version, "v0.3.84");
+    assert.equal(state.skills[0].version, "v0.3.85");
     assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
     assert.deepEqual(state.skills[0].tags, ["优先参考"]);
     const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
     assert.ok(prompt.includes(row.content));
-    assert.match(prompt, /没有具体、近期、可核实的恢复证据/);
-    assert.doesNotMatch(prompt, /5 根只是示例，不是盈利目标或持仓上限/);
+    assert.match(prompt, /AI 预计继续扩大时立即止损离场/);
+    assert.match(prompt, /5 根只是示例，不是盈利目标或持仓上限/);
   }
   assert.equal(writes, 1);
 });
 
 test("MySQL does not replace concurrent edits and reloads the current database Skill", async t => {
   databaseMode(t, "mysql");
-  const old = await oldTradingSkill();
+  const old = await oldTradingSkill("v0.3.84");
   let row = { ...old };
   mysqlPool = {
     query: async sql => [/^SELECT \* FROM skills$/.test(sql) ? [{ ...row }] : []],
@@ -119,7 +123,7 @@ test("failed MySQL knowledge upgrade is reported without losing persisted skills
 
 test("MongoDB upgrades the same reviewed Skill and reloads persisted content", async t => {
   databaseMode(t, "mongo");
-  const old = await oldTradingSkill();
+  const old = await oldTradingSkill("v0.3.84");
   let row = { ...old, _id: old.id, ownerUserId: "author", tags: ["优先参考"] };
   let writes = 0;
   const { MongoClient } = await import("mongodb");
@@ -142,8 +146,8 @@ test("MongoDB upgrades the same reviewed Skill and reloads persisted content", a
   t.after(() => adapter.close());
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
-    assert.equal(snapshot.skills[0].version, "v0.3.84");
-    assert.match(snapshot.skills[0].content, /持仓超过约 5 根 K 仍亏损/);
+    assert.equal(snapshot.skills[0].version, "v0.3.85");
+    assert.match(snapshot.skills[0].content, /已核实亏损持续扩大/);
     assert.equal(snapshot.skills[0].ownerUserId, "author");
   }
   assert.equal(writes, 1);

@@ -434,9 +434,12 @@ test("持仓上下文提供持仓时长、浮动收益、峰值波动和回撤�
   assert.equal(context.account.positionContext[0].positionId, "P-1");
   assert.ok(task.positionTracking["P-1"]);
   task.exitPlans = [{ positionId: "P-1", heldSide: "LONG", quantity: 1, takeProfitPrice: 135, stopLossPrice: 110, status: "ARMED", expiresAt: new Date(Date.now() + 60000).toISOString(), rationale: "大趋势向上，容忍正常回撤" }];
+  task.decision.positionAudit = { observedAt: new Date().toISOString(), positionsVerified: true, positions: [structuredClone(position)] };
 
   const pullbackMarket = { ...market, latest: { price: 121 }, books: [{ symbol: "DGKZ", latest: { price: 121 } }] };
   const pullbackContext = buildDecisionContext(task, pullbackMarket, [], "monitor", pullbackMarket);
+  assert.deepEqual(pullbackContext.previousAnalysis.decision.positionAudit.positions, [position]);
+  assert.equal(pullbackContext.account.positionContext[0].currentPrice, 121);
   assert.deepEqual(pullbackContext.previousAnalysis.exitPlans, task.exitPlans);
   assert.notEqual(pullbackContext.previousAnalysis.exitPlans, task.exitPlans);
   assert.notEqual(pullbackContext.previousAnalysis.exitPlans[0], task.exitPlans[0]);
