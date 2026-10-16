@@ -4,7 +4,7 @@ import test from "node:test";
 import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, setTaskProvider, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider, requestDecision } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
-import { state } from "../server/store.mjs";
+import { getAgentOutput, state } from "../server/store.mjs";
 
 test("实盘只限制单笔数量，不把 AI BUY 意图改成 HOLD", () => {
   const decision = enforceDecisionLimits({
@@ -872,6 +872,40 @@ for (const autoDecisionEnabled of [false, true]) {
 }
 
 for (const autoDecisionEnabled of [false, true]) {
+  for (const invalidResponse of [false, true]) {
+    test(`${autoDecisionEnabled ? "自动" : "手动"}模式${invalidResponse ? "无效模型响应不撤单" : "离场计划缺失不吞掉明确撤单"}`, async () => {
+      const task = insertNorthstarTask(`independent_cancel_${autoDecisionEnabled}_${invalidResponse}_${Date.now()}`);
+      Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+      const market = testMarketSnapshot("independent-cancel", 101);
+      market.account = { ...market.account, positionsVerified: true,
+        positions: [{ positionOrderId: "P-1", symbol: "BTC/USDT", side: "买", quantity: 1, orderPrice: 100 }],
+        openOrdersVerified: true, frozenFunds: 3000,
+        openOrders: [{ orderId: "O-1", remainingQuantity: 1 }, { orderId: "O-keep", remainingQuantity: 1 }],
+      };
+      const cancelled = [];
+      try {
+        await runMonitoringCycle(task.id, { runtime: {
+          openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+          requestDecision: async () => ({ action: "HOLD", orderAssessments: [
+            { orderId: "O-1", decision: "CANCEL", reason: "入场未成交，占用保证金不划算" },
+            { orderId: "O-keep", decision: "KEEP", reason: "保留更有利" },
+          ], riskFlags: invalidResponse ? ["INVALID_MODEL_JSON"] : ["INCOMPLETE_EXIT_PLAN", "ANALYSIS_INCOMPLETE"],
+          modelDiagnostics: { jsonStatus: invalidResponse ? "INVALID_JSON" : "COMPLETE_JSON" } }),
+          cancelOpenOrders: async ({ orderIds }) => { cancelled.push(...orderIds); return { ok: true, results: orderIds.map(orderId => ({ orderId, cancelled: true })) }; },
+          submitSuggestionForm: async () => assert.fail("HOLD cannot submit an entry or exit"),
+        } });
+        assert.deepEqual(cancelled, invalidResponse ? [] : ["O-1"]);
+        assert.equal(task.lastAnalysisSucceeded, false);
+        assert.equal(market.account.positions[0].quantity, 1);
+        const output = getAgentOutput(task.id);
+        assert.ok(output.some(line => /当前委托已核实：2 笔/.test(line.message)));
+        if (!invalidResponse) assert.ok(output.some(line => /委托 O-keep：AI 继续保留；保留更有利/.test(line.message)));
+      } finally { state.tasks = state.tasks.filter(item => item.id !== task.id); }
+    });
+  }
+}
+
+for (const autoDecisionEnabled of [false, true]) {
   for (const action of ["BUY", "SELL"]) {
     test(`${autoDecisionEnabled ? "自动" : "手动"}模式 ${action} 入场先按 AI 撤销旧委托且保留部分成交持仓`, async () => {
       const task = insertNorthstarTask(`entry_after_cancel_${autoDecisionEnabled}_${action}_${Date.now()}`);
@@ -1130,7 +1164,8 @@ test(`AI${cancelled ? "撤销" : "未能撤销"}旧离场委托后${cancelled ? 
 }
 
 for (const autoDecisionEnabled of [false, true]) {
-test(`撤单失败后${autoDecisionEnabled ? "自动" : "手动"}模式持续交给AI分析并自动重试`, async () => {
+for (const failure of ["exception", "missing_result"]) {
+test(`撤单${failure}后${autoDecisionEnabled ? "自动" : "手动"}模式持续交给AI分析并自动重试`, async () => {
   const task = insertNorthstarTask(`retry_cancel_${autoDecisionEnabled}_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("retry-cancel", 100);
@@ -1146,7 +1181,10 @@ test(`撤单失败后${autoDecisionEnabled ? "自动" : "手动"}模式持续交
     },
     cancelOpenOrders: async () => {
       attempts += 1;
-      if (attempts === 1) throw new Error("page temporarily busy");
+      if (attempts === 1) {
+        if (failure === "exception") throw new Error("page temporarily busy");
+        return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", results: [] };
+      }
       return { ok: true, results: [{ orderId: "O-1", cancelled: true }] };
     },
     submitSuggestionForm: async () => assert.fail("cancellation cannot submit an entry"),
@@ -1155,6 +1193,10 @@ test(`撤单失败后${autoDecisionEnabled ? "自动" : "手动"}模式持续交
     await runMonitoringCycle(task.id, { runtime });
     assert.equal(task.status, "MONITORING");
     assert.equal(task.decision.orderCancellation.ok, false);
+    assert.equal(task.decision.orderCancellation.results[0].orderId, "O-1");
+    assert.equal(task.decision.orderCancellation.results[0].cancelled, false);
+    assert.equal(task.decision.orderCancellation.results[0].code, failure === "exception" ? "ORDER_CANCEL_FAILED" : "BROWSER_SESSION_NOT_FOUND");
+    assert.ok(getAgentOutput(task.id).some(line => /委托 O-1 撤销结果/.test(line.message)));
     await runMonitoringCycle(task.id, { runtime });
     assert.equal(rounds, 2);
     assert.equal(attempts, 2);
@@ -1163,6 +1205,7 @@ test(`撤单失败后${autoDecisionEnabled ? "自动" : "手动"}模式持续交
     assert.notEqual(task.pendingAction?.status, "WAITING");
   } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
 });
+}
 }
 
 test("启动时已有转让委托，按AI关联的持仓先撤单再离场", async () => {

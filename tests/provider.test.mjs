@@ -164,6 +164,43 @@ function decisionEnvelope(apiFormat, decision) {
 }
 
 for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
+  test(`${apiFormat} exit-plan repair preserves existing order assessments and supplements omitted orders`, async (t) => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      return new Response(JSON.stringify(decisionEnvelope(apiFormat, calls === 1 ? {
+        action: "HOLD",
+        order_assessments: [
+          { order_id: "O-cancel", decision: "CANCEL", reason: "释放冻结保证金更划算", target_position_ids: ["P-1"] },
+          { order_id: "O-keep", decision: "KEEP", reason: "成交机会仍然有利" },
+        ],
+        cancel_order_ids: ["O-direct"],
+      } : {
+        action: "HOLD",
+        exit_plans: [{ position_id: "P-1", held_side: "LONG", quantity: 1, take_profit_price: 110, stop_loss_price: 95, valid_for_sec: 300 }],
+        order_assessments: [
+          { order_id: "O-cancel", decision: "KEEP", reason: "格式补全不能改写已有撤单判断" },
+          { order_id: "O-direct", decision: "KEEP", reason: "不能覆盖显式撤单ID" },
+          { order_id: "O-new", decision: "CANCEL", reason: "补充遗漏委托" },
+        ],
+        cancel_order_ids: ["O-keep"],
+      })));
+    });
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test", apiFormat }, {
+      executionPolicy: { conditionalExits: true },
+      account: { positionsVerified: true, positions: [{ positionOrderId: "P-1", quantity: 1, frozenQuantity: 0 }],
+        openOrders: ["O-cancel", "O-keep", "O-direct", "O-new"].map(orderId => ({ orderId, remainingQuantity: 1 })) },
+    }, { fastAnalysis: true });
+    assert.equal(calls, 2);
+    assert.deepEqual(result.orderAssessments.map(item => [item.orderId, item.decision]), [["O-cancel", "CANCEL"], ["O-keep", "KEEP"], ["O-new", "CANCEL"]]);
+    assert.deepEqual(result.orderAssessments[0].targetPositionIds, ["P-1"]);
+    assert.deepEqual(result.cancelOrderIds, ["O-cancel", "O-direct", "O-new"]);
+    assert.deepEqual(result.orderAssessmentMissingIds, []);
+    assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+  });
+}
+
+for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
   for (const [action, exitType, missingOrderDecision, frozenQuantity = 0] of [
     ["BUY", null, "KEEP"], ["SELL", null, "CANCEL"],
     ["SELL", "STOP_LOSS", "CANCEL"], ["BUY", "TAKE_PROFIT", "KEEP"],

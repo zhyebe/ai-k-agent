@@ -93,6 +93,14 @@ test("subsequent task persistence excludes the transient provider selection", as
   } finally { setPersistence(null); }
 });
 
+test("desktop can detect a lost runtime model selection without exposing a provider preference", () => {
+  const task = { id: "restarted-task", ownerUserId: "user_1", providerId: "", status: "MONITORING" };
+  assert.equal(publicTask(task).providerSelectionRequired, true);
+  task.providerId = "locally-selected-model";
+  assert.equal(publicTask(task).providerSelectionRequired, false);
+  assert.equal("providerId" in publicTask(task), false);
+});
+
 test("listing shared providers cannot deduplicate or delete another creator's data", () => {
   const original = state.providers;
   const provider = { name: "gateway", model: "model", baseUrl: "https://gateway.example.test", encryptedKey: "enc-test" };

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { attachDesktopAiSocket, callProviderMethod, desktopAiRequired, hasDesktopAi, resetDesktopAiForTests } from "../server/desktop-ai.mjs";
+import { attachDesktopAiSocket, callProviderMethod, desktopAiRequired, desktopProviderPayload, hasDesktopAi, resetDesktopAiForTests } from "../server/desktop-ai.mjs";
+import { requestDecision } from "../server/provider.mjs";
+
+test("missing desktop provider stays unconfigured without dereferencing apiFormat", async () => {
+  for (const provider of [null, undefined]) {
+    const payload = desktopProviderPayload(provider);
+    assert.equal(payload, null);
+    const result = await requestDecision(payload, {});
+    assert.deepEqual(result.riskFlags, ["PROVIDER_NOT_CONFIGURED"]);
+    assert.deepEqual(result.cancelOrderIds, []);
+  }
+});
 
 test("production requires a connected desktop before model HTTP leaves the API host", async () => {
   resetDesktopAiForTests();

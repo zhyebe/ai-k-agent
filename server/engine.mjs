@@ -1884,6 +1884,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.market = toTaskMarket(market);
     reconcilePendingPosition(task, market);
     syncTaskMetricsFromMarket(task, market);
+    if (typeof market.account?.openOrdersVerified === "boolean") appendAgentOutput({
+      taskId, runId: run.id, stage: "collect", kind: "order",
+      message: market.account.openOrdersVerified
+        ? `当前委托已核实：${market.account.openOrders?.length || 0} 笔；逐笔交给 AI 比较继续等待与撤单释放资金`
+        : "当前委托读取未核实；不能当作没有委托，下轮继续读取",
+      data: { verified: market.account.openOrdersVerified, orderIds: (market.account.openOrders || []).map(order => order.orderId),
+        availableFunds: market.account.availableFunds ?? null, frozenFunds: market.account.frozenFunds ?? null, frozenMargin: market.account.frozenMargin ?? null },
+    });
     task.lastPolledAt = new Date().toISOString();
     task.lastObservedFingerprint = String(market.fingerprint || "");
     task.monitorFailureCount = 0;
@@ -1968,6 +1976,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     });
     let decision;
     let providerSucceeded = true;
+    let orderAssessmentSucceeded = false;
     let analysisCoverage = clientAnalysis ? { mode: "direct_client", complete: false, totalSegments: 1, reviewedSegments: 0, failedSegments: [] } : directAnalysisCoverage(analysisMarket);
     let segmentReviews = [];
     const analysisDeadlineMs = analysisTimeoutMs();
@@ -2059,7 +2068,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         assertCurrent();
       }
       if (analysisAbort.signal.aborted) throw analysisTimeoutError();
-      providerSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].some((code) => (decision.riskFlags || []).includes(code));
+      orderAssessmentSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON"].some((code) => (decision.riskFlags || []).includes(code));
+      providerSucceeded = orderAssessmentSucceeded && !(decision.riskFlags || []).includes("ANALYSIS_INCOMPLETE");
     } catch (error) {
       if (error instanceof CycleAbortError) throw error;
       if (isAnalysisTimeout(error) || analysisAbort.signal.aborted) return abandonTimedOutAnalysis(task, run, market);
@@ -2188,8 +2198,17 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const keepOrderIds = new Set((task.decision.orderAssessments || []).filter((item) => item.decision === "KEEP").map((item) => item.orderId));
     const cancelOrderIds = [...new Set([...(task.decision.cancelOrderIds || []), ...(task.decision.orderAssessments || []).filter((item) => item.decision === "CANCEL").map((item) => item.orderId)])]
       .filter((id) => liveOrderIds.has(id) && !keepOrderIds.has(id));
+    if (orderAssessmentSucceeded) {
+      for (const orderId of liveOrderIds) {
+        const assessment = task.decision.orderAssessments?.find(item => item.orderId === orderId);
+        const choice = cancelOrderIds.includes(orderId) ? "撤销剩余未成交数量" : keepOrderIds.has(orderId) ? "继续保留" : "尚未给出保留或撤销结论，下轮继续评估";
+        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "order", message: `委托 ${orderId}：AI ${choice}${assessment?.reason ? `；${assessment.reason}` : ""}` });
+      }
+    }
     const cancelAssessedOrders = async (orderIds) => {
-      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !providerSucceeded || positionChangedDuringAnalysis || decisionExpired(task)) return;
+      // A complete cancellation is independent of missing entry/exit plan
+      // fields. The browser still verifies the exact order and its remainder.
+      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !orderAssessmentSucceeded || positionChangedDuringAnalysis || decisionExpired(task)) return;
       const cancellationAbort = new AbortController();
       const cancelSubmission = () => cancellationAbort.abort(new Error("ORDER_CANCEL_ABORTED"));
       pendingSubmissionCancels.set(task.id, cancelSubmission);
@@ -2202,7 +2221,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         if (pendingSubmissionCancels.get(task.id) === cancelSubmission) pendingSubmissionCancels.delete(task.id);
       }
       assertCurrent();
-      const results = cancellation.results || [];
+      const results = orderIds.map(orderId => cancellation.results?.find(result => result.orderId === orderId)
+        || { orderId, ok: false, cancelled: false, code: cancellation.code || "ORDER_CANCEL_RESULT_MISSING", message: cancellation.message || "未收到该委托的撤销结果，不能认定撤单成功" });
       const allResults = [...(task.decision.orderCancellation?.results || []), ...results];
       task.decision.orderCancellation = { ...cancellation, results: allResults, ok: allResults.length > 0 && allResults.every((result) => result.cancelled) };
       for (const result of results) {

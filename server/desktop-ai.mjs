@@ -123,6 +123,7 @@ export function handleDesktopAiMessage(message, socket) {
 }
 
 export function desktopProviderPayload(provider) {
+  if (!provider) return null;
   return {
     id: provider?.id || "",
     name: provider?.name || "",

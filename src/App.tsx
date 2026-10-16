@@ -500,25 +500,29 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
   const [agentRefreshVersion, setAgentRefreshVersion] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [localProviderId, setLocalProviderIdState] = useState("");
+  const syncedProviderSelection = useRef("");
 
   const task = workspace.tasks.find((item) => item.id === selectedTaskId) || workspace.tasks[0] || null;
   const isRunning = taskIsMonitoring(task);
   const currentProviderId = workspace.providers.some((item) => item.id === localProviderId && item.configured) ? localProviderId : "";
+  const runningTask = workspace.tasks.find(taskIsMonitoring);
 
   useEffect(() => {
     if (user) setLocalProviderIdState(getLocalProviderId(user.id));
   }, [user?.id]);
 
   useEffect(() => {
-    if (!user || !workspaceReady || !currentProviderId) return;
-    const runningTask = workspace.tasks.find(taskIsMonitoring);
-    if (!runningTask) return;
+    if (!user || !workspaceReady || !currentProviderId || !runningTask) return;
+    const selection = JSON.stringify([user.id, runningTask.id, currentProviderId]);
+    if (runningTask.providerSelectionRequired !== true && syncedProviderSelection.current === selection) return;
     let active = true;
-    setTaskProvider(runningTask.id, currentProviderId).catch((error) => {
+    setTaskProvider(runningTask.id, currentProviderId).then(() => {
+      if (active) syncedProviderSelection.current = selection;
+    }).catch((error) => {
       if (active) notify(`恢复本机模型选择失败：${error instanceof Error ? error.message : "请重新选择 Provider"}`);
     });
     return () => { active = false; };
-  }, [user?.id, workspaceReady, currentProviderId]);
+  }, [user?.id, workspaceReady, currentProviderId, runningTask?.id, runningTask?.providerSelectionRequired]);
 
   useEffect(() => {
     let active = true;

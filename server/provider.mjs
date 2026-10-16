@@ -896,7 +896,14 @@ export async function requestDecision(provider, context, options = {}) {
         decision.orderAssessments.push(...next.orderAssessments.filter(item => missing.has(item.orderId)));
         decision.cancelOrderIds = [...new Set([...decision.cancelOrderIds, ...next.cancelOrderIds.filter(id => missing.has(id))])];
       } else {
-        decision = next;
+        // This request repairs incomplete action/exit fields against the same
+        // snapshot. Preserve already explicit KEEP/CANCEL decisions, just as
+        // the order-only supplement does; omitted fields cannot erase them.
+        const assessed = new Set([...decision.orderAssessments.map(item => item.orderId), ...decision.cancelOrderIds]);
+        decision = { ...next,
+          orderAssessments: [...decision.orderAssessments, ...next.orderAssessments.filter(item => !assessed.has(item.orderId))],
+          cancelOrderIds: [...new Set([...decision.cancelOrderIds, ...next.cancelOrderIds.filter(id => !assessed.has(id))])],
+        };
       }
     }
     decision.modelDiagnostics = diagnostics(corrected || response, retryError);

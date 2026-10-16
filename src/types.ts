@@ -354,6 +354,7 @@ export interface Task {
   entryQuantity?: number;
   autoDecisionCountdownSec?: number;
   providerId?: string;
+  providerSelectionRequired?: boolean;
   pendingAction?: PendingAction | null;
   unsettledActions?: PendingAction[];
   activeRunId?: string | null;

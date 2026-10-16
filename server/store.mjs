@@ -88,6 +88,7 @@ export function publicTask(task) {
   return {
     ...safeTask,
     automationAuthorized: false,
+    providerSelectionRequired: !String(providerId || "").trim(),
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
     sessionClose: parseSessionClose(task.sessionClose) || DEFAULT_SESSION_CLOSE,

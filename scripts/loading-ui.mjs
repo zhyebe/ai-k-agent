@@ -62,6 +62,37 @@ async function capture(page, name) {
   await page.screenshot({ path: join(process.env.AXIOM_LOADING_SCREENSHOTS, `${name}.png`), fullPage: true });
 }
 
+test("server restart automatically restores the exact locally selected model during monitoring", async (t) => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  sample.tasks = [{ ...sample.tasks[0], id: "restart-model", status: "MONITORING", monitoringEnabled: true, stopLocked: false, providerSelectionRequired: false }];
+  sample.providers = ["stepfun", "deepseek"].map(id => ({ id, name: id, model: `${id}-model`, configured: true, owned: true, baseUrl: `https://${id}.example.test` }));
+  await page.addInitScript(({ userId }) => localStorage.setItem(`axiom.provider:${JSON.stringify([location.origin, userId])}`, "deepseek"), { userId: user.id });
+  const restored = [];
+  await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+  await page.route("**/api/tasks/restart-model/provider", route => {
+    restored.push(route.request().postDataJSON().providerId);
+    sample.tasks[0].providerSelectionRequired = false;
+    return route.fulfill({ json: { task: sample.tasks[0] } });
+  });
+  await page.clock.install();
+  const initialSelection = page.waitForResponse("**/api/tasks/restart-model/provider");
+  await navigate();
+  await page.getByRole("combobox", { name: "分析模型", exact: true }).waitFor();
+  await initialSelection;
+  assert.deepEqual(restored, ["deepseek"]);
+  sample.tasks[0].providerSelectionRequired = true;
+  const restoredRequest = page.waitForResponse("**/api/tasks/restart-model/provider");
+  await page.clock.fastForward(5500);
+  await restoredRequest;
+  assert.deepEqual(restored, ["deepseek", "deepseek"]);
+  const nextWorkspace = page.waitForResponse("**/api/workspace");
+  await page.clock.fastForward(5500);
+  await nextWorkspace;
+  assert.equal(await page.getByRole("combobox", { name: "分析模型", exact: true }).inputValue(), "deepseek");
+  assert.deepEqual(restored, ["deepseek", "deepseek"], "normal polls must not repeatedly reset the selection");
+});
+
 test("shared providers enforce creator controls and cache each user's enabled model locally", async (t) => {
   const { page, navigate } = await openPage(t);
   const sample = structuredClone(workspace);
