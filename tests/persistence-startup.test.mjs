@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { readFile } from "node:fs/promises";
 import test, { after, before, mock } from "node:test";
 import { createPersistence } from "../server/persistence.mjs";
+import { tradingSkillUpgrade } from "../server/trading-skill-upgrade.mjs";
+import { approvedKnowledgeForAnalysis, buildApprovedExperiencePrompt } from "../server/rag.mjs";
+import { hydrateState, state } from "../server/store.mjs";
 
 let mysqlPool;
 before(() => {
@@ -16,6 +20,134 @@ function databaseMode(t, mode) {
   process.env.DB_MODE = mode;
   t.after(() => { if (previous === undefined) delete process.env.DB_MODE; else process.env.DB_MODE = previous; });
 }
+
+async function oldTradingSkill() {
+  return {
+    id: "skill_04ef36d5-3002-40fd-b51f-3914867e29f1", status: "APPROVED", version: "v0.3.76",
+    owner_user_id: "author", title: "AI 趋势交易：入场、持仓与离场（合并版）", tags_json: '["优先参考"]',
+    content: (await readFile(new URL("./fixtures/trading-skill-v0.3.76.md", import.meta.url), "utf8")).trim(),
+  };
+}
+
+test("only the exact reviewed legacy Skill is eligible for the short-term correction", async () => {
+  const previous = await oldTradingSkill();
+  const revision = await tradingSkillUpgrade(previous);
+  assert.equal(revision.version, "v0.3.84");
+  assert.match(revision.content, /盈利吃到 2–5 根 K 就及时离场/);
+  assert.match(revision.content, /持仓超过约 5 根 K 仍亏损/);
+  assert.equal(await tradingSkillUpgrade({ ...previous, ...revision }), null);
+  for (const change of [{ id: "unrelated" }, { status: "REVIEW" }, { version: "newer" }, { content: `${previous.content}\n用户新增内容` }]) {
+    assert.equal(await tradingSkillUpgrade({ ...previous, ...change }), null);
+  }
+});
+
+test("MySQL upgrades the reviewed Skill once and loads the persisted revision into AI context", async t => {
+  databaseMode(t, "mysql");
+  const old = await oldTradingSkill();
+  let row = { ...old };
+  let writes = 0;
+  mysqlPool = {
+    query: async sql => [/^SELECT \* FROM skills$/.test(sql) ? [{ ...row }] : []],
+    execute: async (sql, values) => {
+      assert.match(sql, /WHERE id = \? AND status = \? AND version = \? AND BINARY content = BINARY \?/);
+      assert.deepEqual(values.slice(3), [old.id, old.status, old.version, old.content]);
+      row = { ...row, content: values[0], version: values[1], chunk_count: values[2], updated_at: new Date() };
+      writes++;
+      return [{ affectedRows: 1 }];
+    },
+    end: async () => {},
+  };
+  const previousSkills = state.skills;
+  t.after(() => hydrateState({ skills: previousSkills }));
+  const adapter = await createPersistence();
+  t.after(() => adapter.close());
+  for (let restart = 0; restart < 2; restart++) {
+    const snapshot = await adapter.loadState();
+    hydrateState({ skills: snapshot.skills });
+    assert.equal(state.skills[0].version, "v0.3.84");
+    assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
+    assert.deepEqual(state.skills[0].tags, ["优先参考"]);
+    const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
+    assert.ok(prompt.includes(row.content));
+    assert.match(prompt, /没有具体、近期、可核实的恢复证据/);
+    assert.doesNotMatch(prompt, /5 根只是示例，不是盈利目标或持仓上限/);
+  }
+  assert.equal(writes, 1);
+});
+
+test("MySQL does not replace concurrent edits and reloads the current database Skill", async t => {
+  databaseMode(t, "mysql");
+  const old = await oldTradingSkill();
+  let row = { ...old };
+  mysqlPool = {
+    query: async sql => [/^SELECT \* FROM skills$/.test(sql) ? [{ ...row }] : []],
+    execute: async sql => {
+      assert.match(sql, /BINARY content = BINARY \?/);
+      row = { ...row, version: "user-update", content: "用户并发更新的经验" };
+      return [{ affectedRows: 0 }];
+    },
+    end: async () => {},
+  };
+  const adapter = await createPersistence();
+  t.after(() => adapter.close());
+  const snapshot = await adapter.loadState();
+  assert.equal(snapshot.skills[0].content, row.content);
+  assert.equal(snapshot.skills[0].version, "user-update");
+});
+
+test("failed MySQL knowledge upgrade is reported without losing persisted skills, tasks or providers", async t => {
+  databaseMode(t, "mysql");
+  const row = await oldTradingSkill();
+  const errors = [];
+  t.mock.method(console, "error", (...args) => errors.push(args));
+  mysqlPool = {
+    query: async sql => [/^SELECT \* FROM skills$/.test(sql) ? [{ ...row }]
+      : /^SELECT \* FROM tasks$/.test(sql) ? [{ id: "existing-task", runtime_json: "{}", target_json: "{}" }]
+        : /^SELECT \* FROM providers$/.test(sql) ? [{ id: "existing-model", name: "模型", model: "deepseek-chat" }] : []],
+    execute: async () => { throw new Error("database write failed"); },
+    end: async () => {},
+  };
+  const adapter = await createPersistence();
+  t.after(() => adapter.close());
+  const snapshot = await adapter.loadState();
+  assert.deepEqual(errors, [["TRADING_SKILL_UPGRADE_FAILED", { skillId: row.id, code: "UPGRADE_FAILED" }]]);
+  assert.equal(snapshot.skills[0].version, "v0.3.76");
+  assert.equal(snapshot.skills[0].content, row.content);
+  assert.equal(snapshot.tasks[0].id, "existing-task");
+  assert.equal(snapshot.providers[0].id, "existing-model");
+});
+
+test("MongoDB upgrades the same reviewed Skill and reloads persisted content", async t => {
+  databaseMode(t, "mongo");
+  const old = await oldTradingSkill();
+  let row = { ...old, _id: old.id, ownerUserId: "author", tags: ["优先参考"] };
+  let writes = 0;
+  const { MongoClient } = await import("mongodb");
+  t.mock.method(MongoClient.prototype, "connect", async function () { return this; });
+  t.mock.method(MongoClient.prototype, "close", async () => {});
+  t.mock.method(MongoClient.prototype, "db", () => ({ collection: name => ({
+    find: () => {
+      const cursor = { sort: () => cursor, limit: () => cursor, toArray: async () => name === "skills" ? [{ ...row }] : [] };
+      return cursor;
+    },
+    updateOne: async (filter, update) => {
+      assert.equal(name, "skills");
+      assert.deepEqual(filter, { _id: old.id, id: old.id, status: old.status, version: old.version, content: old.content });
+      row = { ...row, ...update.$set };
+      writes++;
+      return { modifiedCount: 1 };
+    },
+  }) }));
+  const adapter = await createPersistence();
+  t.after(() => adapter.close());
+  for (let restart = 0; restart < 2; restart++) {
+    const snapshot = await adapter.loadState();
+    assert.equal(snapshot.skills[0].version, "v0.3.84");
+    assert.match(snapshot.skills[0].content, /持仓超过约 5 根 K 仍亏损/);
+    assert.equal(snapshot.skills[0].ownerUserId, "author");
+  }
+  assert.equal(writes, 1);
+});
 
 test("MySQL startup keeps account and task rows and only truncates AI dumps", async (t) => {
   databaseMode(t, "mysql");

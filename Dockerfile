@@ -34,6 +34,7 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY server ./server
+COPY skills/dgkz-dgjj-entry-exit-analysis ./skills/dgkz-dgjj-entry-exit-analysis
 COPY db ./db
 EXPOSE 8787
 CMD ["node", "server/index.mjs"]

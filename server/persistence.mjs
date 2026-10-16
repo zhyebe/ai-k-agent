@@ -1,5 +1,6 @@
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { DEFAULT_SESSION_CLOSE } from "./exit-policy.mjs";
+import { tradingSkillUpgrade } from "./trading-skill-upgrade.mjs";
 
 function json(value) {
   return JSON.stringify(value ?? {});
@@ -647,7 +648,23 @@ async function createMySqlAdapter() {
     },
     async loadState() {
       const [taskRows] = await pool.query("SELECT * FROM tasks");
-      const [skillRows] = await pool.query("SELECT * FROM skills");
+      let [skillRows] = await pool.query("SELECT * FROM skills");
+      for (const skill of skillRows) {
+        try {
+          const revision = await tradingSkillUpgrade(skill);
+          if (!revision) continue;
+          await pool.execute(
+            "UPDATE skills SET content = ?, version = ?, chunk_count = ?, updated_at = NOW() WHERE id = ? AND status = ? AND version = ? AND BINARY content = BINARY ?",
+            [revision.content, revision.version, revision.chunks, skill.id, skill.status, skill.version, skill.content],
+          );
+        } catch (error) {
+          // A knowledge-only migration must not discard readable account state.
+          console.error("TRADING_SKILL_UPGRADE_FAILED", { skillId: skill.id, code: error?.code || "UPGRADE_FAILED" });
+        }
+        // Never hydrate an unsaved revision, including after a concurrent edit.
+        [skillRows] = await pool.query("SELECT * FROM skills");
+        break;
+      }
       const [providerRows] = await pool.query("SELECT * FROM providers");
       const [connectorRows] = await pool.query("SELECT * FROM connectors");
       const [orderRows] = await pool.query(recentRowsSql("orders", "id", "created_at", 200)).catch(() => [[]]);
@@ -834,7 +851,7 @@ async function createMongoAdapter() {
     saveAssignment: (assignment) => collections.assignments.replaceOne({ _id: `${assignment.userId}:${assignment.taskId}` }, { ...assignment, _id: `${assignment.userId}:${assignment.taskId}` }, { upsert: true }),
     deleteAssignment: (assignment) => collections.assignments.deleteOne({ _id: `${assignment.userId}:${assignment.taskId}` }),
     async loadState() {
-      const [tasks, skills, providers, connectors, orders, events, users, assignments] = await Promise.all([
+      let [tasks, skills, providers, connectors, orders, events, users, assignments] = await Promise.all([
         collections.tasks.find().sort({ updatedAt: -1 }).toArray(),
         collections.skills.find().sort({ updatedAt: -1 }).toArray(),
         collections.providers.find().sort({ updatedAt: -1 }).toArray(),
@@ -844,6 +861,20 @@ async function createMongoAdapter() {
         collections.users.find().sort({ updatedAt: -1 }).toArray(),
         collections.assignments.find().toArray(),
       ]);
+      for (const skill of skills) {
+        try {
+          const revision = await tradingSkillUpgrade(skill);
+          if (!revision) continue;
+          await collections.skills.updateOne(
+            { _id: skill._id, id: skill.id, status: skill.status, version: skill.version, content: skill.content },
+            { $set: revision },
+          );
+        } catch (error) {
+          console.error("TRADING_SKILL_UPGRADE_FAILED", { skillId: skill.id, code: error?.code || "UPGRADE_FAILED" });
+        }
+        skills = await collections.skills.find().sort({ updatedAt: -1 }).toArray();
+        break;
+      }
       return { tasks: tasks.map(({ _id, ...item }) => item), skills: skills.map(({ _id, ...item }) => item), providers: providers.map(({ _id, ...item }) => item), connectors: connectors.map(({ _id, ...item }) => item), orders: orders.map(({ _id, ...item }) => item), events: events.map(({ _id, ...item }) => item), users: users.map(({ _id, ...item }) => item), assignments: assignments.map(({ _id, ...item }) => item), analyses: [], agentRuns: [], agentOutput: [] };
     },
     async loadCredentials() {

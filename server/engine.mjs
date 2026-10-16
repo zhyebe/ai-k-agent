@@ -11,7 +11,7 @@ import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } 
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
-import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
+import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, positionEntryPrice, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -164,7 +164,7 @@ function updatePositionTracking(task, market, now = Date.now()) {
   const contexts = positions.map((position, index) => {
     const key = positionTrackingKey(position, index);
     const direction = positionDirection(position);
-    const entryPrice = Number(position?.orderPrice);
+    const entryPrice = positionEntryPrice(position);
     const snapshot = positionMarketSnapshot(market, position);
     const price = Number(snapshot?.latest?.price ?? snapshot?.quote?.price);
     const currentPrice = Number.isFinite(price) && price > 0 ? price : null;
@@ -186,6 +186,8 @@ function updatePositionTracking(task, market, now = Date.now()) {
     const updatedWorst = currentPrice === null ? worstPrice : direction === "SHORT" ? Math.max(worstPrice || currentPrice, currentPrice) : Math.min(worstPrice || currentPrice, currentPrice);
     const validPrices = entryPrice > 0 && currentPrice > 0;
     const knownDirection = direction === "LONG" || direction === "SHORT";
+    const exitQuotePnlPoints = knownDirection && entryPrice > 0 && exitQuotePrice > 0
+      ? (direction === "SHORT" ? entryPrice - exitQuotePrice : exitQuotePrice - entryPrice) : null;
     const unrealizedPnlPct = validPrices && knownDirection ? (direction === "SHORT" ? (entryPrice - currentPrice) : (currentPrice - entryPrice)) / entryPrice * 100 : null;
     const maxFavorableExcursionPct = knownDirection && entryPrice > 0 && updatedBest > 0 && updatedWorst > 0
       ? Math.max(0, direction === "SHORT" ? (entryPrice - updatedBest) : (updatedBest - entryPrice)) / entryPrice * 100 : null;
@@ -205,8 +207,8 @@ function updatePositionTracking(task, market, now = Date.now()) {
       currentPrice,
       exitQuotePrice,
       exitQuoteQuantity: exitQuotePrice === null ? null : exitQuote.volume,
-      exitQuotePnlPct: entryPrice > 0 && exitQuotePrice > 0
-        ? Number(((direction === "SHORT" ? entryPrice - exitQuotePrice : exitQuotePrice - entryPrice) / entryPrice * 100).toFixed(4)) : null,
+      exitQuotePnlPoints: exitQuotePnlPoints === null ? null : Number(exitQuotePnlPoints.toFixed(8)),
+      exitQuotePnlPct: exitQuotePnlPoints === null ? null : Number((exitQuotePnlPoints / entryPrice * 100).toFixed(4)),
       orderTime: position?.orderTime || null,
       firstObservedAt,
       holdingDurationSec,

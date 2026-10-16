@@ -68,6 +68,7 @@
     "asar": true,
     "asarUnpack": [
       "server/**",
+      "skills/dgkz-dgjj-entry-exit-analysis/SKILL.md",
       "electron/browser-host.cjs",
       "node_modules/ws/**",
       "node_modules/playwright/**",
@@ -80,6 +81,7 @@
       "dist/assets/**",
       "electron/**",
       "server/**",
+      "skills/dgkz-dgjj-entry-exit-analysis/SKILL.md",
       "package.json",
       "node_modules/**"
     ],

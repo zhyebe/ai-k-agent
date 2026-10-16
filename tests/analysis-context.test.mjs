@@ -19,6 +19,9 @@ test("入场由 AI 趋势识别，利润点限定未来5根以内且离场仍由
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /吃到2根即可离场/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /不固定根数强平/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /盈利吃到2–5根K后立即兑现/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /亏损持仓超过约5根K/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /不能每轮重置为再等5根/);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, true);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);

@@ -159,7 +159,7 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据→AI 判断多周期大趋势方向和风险，再决定短线入场与离场→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利。利润点和计划离场时机只看未来5根K以内：吃到2根即可离场，是否继续到3–5根由AI比较可兑现净收益与回吐风险。不固定根数强平、不强制等满5根，也不为长线目标死守。没有净利润时判断短线恢复机会；真实趋势失效且继续持仓预计扩大亏损时最小损失离场，不无限等反弹。疑似闪K及其瞬时显示价格不纳入预测分析；真实可成交bid/ask独立用于执行校验。",
+    summary: "观察实时数据→AI 判断多周期大趋势方向和风险，再决定短线入场与离场→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利。利润点和计划离场时机只看未来5根K以内：吃到2根即可离场，有具体额外收益才可等到3–5根；盈利吃到2–5根K后立即兑现可成交净利润。不固定根数强平、不强制等满5根，也不为长线目标死守。亏损持仓超过约5根K通常说明短线回本预期落空，没有具体近期恢复证据就立即止损；可更早保护，不等大周期反转。结合真实入场起的持仓时长、已确认K和上一轮计划，不能每轮重置为再等5根。浮亏也是风险，毛利不等于净利，未知费用不当零。疑似闪K及其瞬时显示价格不纳入预测分析；真实可成交bid/ask独立用于执行校验。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],
@@ -168,7 +168,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     noSecondEntryWhileHolding: false,
   },
   kline: {
-    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；持仓与离场以大趋势和AI预测的延续路径为主，不被单根反向K或闪K带偏。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
+    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；大趋势指导方向和风险，持仓离场执行短线2–5根兑现与亏损及时保护要求，不被单根反向K或闪K带偏。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
     periodMs: LIVE_KLINE_PERIOD_MS,
     printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,

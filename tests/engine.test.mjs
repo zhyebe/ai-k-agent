@@ -465,6 +465,36 @@ test("空仓回撤和峰值浮盈浮亏按真实方向提供给AI", () => {
   assert.equal(loss.unrealizedPnlPct, -3);
 });
 
+test("多空亏损按可成交平仓方向给出负点差，持仓时长不随分析重置", () => {
+  const enteredAt = new Date(Date.now() - 6 * 60000).toISOString();
+  const market = { symbol: "A", timeframe: "1m", latest: { price: 120 }, account: { positionsVerified: true, positions: [
+    { positionOrderId: "long-loss", symbol: "A", side: "买", orderPrice: 100, quantity: 2, orderTime: enteredAt },
+    { positionOrderId: "short-loss", symbol: "A", side: "卖", entryPrice: 100, quantity: 1, orderTime: enteredAt },
+    { positionOrderId: "unknown", symbol: "A", side: "UNKNOWN", orderPrice: 100, quantity: 1 },
+    { positionOrderId: "missing-cost", symbol: "A", side: "买", quantity: 1 },
+  ] }, books: [{ symbol: "A", latest: { price: 120 }, orderBook: { bids: [{ price: 91, volume: 2 }], asks: [{ price: 109, volume: 3 }] } }], analysisLayers: { layers: [] } };
+  const task = { market, metrics: {}, rules: [], decision: { action: "HOLD" } };
+  for (let round = 0; round < 2; round++) {
+    const { positionContext } = buildDecisionContext(task, market, [], "monitor", market).account;
+    for (const position of positionContext.slice(0, 2)) {
+      assert.equal(position.entryPrice, 100);
+      assert.equal(position.exitQuotePnlPoints, -9);
+      assert.equal(position.exitQuotePnlPct, -9);
+      assert.equal(position.firstObservedAt, enteredAt);
+      assert.ok(position.holdingDurationSec >= 360);
+    }
+    assert.equal(positionContext[0].exitQuotePrice, 91);
+    assert.equal(positionContext[1].exitQuotePrice, 109);
+    assert.equal(positionContext[0].unrealizedPnlPct, 20); // Last mark is not an executable exit.
+    assert.equal(positionContext[2].exitQuotePnlPoints, null);
+    assert.equal(positionContext[3].exitQuotePnlPoints, null);
+  }
+  market.books[0].orderBook = { bids: [{ price: 109, volume: 2 }], asks: [{ price: 110, volume: 2 }] };
+  assert.equal(buildDecisionContext(task, market, [], "monitor", market).account.positionContext[0].exitQuotePnlPoints, 9);
+  market.books[0].orderBook = { bids: [{ price: 90, volume: 2 }], asks: [{ price: 91, volume: 2 }] };
+  assert.equal(buildDecisionContext(task, market, [], "monitor", market).account.positionContext[1].exitQuotePnlPoints, 9);
+});
+
 test("中文持仓使用本盘报价，缺失本盘报价不混用其他盘价格", () => {
   const market = { symbol: "A", symbolName: "甲商品", latest: { price: 200 }, account: { positions: [
     { positionOrderId: "P-B", symbolName: "乙商品", side: "买", orderPrice: 100, quantity: 1 },
