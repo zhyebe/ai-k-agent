@@ -19,6 +19,10 @@ if ! docker info >/dev/null 2>&1; then
 fi
 docker info >/dev/null
 
+# Preserve the actual previous containers, even when an old deployment used :latest.
+PREVIOUS_API_IMAGE="$(docker inspect --format '{{.Image}}' "$(docker compose ps -aq api)" 2>/dev/null || true)"
+PREVIOUS_ADMIN_IMAGE="$(docker inspect --format '{{.Image}}' "$(docker compose ps -aq nginx)" 2>/dev/null || true)"
+
 # Recover data services first. `--no-deps` below keeps image deployment isolated,
 # but a previously stopped MySQL/Mongo would otherwise leave the API in a crash loop.
 docker compose up -d --no-build mysql mongo
@@ -42,6 +46,7 @@ docker compose up -d --no-build --no-deps api nginx
 
 for _ in $(seq 1 40); do
   if curl --max-time 5 -fsS http://127.0.0.1/api/health; then
+    bash scripts/remote/pin-images.sh "$IMAGE_VERSION"
     rm -f "$ARCHIVE"
     docker compose ps api nginx
     API_CONTAINER="$(docker compose ps -q api)"
@@ -58,6 +63,8 @@ for _ in $(seq 1 40); do
       curl --max-time 5 -fsS http://127.0.0.1/api/health
       if [ "$SAMPLE" -lt 11 ]; then sleep 30; fi
     done
+    bash scripts/remote/prune-release-images.sh "$AXIOM_API_IMAGE" "$AXIOM_ADMIN_IMAGE" \
+      "$PREVIOUS_API_IMAGE" "$PREVIOUS_ADMIN_IMAGE"
     exit 0
   fi
   sleep 3

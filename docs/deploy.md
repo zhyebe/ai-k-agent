@@ -48,7 +48,11 @@ scripts/deploy-docker.sh --host <公网IP> --internal-host <内网IP> --password
 scripts/setup-git-deploy.sh
 ```
 
-日常发布走 GitHub Release，或在 Actions 手动跑 **Deploy API**。Actions 构建镜像并传到服务器；服务器先停止旧 API 释放浏览器进程，再加载镜像并以 `--no-build --no-deps` 更新 API 和后台。数据库容器、卷及 `.env` 不变。不要在生产执行旧版 bootstrap / 本地数据导入脚本。
+日常发布走 GitHub Release，或在 Actions 手动跑 **Deploy API**。Actions 构建镜像并传到服务器；服务器先停止旧 API 释放浏览器进程，再加载镜像并以 `--no-build --no-deps` 更新 API 和后台。数据库卷及连接凭据保持不变。不要在生产执行旧版 bootstrap / 本地数据导入脚本。
+
+健康检查成功后，脚本把当前 API/后台镜像固定到 `.env`，普通 Compose 重启不会使用旧的 `latest`。稳定性检查通过后，只清理本项目的历史发布镜像，保留当前版本、上一版本和仍被容器引用的镜像；不清理数据库卷。`.env` 中其他配置保持原值。
+
+所有容器日志每份最多 10 MB、最多 3 份。MySQL binlog 默认保留 24 小时，可通过 `MYSQL_BINLOG_RETENTION_SECONDS` 调整；已有实例若使用 `SET PERSIST`，须同时调整数据库持久化变量。启用复制或时间点恢复时，应按恢复窗口配置保留期。清理 binlog 必须使用 MySQL 的 `PURGE BINARY LOGS`，不可直接删除当前日志或修改索引。业务账号、知识库、凭据、任务和订单不属于可清理日志。
 
 ## 2. 机器要求
 
