@@ -2,23 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
-test("入场由 AI 趋势识别，利润点限定未来5根以内且离场仍由AI判断", () => {
+test("入场由 AI 趋势识别，离场优先最大预期净收益并在失效时最小损失", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
   assert.equal(entry.minimumProbability, null);
   assert.equal(entry.decisionMode, "AI_RECOGNITION");
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.equal(exit.profitGoal, "REALIZE_SHORT_TERM_NET_PROFIT");
-  assert.equal(exit.profitHorizonMaxK, 5);
-  assert.equal(exit.fixedCandleExit, false);
+  assert.equal(exit.profitGoal, "MAXIMIZE_EXPECTED_NET_PROFIT");
   assert.equal(exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
   assert.equal(exit.onExitDecision, "EXECUTE_IMMEDIATELY");
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["转让"]);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /吃到2根即可离场/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /不固定根数强平/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /5根只是举例/);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, true);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);

@@ -1193,7 +1193,7 @@ export function resolveObservedHaohanSymbol(pageInstrument, taskSymbol) {
   return pageSymbol || configured;
 }
 
-export async function observeExecutionMarket(task, connector, { accountScope = "full", target: requestedTarget = null } = {}) {
+export async function observeExecutionMarket(task, connector, { accountScope = "full" } = {}) {
   if (connector?.reviewStatus !== "APPROVED" || connector.adapterId !== "haohan-readonly" || !connector.capabilities?.includes("read_visible_market")) return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED" };
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
   const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true, accountScope });
@@ -1205,7 +1205,7 @@ export async function observeExecutionMarket(task, connector, { accountScope = "
   // collecting other instruments. Submission rechecks the exact position/quote.
   const targets = uniquePageInstruments(primary.account?.positions || []);
   const index = Math.max(0, Math.floor(Number(task.exitObservationIndex) || 0));
-  const target = requestedTarget || (targets.length ? targets[index % targets.length] : null);
+  const target = targets.length ? targets[index % targets.length] : null;
   let book = { ...primary, observedAt: new Date(snapshot.capturedAt).toISOString() };
   if (target && !samePageInstrument(book, target)) {
     if (!await selectPageBoardInstrument(sessionId, target)) return { ...primary, ok: true, books: [], orderBook: null };

@@ -126,6 +126,8 @@ function positionDirection(position) {
 function parsePositionTimestamp(value) {
   const raw = String(value || "").trim();
   if (!raw) return null;
+  const direct = new Date(raw).getTime();
+  if (Number.isFinite(direct)) return direct;
   const normalized = raw
     .replace(/年/g, "-")
     .replace(/月/g, "-")
@@ -136,12 +138,7 @@ function parsePositionTimestamp(value) {
     .replace(/:\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  // Haohan's unzoned order times are Beijing time, regardless of API host TZ.
-  const local = normalized.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2})(\.\d{1,3})?)?$/);
-  const zoned = local
-    ? `${local[1]}-${local[2].padStart(2, "0")}-${local[3].padStart(2, "0")}T${local[4].padStart(2, "0")}:${local[5]}:${local[6] || "00"}${local[7] || ""}+08:00`
-    : normalized;
-  const parsed = new Date(zoned).getTime();
+  const parsed = new Date(normalized).getTime();
   return Number.isFinite(parsed) ? parsed : null;
 }
 
@@ -173,11 +170,7 @@ function updatePositionTracking(task, market, now = Date.now()) {
     const exitQuotePrice = exitQuote?.volume > 0 ? exitQuote.price : null;
     const prior = previous[key] || {};
     const orderTimeMs = parsePositionTimestamp(position?.orderTime);
-    const priorTimeMs = Date.parse(prior.firstObservedAt || "");
-    // Prefer the real entry time; also repairs persisted UTC-misparsed values.
-    const firstObservedAt = orderTimeMs !== null && orderTimeMs <= now
-      ? new Date(orderTimeMs).toISOString()
-      : Number.isFinite(priorTimeMs) && priorTimeMs <= now ? prior.firstObservedAt : new Date(now).toISOString();
+    const firstObservedAt = prior.firstObservedAt || (orderTimeMs ? new Date(orderTimeMs).toISOString() : new Date(now).toISOString());
     const bestPrice = Number.isFinite(Number(prior.bestPrice)) && Number(prior.bestPrice) > 0
       ? Number(prior.bestPrice) : currentPrice;
     const worstPrice = Number.isFinite(Number(prior.worstPrice)) && Number(prior.worstPrice) > 0
@@ -276,6 +269,7 @@ function closingActionForPositions(positions) {
 
 export function attachPositionExit(decision, market = {}) {
   const positions = openPositionsFromMarket(market);
+  if (!positions.length) return decision;
   if (!decision?.exitType) return decision;
   const requestedIds = (Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : []).map(String).filter(Boolean);
   const fail = (flag) => ({
@@ -284,7 +278,6 @@ export function attachPositionExit(decision, market = {}) {
     exitType: null,
     riskFlags: [...new Set([...(decision?.riskFlags || []), flag])],
   });
-  if (!positions.length) return market.account?.positionsVerified === true ? fail("EXIT_TARGET_NOT_FOUND") : decision;
   if (decision?.exitType !== "TAKE_PROFIT" && decision?.exitType !== "STOP_LOSS") return fail("EXIT_TYPE_REQUIRED");
   const targetValues = [decision.targetSymbol, decision.targetSymbolName, decision.targetInstrumentId]
     .map((value) => String(value || "").trim().toLocaleLowerCase()).filter(Boolean);
@@ -2092,39 +2085,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     actionPhaseLocks.add(taskId);
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
-    decision = applyEntryBoundary(enforceProfitProbability(decision), market);
-    let exitMarket = market;
-    // Model latency must not turn an explicit exit into HOLD merely because the
-    // analysis snapshot aged. Read the target's current quote, without reloading
-    // the page or asking the model again. Keep analysis timestamps/plan TTL intact.
-    if (providerSucceeded && isLiveTask(task) && market.account?.positionsVerified === true && decision.exitType === "TAKE_PROFIT") {
-      const requestedIds = new Set(decision.targetPositionIds || []);
-      const targetValues = normalizedInstrumentValues({ symbol: decision.targetSymbol, symbolName: decision.targetSymbolName, instrumentId: decision.targetInstrumentId });
-      const positions = openPositionsFromMarket(market).filter(p => requestedIds.size ? requestedIds.has(p.positionOrderId)
-        : closingActionForPositions([p]) === decision.action && (!targetValues.length || normalizedInstrumentValues(p).some(value => targetValues.includes(value))));
-      if (positions.some(p => !executableExitQuote(market, p))) {
-        const targets = positions.filter((p, index) => !positions.slice(0, index).some(other => normalizedInstrumentValues(other).some(value => normalizedInstrumentValues(p).includes(value))));
-        const books = [];
-        let account = market.account;
-        try {
-          for (const target of targets) {
-            const fresh = await runtime.observeExecutionMarket(task, connector, { accountScope: "positions", target: { symbol: target.symbol, symbolName: target.symbolName, instrumentId: target.instrumentId } });
-            assertCurrent();
-            if (!fresh?.ok || fresh.account?.positionsVerified !== true) throw new Error(fresh?.code || "EXIT_OBSERVATION_UNVERIFIED");
-            books.push(...(fresh.books?.length ? fresh.books : [fresh]));
-            account = { ...account, positions: fresh.account.positions, positionsVerified: true };
-          }
-          exitMarket = { ...market, books, account };
-          task.market = { ...task.market, account: { ...task.market.account, positions: account.positions, positionsVerified: true } };
-          appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "exit_monitor", message: "AI 已决定止盈，已重新读取目标持仓与当前盘口，立即执行离场校验" });
-        } catch (error) {
-          assertCurrent();
-          decision = { ...decision, action: "HOLD", exitType: null, riskFlags: [...new Set([...(decision.riskFlags || []), "EXIT_OBSERVATION_UNVERIFIED"])] };
-          appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "exit_monitor", level: "error", message: `离场前读取当前盘口未完成：${error.message}；继续自动监控并重试` });
-        }
-      }
-    }
-    decision = bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(decision, exitMarket)), exitMarket);
+    decision = bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(applyEntryBoundary(enforceProfitProbability(decision), market), market)), market);
     const targetBook = decisionTargetBook(decision, market);
     if (targetBook) qualityIssues = marketQualityIssues(targetBook);
     if (market.boardCoverage?.complete === false) qualityIssues = [...new Set([...qualityIssues, "BOARD_COVERAGE_INCOMPLETE"])];

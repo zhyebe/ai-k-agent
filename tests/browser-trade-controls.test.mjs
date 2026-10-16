@@ -499,8 +499,6 @@ test("fast observations rotate held instruments without collecting stale quotes 
     assert.equal(observed.books[0].symbol, symbol);
     assert.ok(Date.now() - Date.parse(observed.books[0].observedAt) < 5000);
   }
-  const targeted = await observeExecutionMarket({ ...task, exitObservationIndex: 0 }, connector, { accountScope: "positions", target: { symbol: "DGJJ", symbolName: "第二商品" } });
-  assert.equal(targeted.books[0].symbol, "DGJJ", "an immediate AI exit must read its own target, not the rotation's next board");
 });
 
 for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired"]) {

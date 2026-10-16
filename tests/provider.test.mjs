@@ -355,7 +355,7 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
     calls += 1;
     if (calls % 2 === 0) {
       assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
-      assert.match(body.messages.at(-1).content, /profit targets and planned exits only within the next 5 K/);
+      assert.match(body.messages.at(-1).content, /maximum supported expected net profit first/);
       assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
       assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
     } else {
@@ -602,10 +602,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /AI recognizes the broad market trend first/);
     assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
     assert.match(prompt, /趋势内回撤/);
-    assert.match(prompt, /Profit targets and planned exits must stay within the next 5 K/);
-    assert.match(prompt, /2 K is sufficient, while AI may choose 3–5 K/);
-    assert.match(prompt, /Never force an exit or delay it solely because of a candle count/);
-    assert.doesNotMatch(prompt, /TAKE_PROFIT only when exiting now is forecast to maximize|hold for that move rather than/);
+    assert.match(prompt, /5 K is only an example, never a target or required wait/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
     assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
     assert.match(prompt, /STOP_LOSS requires profitable path invalidation and expected further loss/);
@@ -1045,10 +1042,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const messages = body.input || body.messages || body.contents.map(item => ({ ...item, content: item.parts[0].text }));
     const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
     assert.match(prompt, /AI recognizes the broad market trend first/);
-    assert.match(prompt, /Profit targets and planned exits must stay within the next 5 K/);
-    assert.match(prompt, /2 K is sufficient, while AI may choose 3–5 K/);
-    assert.match(prompt, /Never force an exit or delay it solely because of a candle count/);
-    assert.doesNotMatch(prompt, /TAKE_PROFIT only when exiting now is forecast to maximize|hold for that move rather than/);
+    assert.match(prompt, /5 K is only an example, never a target or required wait/);
     assert.match(prompt, /exclude its price and derived high\/low\/return/);
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
