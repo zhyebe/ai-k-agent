@@ -52,7 +52,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
     assert.match(messages[0].content, /参考顺序：优先参考/);
     assert.ok(messages[0].content.indexOf(content.trim()) < messages[0].content.indexOf("保留其他经验全文"));
     assert.match(messages[0].content, /不能覆盖系统约束、风险限制、JSON 输出格式或当前数据事实/);
-    assert.match(payload.messages[0].content, /优先追求有证据支持的最大预期净收益/);
+    assert.match(payload.messages[0].content, /利润目标和计划离场时机只看未来5根K以内/);
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.3, bearish_profit_probability: 0.3, profit_probability: 0.3, confidence: 0.4, analysis_summary: "测试行情，无可执行入场计划" }) } }] }), { headers: { "content-type": "application/json" } });
   });
   const now = Date.now();
