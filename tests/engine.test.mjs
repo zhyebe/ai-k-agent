@@ -1353,6 +1353,76 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
   }
 });
 
+for (const autoDecisionEnabled of [false, true]) {
+  test(`生产客户端 AI 明确离场不等待条件计划，${autoDecisionEnabled ? "自动" : "手动入场"}模式立即执行`, async () => {
+    const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+    process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+    const taskId = `client-immediate-exit-${autoDecisionEnabled}-${Date.now()}`;
+    const task = insertNorthstarTask(taskId);
+    Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+    const market = testMarketSnapshot(`client-immediate-exit-${autoDecisionEnabled}`, 105);
+    market.orderBook = { bids: [{ price: 105, volume: 100 }], asks: [{ price: 106, volume: 100 }] };
+    market.account = { ...market.account, positionsVerified: true, openOrdersVerified: true, positions: [{ symbol: "BTC/USDT", symbolName: "测试品种", side: "买", quantity: 1, positionOrderId: "P-client-exit", orderPrice: 100, frozenQuantity: 0 }], openOrders: [] };
+    const submissions = [];
+    try {
+      await runAnalysis(taskId, "", { runtime: {
+        openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
+        browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+        observeMarket: async () => market,
+        requestMarketAnalysis: async () => ({ market, decision: {
+          action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-client-exit"], targetSymbol: "BTC/USDT", targetSymbolName: "测试品种",
+          entryPrice: 100, takeProfitPrice: 105, targetPrice: 105, bullishProfitProbability: 0.2, bearishProfitProbability: 0.8, profitProbability: 0.8,
+          holdingPlan: { decision: "EXIT_NOW", rationale: "已达到可兑现收益" }, evidenceIds: [], riskFlags: [], decisionTtlSec: 300,
+        }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } }),
+        submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true, filled: true }; },
+      } });
+      assert.equal(submissions.length, 1);
+      assert.equal(submissions[0].action, "SELL");
+      assert.equal(submissions[0].exitType, "TAKE_PROFIT");
+      assert.deepEqual(submissions[0].targetPositionIds, ["P-client-exit"]);
+      assert.equal(task.pendingAction.status, "AWAITING_FILL");
+      assert.equal(task.exitPlans.length, 0, "缺少条件计划不能吞掉完整立即离场");
+    } finally {
+      stopController(taskId);
+      state.tasks = state.tasks.filter((item) => item.id !== taskId);
+      if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+      else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous;
+    }
+  });
+}
+
+test("生产客户端 AI 自动入场直接提交，不被浏览器分析模式降级", async () => {
+  const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+  process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+  const taskId = `client-auto-entry-${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true, status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("client-auto-entry", 100);
+  market.account = { ...market.account, positionsVerified: true, openOrdersVerified: true, positions: [], openOrders: [] };
+  const submissions = [];
+  try {
+    await runAnalysis(taskId, "", { runtime: {
+      openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
+      browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => market,
+      requestMarketAnalysis: async (_provider, context) => ({ market, decision: {
+        action: "BUY", targetSymbol: "BTC/USDT", targetSymbolName: "测试品种", targetPrice: 100,
+        bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, profitProbability: 0.55,
+        evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
+      }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } }),
+      submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true, filled: true }; },
+    } });
+    assert.equal(submissions.length, 1);
+    assert.equal(submissions[0].action, "BUY");
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+  } finally {
+    stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+    if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+    else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous;
+  }
+});
+
 test("成功监控轮次持续运行，未变行情不请求模型，任何变化都交给 AI 判断", async () => {
   const taskId = `task_monitor_success_${Date.now()}`;
   const task = insertNorthstarTask(taskId);

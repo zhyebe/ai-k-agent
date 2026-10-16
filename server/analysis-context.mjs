@@ -159,7 +159,7 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据→AI 先判断多周期大趋势，再大胆预测涨跌路径与持仓/离场时机→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利。下一根及近端K用于择时，不支配大趋势持仓；5根只是举例，不设固定持仓K数。疑似闪K及其瞬时显示价格不纳入趋势、概率、指标和离场点位分析；真实可成交bid/ask仍独立用于执行校验。趋势延续时争取最大预期净收益，真实趋势失效且继续持仓预计扩大亏损时最小损失离场。",
+    summary: "观察实时数据→AI 先判断多周期大趋势，再大胆预测涨跌路径与持仓/离场时机→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利，任一方向有可兑现净收益即可离场。下一根及近端K用于择时，不支配大趋势持仓；能吃到约2–5根K的收益就可以见好收，不必死守，5根只是举例，2–5根不是固定持仓数。疑似闪K及其瞬时显示价格不纳入趋势、概率、指标和离场点位分析；真实可成交bid/ask仍独立用于执行校验。趋势延续时争取最大预期净收益，真实趋势失效且继续持仓预计扩大亏损时最小损失离场。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],

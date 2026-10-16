@@ -2237,8 +2237,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const closingEntryBlocked = isLiveTask(task) && closeWindow.active && !task.decision.exitType;
     const accountUnverified = isLiveTask(task) && market.account?.positionsVerified === false;
     const staleDecision = decisionExpired(task);
-    const conditionalExitOnly = liveExecution && desktopBrowserRequired() && Boolean(task.decision.exitType);
-    const canPromptOrder = providerSucceeded && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !conditionalExitOnly && meetsOrderBoundary(task.decision);
+    // A complete AI exit is executable immediately in both entry modes. Exit
+    // plans remain a fallback trigger for later monitoring, never a gate that
+    // can swallow an explicit TAKE_PROFIT/STOP_LOSS action.
+    const canPromptOrder = providerSucceeded && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
@@ -2246,7 +2248,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         skipped: true,
         reason: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
         route,
-        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : conditionalExitOnly ? "EXIT_CONDITION_MONITORING" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES",
+        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
@@ -2281,7 +2283,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
-      const boundaryMessage = conditionalExitOnly ? (task.exitPlans?.length ? "AI 离场条件已交给独立行情监控，满足条件即执行" : "AI 未提供有效离场条件，已请求下一轮补充；收盘清仓独立执行") : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
+      const boundaryMessage = closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });
     }
