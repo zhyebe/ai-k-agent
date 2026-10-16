@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { attachDesktopAiSocket, hasDesktopAi, invokeDesktopAi, resetDesktopAiForTests } from "../server/desktop-ai.mjs";
 import { callBrowserMethod } from "../server/desktop-browser.mjs";
+import { executableExitQuote } from "../server/exit-policy.mjs";
 import { openBrowserPage } from "../server/browser.mjs";
 import packageConfig from "../package.json" with { type: "json" };
 
@@ -57,11 +58,41 @@ test("execution quote monitoring routes to an exit-capable desktop and rejects a
   assert.equal(older.sent.length, 0);
   const result = { ok: true, observedAt: "2026-10-14T07:00:00Z", positionsVerified: true };
   capable.emit("message", JSON.stringify({ type: "browser.result", id: message.id, ok: true, result }));
-  assert.deepEqual(await operation, result);
+  const observed = await operation;
+  assert.equal(observed.desktopObservedAt, result.observedAt);
+  assert.ok(Date.now() - Date.parse(observed.observedAt) < 1000);
+  assert.equal(observed.positionsVerified, true);
   capable.terminate();
   await assert.rejects(callBrowserMethod("observeExecutionMarket", "owner", { task }), /DESKTOP_BROWSER_UPDATE_REQUIRED/);
   assert.equal(older.sent.length, 0);
 });
+
+for (const clockSkewMs of [-9000, 9000]) {
+  test(`execution quotes use call age with desktop clock skew ${clockSkewMs}ms, without renewing slow reads`, async t => {
+    t.after(resetDesktopAiForTests);
+    const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+    process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+    t.after(() => { if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER; else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous; });
+    t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
+    const socket = new Socket();
+    attachDesktopAiSocket("clock-owner", socket);
+    socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1"] }));
+    for (const elapsed of [120, 6000]) {
+      const startedAt = Date.now();
+      const call = callBrowserMethod("observeExecutionMarket", "clock-owner", { task: { id: "clock-task" } });
+      await Promise.resolve();
+      const message = socket.sent.at(-1);
+      t.mock.timers.tick(elapsed);
+      const desktopObservedAt = new Date(Date.now() + clockSkewMs).toISOString();
+      const book = { symbol: "DGKZ", observedAt: desktopObservedAt, orderBook: { bids: [{ price: 105, volume: 10 }], asks: [{ price: 106, volume: 10 }] } };
+      socket.emit("message", JSON.stringify({ type: "browser.result", id: message.id, ok: true, result: { ...book, ok: true, books: [book] } }));
+      const market = await call;
+      assert.equal(Date.parse(market.observedAt), startedAt);
+      assert.equal(market.books[0].desktopObservedAt, desktopObservedAt);
+      assert.equal(executableExitQuote(market, { symbol: "DGKZ", side: "买入" })?.price ?? null, elapsed < 5000 ? 105 : null);
+    }
+  });
+}
 
 test("browser result is bound to its owning socket and pending calls fail immediately on disconnect", async (t) => {
   t.after(resetDesktopAiForTests);

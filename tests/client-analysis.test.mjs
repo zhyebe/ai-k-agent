@@ -65,8 +65,8 @@ test("direct analysis sends shared approved experience and both order books in o
     assert.equal(context.market.account.positionDeposit, 1000);
     assert.equal(context.market.account.openOrders[0].frozenMargin, 1800);
     assert.equal(context.market.account.openOrders[0].orderDeposit, 3600);
-    assert.match(payload.messages[0].content, /优先追求有证据支持的最大预期净收益/);
-    assert.match(payload.messages[0].content, /只有盈利路径被证据否定、继续持仓预计扩大亏损时/);
+    assert.match(payload.messages[0].content, /利润目标和计划离场时机只看未来5根K以内/);
+    assert.match(payload.messages[0].content, /盈利路径失效则最小预期损失离场/);
     assert.match(payload.messages[0].content, /买涨（多）和买跌（空）都能获利/);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);

@@ -29,7 +29,8 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
     browserInput.task = { id: task.id, symbol: task.symbol, timeframe: task.timeframe, target: task.target, exitObservationIndex: task.exitObservationIndex };
   }
   const { signal, ...callOptions } = options || {};
-  return invokeDesktopAi(userId, method, {
+  const observationStartedAt = new Date().toISOString();
+  const result = await invokeDesktopAi(userId, method, {
     channel: "browser",
     requiredCapability: method === "observeExecutionMarket" ? "browser-exit-v1" : "",
     input: browserInput,
@@ -37,4 +38,10 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
     signal,
     options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : 45000, ...callOptions },
   });
+  if (method !== "observeExecutionMarket" || !result?.ok) return result;
+  // This method always reads the live DOM during this call. Use its server-side
+  // start as a conservative age bound, including queue/network time, instead of
+  // comparing clocks on two machines. Never renew a cached analysis snapshot.
+  const stamp = (book) => ({ ...book, desktopObservedAt: book.observedAt, observedAt: observationStartedAt });
+  return { ...stamp(result), books: (result.books || []).map(stamp) };
 }

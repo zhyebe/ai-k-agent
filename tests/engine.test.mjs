@@ -2295,3 +2295,71 @@ test("已核实多空持仓的直接止盈必须比较真实入场价和可成�
     assert.ok(attachPositionExit(decision, market).riskFlags.includes("EXIT_PROFIT_NOT_VERIFIED"));
   }
 });
+
+test("Beijing order times produce correct holding duration and repair persisted future times in any server timezone", () => {
+  const previous = process.env.TZ;
+  try {
+    for (const timezone of ["UTC", "Asia/Shanghai", "America/New_York"]) {
+      process.env.TZ = timezone;
+      const entered = Date.now() - 20 * 60000;
+      const pageTime = new Date(entered + 8 * 3600000).toISOString().slice(0, 19).replace("T", " ");
+      const market = { symbol: "DGKZ", timeframe: "1m", latest: { price: 105 }, history: [], account: { positionsVerified: true,
+        positions: [{ positionOrderId: "P-time", symbol: "DGKZ", side: "买入", quantity: 1, orderPrice: 100, orderTime: pageTime }] } };
+      const task = { id: "time-repair", market, metrics: {}, rules: [], decision: {}, positionTracking: { "P-time": { firstObservedAt: new Date(entered + 8 * 3600000).toISOString() } } };
+      const context = buildDecisionContext(task, market, [], "monitor");
+      assert.ok(Math.abs(context.account.positionContext[0].holdingDurationSec - 1200) <= 1, timezone);
+      assert.ok(Math.abs(Date.parse(task.positionTracking["P-time"].firstObservedAt) - entered) < 1000);
+    }
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
+
+for (const autoDecisionEnabled of [false, true]) {
+  for (const side of ["LONG", "SHORT"]) {
+    for (const outcome of ["profit", "loss", "closed", "read-failed"]) {
+      test(`slow AI ${side} exit reobserves current quote: ${outcome}, automatic entry=${autoDecisionEnabled}`, async () => {
+        const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+        process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+        const taskId = `slow-exit-${side}-${outcome}-${autoDecisionEnabled}`;
+        const task = insertNorthstarTask(taskId);
+        Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
+        const market = testMarketSnapshot(taskId, 105);
+        market.observedAt = new Date(Date.now() - 90000).toISOString();
+        market.orderBook = { bids: [{ price: 105, volume: 100 }], asks: [{ price: 106, volume: 100 }] };
+        const position = { positionOrderId: "P-slow", symbol: "BTC/USDT", side: side === "LONG" ? "买入" : "卖出", quantity: 1, orderPrice: 100, frozenQuantity: 0 };
+        market.account = { ...market.account, positionsVerified: true, openOrdersVerified: true, positions: [position], openOrders: [] };
+        const action = side === "LONG" ? "SELL" : "BUY";
+        const submissions = [], reads = [];
+        try {
+          await runAnalysis(taskId, "", { runtime: {
+            openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
+            browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+            observeMarket: async () => market,
+            requestMarketAnalysis: async () => ({ market, decision: { action, exitType: "TAKE_PROFIT", targetPositionIds: ["P-slow"], targetSymbol: "BTC/USDT", holdingPlan: { decision: "EXIT_NOW" }, evidenceIds: [], riskFlags: [], decisionTtlSec: 300 }, coverage: { complete: true, bookCount: 1, totalKlineRows: 25 } }),
+            observeExecutionMarket: async (_task, _connector, options) => {
+              reads.push(options);
+              if (outcome === "read-failed") throw new Error("test read failure");
+              const price = (side === "LONG") === (outcome === "profit") ? 105 : 95;
+              return { ...market, observedAt: new Date().toISOString(), books: [], account: { positionsVerified: true, positions: outcome === "closed" ? [] : [position] },
+                orderBook: { bids: [{ price: side === "LONG" ? price : price - 1, volume: 100 }], asks: [{ price: side === "SHORT" ? price : price + 1, volume: 100 }] } };
+            },
+            submitSuggestionForm: async input => { submissions.push(input); return { ok: true, submitted: true }; },
+          } });
+          assert.equal(reads.length, 1);
+          assert.equal(reads[0].target.symbol, "BTC/USDT");
+          assert.equal(reads[0].accountScope, "positions");
+          assert.equal(submissions.length, outcome === "profit" ? 1 : 0);
+          if (outcome === "profit") {
+            assert.equal(submissions[0].action, action);
+            assert.equal(submissions[0].exitType, "TAKE_PROFIT");
+            assert.deepEqual(submissions[0].targetPositionIds, ["P-slow"]);
+          } else assert.equal(task.decision.action, "HOLD");
+          assert.equal(task.decision.observedAt, market.observedAt, "reobserving must not renew analysis/plan validity");
+        } finally {
+          stopController(taskId);
+          state.tasks = state.tasks.filter(item => item.id !== taskId);
+          if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER; else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous;
+        }
+      });
+    }
+  }
+}
