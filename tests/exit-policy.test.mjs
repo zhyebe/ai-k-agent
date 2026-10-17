@@ -98,6 +98,36 @@ test("confirmation rejects a changed price or expiry after a condition initially
   assert.equal(exitGuardAllowsPrice(guard, 106, observed + 120000), false);
 });
 
+for (const heldSide of ["LONG", "SHORT"]) {
+  test(`${heldSide}: realtime profit conditions require explicit AI prices, positive position profit and the current account amount`, () => {
+    const isLong = heldSide === "LONG";
+    const p = { ...position, orderPrice: 100, quantity: 1, side: isLong ? "买入" : "卖出", roundTripFee: 2 };
+    const snapshot = { ...market, account: { positionsVerified: true, positions: [p], realtimeValueChange: 2.5 },
+      orderBook: { bids: [{ price: isLong ? 103 : 96, volume: 10 }], asks: [{ price: isLong ? 104 : 97, volume: 10 }] } };
+    const input = { positionId: p.positionOrderId, heldSide, quantity: 1, validForSec: 120,
+      realtime_take_profit: { value_above: 1, take_profit_price: isLong ? 103 : 97 } };
+    const plan = validateExitPlans({ exitPlans: [input] }, snapshot, {}, observed).plans[0];
+    assert.ok(plan, "an explicit realtime condition can stand alone");
+    const triggered = evaluateExitPlan(plan, snapshot, observed);
+    assert.equal(triggered.decision.exitType, "TAKE_PROFIT");
+    assert.equal(triggered.decision.exitGuard.realtimeValueAbove, 1);
+    assert.equal(triggered.decision.exitGuard.triggerPrice, isLong ? 103 : 97);
+    for (const amount of [undefined, null, "", false, "unknown", -2, 0, 1]) {
+      assert.equal(evaluateExitPlan(plan, { ...snapshot, account: { ...snapshot.account, realtimeValueChange: amount, dayPnl: 9, valueChange: 9 } }, observed).status, "ARMED");
+    }
+    for (const price of [100, isLong ? 102 : 98, isLong ? 99 : 101]) {
+      const next = { ...snapshot, orderBook: { bids: [{ price, volume: 10 }], asks: [{ price, volume: 10 }] } };
+      assert.equal(evaluateExitPlan(plan, next, observed).status, "ARMED", "positive account totals never authorize flat or losing holdings");
+    }
+    assert.equal(evaluateExitPlan(plan, snapshot, observed + 120000).status, "EXPIRED");
+    const invalid = validateExitPlans({ exitPlans: [{ ...input, stopLossPrice: isLong ? 90 : 110,
+      realtime_take_profit: { value_above: 1, take_profit_price: 100 } }] }, snapshot, {}, observed);
+    assert.equal(invalid.plans.length, 1, "invalid optional profit conditions do not erase valid protection");
+    assert.equal(invalid.plans[0].realtimeTakeProfit, null);
+    assert.equal(invalid.rejected[0].code, "EXIT_PLAN_REALTIME_PROFIT_INVALID");
+  });
+}
+
 test("费用已知时拒绝毛利净亏，未知费用不伪报净收益", () => {
   const p = { ...position, roundTripFee: 4 };
   assert.equal(exitNetPnl(p, 103).grossPnl, 2);

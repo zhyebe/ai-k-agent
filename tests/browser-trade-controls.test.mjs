@@ -503,9 +503,9 @@ test("fast observations rotate held instruments without collecting stale quotes 
   assert.equal(targeted.books[0].symbol, "DGJJ", "an immediate AI exit must read its own target, not the rotation's next board");
 });
 
-for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired"]) {
+for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired", "realtime-valid", "realtime-reversed", "realtime-missing"]) {
   test(`conditional exit verifies ${scenario} at final confirmation without unintended orders`, async () => {
-    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace('<body>', '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace('<body>', `<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div id="realtime">${scenario === "realtime-missing" ? "" : "实时货值变化 +2.5元"}</div>`) }));
     await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
     await page.reload();
     const startedAt = Date.now();
@@ -517,6 +517,7 @@ for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired"]
       const original = window.transfer;
       window.transfer = (...args) => {
         original(...args);
+        if (name === "realtime-reversed") document.querySelector('#realtime').textContent = '实时货值变化 -1元';
         if (name === "reversed-quote") setTimeout(() => { document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = '18'; }, 350);
         if (name === "reversed-dialog") {
           new MutationObserver(() => {
@@ -526,10 +527,11 @@ for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired"]
         }
       };
     }, scenario);
-    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2, exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: { positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 19, comparison: "GTE", expiresAt: new Date(Date.now() + (scenario === "expired" ? 600 : 10000)).toISOString() } });
-    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
-    assert.equal((await page.evaluate(() => window.exits)).length, scenario === "valid" ? 1 : 0);
-    if (scenario !== "valid") {
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2, exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: { positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 19, comparison: "GTE", expiresAt: new Date(Date.now() + (scenario === "expired" ? 600 : 10000)).toISOString(), ...(scenario.startsWith("realtime-") ? { realtimeValueAbove: 1 } : {}) } });
+    const valid = ["valid", "realtime-valid"].includes(scenario);
+    assert.equal(result.ok, valid, JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, valid ? 1 : 0);
+    if (!valid) {
       assert.equal(result.code, "EXIT_CONDITION_CHANGED");
       assert.equal(await page.locator(".el-dialog:visible").count(), 0);
     }

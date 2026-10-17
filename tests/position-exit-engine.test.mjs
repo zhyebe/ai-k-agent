@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { buildPendingAction, confirmPendingAction, runAnalysis, runPositionExitCycle, startTask, stopAllControllers, stopController, stopTask } from "../server/engine.mjs";
 import { validateExitPlans } from "../server/exit-policy.mjs";
+import { requestDecision } from "../server/provider.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
 import { state } from "../server/store.mjs";
 
@@ -23,6 +24,68 @@ function setup(id, positions, extras = {}) {
   return { task, market, runtime, submitted, cancelled };
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
+
+for (const automatic of [false, true]) {
+  test(`${automatic ? "automatic" : "manual"}: additional entry keeps omitted valid old plans without extending their expiry`, async t => {
+    const f = setup(`entry-retains-plans-${automatic}`, [long("P1"), long("P2")], { autoDecisionEnabled: automatic });
+    f.task.exitPlans = validateExitPlans({ exitPlans: f.market.account.positions.map(p => ({ positionId: p.positionOrderId,
+      heldSide: "LONG", quantity: 1, validForSec: 300, takeProfitPrice: 110, stopLossPrice: 90 })) }, f.market, f.task).plans;
+    const oldExpiry = f.task.exitPlans[1].expiresAt;
+    let modelCalls = 0, formCalls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      modelCalls++;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        action: "BUY", target_symbol: "DGKZ", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3,
+        holding_plan: { decision: "HOLD_FOR_TARGET" },
+        exit_plans: [{ position_id: "P1", held_side: "LONG", quantity: 1, valid_for_sec: 300, take_profit_price: 112, stop_loss_price: 91 }],
+      }) } }] }));
+    });
+    await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => f.market,
+      requestDecision: async (_provider, context, options) => requestDecision({ apiKey: "fixture", baseUrl: "https://fixture.invalid", model: "deepseek-chat" }, context, options),
+      fillSuggestionForm: async () => { formCalls++; return { ok: true, filled: true }; },
+    } });
+    assert.equal(modelCalls, 1);
+    assert.equal(f.task.decision.action, "BUY");
+    assert.equal(f.task.lastAnalysisSucceeded, true);
+    assert.equal(f.submitted.length, automatic ? 1 : 0);
+    assert.equal(formCalls, automatic ? 0 : 1);
+    assert.equal(f.task.exitPlans.length, 2);
+    assert.equal(f.task.exitPlans.find(p => p.positionId === "P2").expiresAt, oldExpiry);
+    assert.equal(f.task.exitPlans.find(p => p.positionId === "P1").takeProfitPrice, 112);
+    assert.equal(compactTaskRuntime(f.task).exitPlans.length, 2);
+  });
+}
+
+for (const automatic of [false, true]) {
+  test(`${automatic ? "automatic" : "manual"}: AI-authorized realtime profit exits all profitable long/short holdings before distant targets`, async () => {
+    const f = setup(`realtime-condition-${automatic}`, [
+      { ...long("profit-long"), roundTripFee: 2 },
+      { ...long("profit-short"), side: "卖出", orderPrice: 110, roundTripFee: 2 },
+      { ...long("loss"), orderPrice: 108, roundTripFee: 2 },
+    ], { autoDecisionEnabled: automatic });
+    f.market.account.realtimeValueChange = 0;
+    f.task.exitPlans = validateExitPlans({ exitPlans: f.market.account.positions.map(p => ({
+      positionId: p.positionOrderId, heldSide: p.side === "买入" ? "LONG" : "SHORT", quantity: 1, validForSec: 300,
+      takeProfitPrice: p.side === "买入" ? 115 : 95, stopLossPrice: p.side === "买入" ? 96 : 115,
+      realtime_take_profit: { value_above: 1, take_profit_price: p.side === "买入" ? p.orderPrice + 3 : p.orderPrice - 3 },
+    })) }, f.market, f.task).plans;
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 0);
+    f.market.account.realtimeValueChange = 2.5;
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.deepEqual(f.submitted.map(s => [s.targetPositionIds[0], s.action, s.exitType]), [
+      ["profit-long", "SELL", "TAKE_PROFIT"], ["profit-short", "BUY", "TAKE_PROFIT"],
+    ]);
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["loss"]);
+    f.market.account.realtimeValueChange = -15;
+    f.market.orderBook = { bids: [{ price: 96, volume: 100 }], asks: [{ price: 97, volume: 100 }] };
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.at(-1).targetPositionIds[0], "loss");
+    assert.equal(f.submitted.at(-1).exitType, "STOP_LOSS");
+  });
+}
 
 test("closing clears all three long/short positions and verifies actual flatness next observation", async () => {
   const f = setup("closing-three", [long("P1"), long("P2", 2), { ...long("P3"), side: "卖出" }]);

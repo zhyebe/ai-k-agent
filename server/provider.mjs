@@ -821,7 +821,7 @@ export async function requestDecision(provider, context, options = {}) {
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),
     { role: "user", content: JSON.stringify(wireContext) },
   ];
-  messages[0].content = `${quickProfitExitPrompt}\n${messages[0].content}`;
+  messages[0].content = `${quickProfitExitPrompt}\n${realtimeProfitPlanPrompt}\n${messages[0].content}`;
   // One shared deadline covers the original response and its single correction.
   const requestOptions = { ...options, signal: requestSignal(options.timeoutMs, options.signal) };
   const attempts = [];
@@ -878,7 +878,7 @@ export async function requestDecision(provider, context, options = {}) {
   const missingConditionalPlan = (value) => {
     const immediateIds = executableImmediateExit(value) ? new Set(value.targetPositionIds) : new Set();
     return requiredExitIds.some(id => !immediateIds.has(id)
-      && !value.exitPlans.some(p => p.positionId === id && p.validForSec > 0 && (p.takeProfitPrice > 0 || p.stopLossPrice > 0)));
+      && !value.exitPlans.some(p => p.positionId === id && p.validForSec > 0 && (p.takeProfitPrice > 0 || p.stopLossPrice > 0 || p.realtimeTakeProfit?.takeProfitPrice > 0)));
   };
   const requiredOrderIds = [...new Set((requestContext.account?.openOrders || [])
     .map((order) => String(order?.orderId || "").trim()).filter(Boolean))];
@@ -890,10 +890,13 @@ export async function requestDecision(provider, context, options = {}) {
     ]);
     return requiredOrderIds.filter((orderId) => !assessed.has(orderId));
   };
-  const actionOrExitInconsistent = (value) => missingExitAction(value) || missingConditionalPlan(value) || (value.action === "HOLD"
+  const executableNewEntry = (value) => ["BUY", "SELL"].includes(value.action) && !value.exitType
+    && value.holdingPlan.decision !== "EXIT_NOW" && hasDirectionalProbabilities(value);
+  const actionOrExitInconsistent = (value) => missingExitAction(value) || (missingConditionalPlan(value) && !executableNewEntry(value)) || (value.action === "HOLD"
     && Boolean(value.exitType));
-  // An exact, unfrozen immediate exit is already executable. Do not delay it
-  // for unrelated positions' condition plans or omitted order assessments.
+  // Existing-position plan omissions cannot cancel a complete new entry or
+  // immediate exit. Continue monitoring missing plans independently.
+  const independentAction = (value) => executableImmediateExit(value) || executableNewEntry(value);
   const inconsistent = (value) => !executableImmediateExit(value)
     && (actionOrExitInconsistent(value) || missingOrderAssessments(value).length > 0);
   if (inconsistent(decision)) {
@@ -937,18 +940,22 @@ export async function requestDecision(provider, context, options = {}) {
     }
     decision.modelDiagnostics = diagnostics(corrected || response, retryError);
     if (actionOrExitInconsistent(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"])];
-    if (missingConditionalPlan(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCOMPLETE_EXIT_PLAN", "ANALYSIS_INCOMPLETE"])];
+    if (missingConditionalPlan(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCOMPLETE_EXIT_PLAN", ...(!independentAction(decision) ? ["ANALYSIS_INCOMPLETE"] : [])])];
     decision.orderAssessmentMissingIds = missingOrderAssessments(decision);
     if (missingExitAction(decision)) {
       // An incomplete closing plan cannot be routed as a new opening order.
       decision = { ...decision, action: "HOLD", riskFlags: [...new Set([...decision.riskFlags, "INCOMPLETE_EXIT_PLAN"])], invalidation: "AI离场结论缺少可执行动作；继续监控并由AI重新分析" };
     }
   }
-  if (executableImmediateExit(decision)) decision.orderAssessmentMissingIds = missingOrderAssessments(decision);
+  if (independentAction(decision)) {
+    decision.orderAssessmentMissingIds = missingOrderAssessments(decision);
+    if (missingConditionalPlan(decision)) decision.riskFlags = [...new Set([...decision.riskFlags, "INCOMPLETE_EXIT_PLAN"])];
+  }
   return decision;
 }
 
 const quickProfitExitPrompt = "最新用户离场规则优先于等待目标价的建议：保留多周期趋势判断，继续预测趋势、入场点和离场点；每轮先看当前快照account.realtimeValueChange（桌面完整快照中为market.account.realtimeValueChange），即网页‘实时货值变化’。这是账户汇总金额，不是单仓利润、价格点、百分比、K数，也不是dayPnl或valueChange；不以历史值或其他字段替代。realtimeValueChange > 1时，只离场当前盈利的持仓：逐仓用真实入场价、多单当前可成交bid/空单当前可成交ask和实际成本确认正净收益，立即返回holding_plan EXIT_NOW、TAKE_PROFIT、平多SELL/平空BUY和精确盈利持仓ID。不等2–5个价格点、不等下一根K、不因趋势向好继续等待更高收益。账户总值不能分摊为单仓盈利，亏损、持平或利润未知的持仓不得混入这次止盈；亏损仓仍持续监控，逐轮比较同一持仓的当前与上一轮可成交盈亏、趋势及恢复路径；确认亏损持续扩大、继续持有更不利时立即返回EXIT_NOW、STOP_LOSS及精确持仓ID，不以等待回本或账户汇总未大于1为由延迟止损；单次轻微浮亏不等同持续扩大。多空同时盈利时action只选同一平仓方向，其他盈利持仓也给出当前可成交价已满足的逐仓exit_plans，不能把平多SELL当作开空或把平空BUY当作开多。等于1、零、负数或缺失均不触发本条规则，也不自动触发止损或停止其他趋势分析。未触发时保留原有趋势持仓、目标止盈与风险止损判断；未来目标不等于现在已盈利。两种入场模式均自动离场；程序只执行AI明确动作，不将该金额条件变成程序强平。";
+const realtimeProfitPlanPrompt = "为避免两轮慢分析之间错过盈利，每个exit_plans同时给出realtime_take_profit:{value_above:1,take_profit_price:正数}，这是AI明确授权的实时盈利条件，不是新的固定目标。take_profit_price由你按该仓真实成本、已知费用、报价单位与最小变动选定为可兑现正净收益的价格边界，多仓bid达到或超过、空仓ask达到或低于，同时实时汇总严格大于value_above即可自动止盈，不等较远的普通目标价。当前汇总未达条件也应提前给出；未知成本不能编造，说明缺失并保留有依据的普通止盈/保护条件。此条件与普通take_profit_price、stop_loss_price并列，仍受该仓有效期、方向、数量及成本约束，提交前再次核实。亏损仓不会因账户汇总为正而平掉；损失稳定/收窄且有恢复依据可等待，持续扩大且恢复更不利则及时止损。每轮摘要同时简述新入场/加仓结论及理由；只说旧仓继续持有不代表已评估新机会，不得因已有一单忽略可行加仓。";
 const browserControlPrompt = `You are controlling the already-open Haohan page in the desktop built-in browser. Do not navigate away, do not type passwords, and do not invent controls. Only name labels that appear in context.controls. Complete the goal: ENTRY_BUY_UP = 买涨 via 买入订立; ENTRY_BUY_DOWN = 买跌 via 卖出订立; EXIT_TRANSFER = 立即离场 via the exact target position row's 转让 and its confirmation dialog. 止盈止损 opens settings, not an immediate exit; never substitute it or a global transfer form for the target position's exit. Return JSON only: {"goal":"...","actions":[{"type":"click"|"fill"|"accept_agreement","label":"...","value":"..."}]} . Keep at most 8 actions. fill value is price or quantity from context.`;
 
 export async function requestBrowserActions(provider, context = {}, options = {}) {

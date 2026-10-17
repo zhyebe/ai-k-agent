@@ -85,8 +85,14 @@ export function normalizeExitPlans(value) {
     validForSec: Number(item?.valid_for_sec ?? item?.validForSec),
     takeProfitPrice: item?.take_profit_price ?? item?.takeProfitPrice ?? null,
     stopLossPrice: item?.stop_loss_price ?? item?.stopLossPrice ?? null,
+    ...((item?.realtime_take_profit ?? item?.realtimeTakeProfit) ? { realtimeTakeProfit: normalizeRealtimeTakeProfit(item.realtime_take_profit ?? item.realtimeTakeProfit) } : {}),
     rationale: String(item?.rationale ?? "").slice(0, 1000),
   }));
+}
+
+function normalizeRealtimeTakeProfit(value) {
+  if (!value || typeof value !== "object") return null;
+  return { valueAbove: value.value_above ?? value.valueAbove ?? null, takeProfitPrice: value.take_profit_price ?? value.takeProfitPrice ?? null };
 }
 
 export function validateExitPlans(decision, market, task, now = Date.now()) {
@@ -99,21 +105,32 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
     const position = market.account?.positions?.find(p => p.positionOrderId === source.positionId);
     let tp = source.takeProfitPrice === null ? null : Number(source.takeProfitPrice);
     const sl = source.stopLossPrice === null ? null : Number(source.stopLossPrice);
+    let realtime = source.realtimeTakeProfit;
+    if (realtime) {
+      const valueAbove = Number(realtime.valueAbove);
+      const price = Number(realtime.takeProfitPrice);
+      if (realtime.valueAbove === null || !Number.isFinite(valueAbove) || valueAbove < 0
+        || !Number.isFinite(price) || price <= 0 || !isProfitableExit(position, price)
+        || (sl !== null && (source.heldSide === "LONG" ? price <= sl : price >= sl))) {
+        rejected.push({ positionId: source.positionId, code: "EXIT_PLAN_REALTIME_PROFIT_INVALID" });
+        realtime = null;
+      } else realtime = { valueAbove, takeProfitPrice: price };
+    }
     const expiresAt = Math.min(observedAt + source.validForSec * 1000, closing.startsAt);
     let code = null;
     if (market.account?.positionsVerified !== true) code = "POSITIONS_UNVERIFIED";
     else if (!position || !source.positionId || seen.has(source.positionId)) code = "EXIT_PLAN_POSITION_INVALID";
     else if (source.heldSide !== heldDirection(position) || !["LONG", "SHORT"].includes(source.heldSide) || source.quantity !== Number(position.quantity)) code = "EXIT_PLAN_POSITION_MISMATCH";
     else if (!Number.isFinite(observedAt) || !Number.isSafeInteger(source.validForSec) || source.validForSec <= 0 || source.validForSec > 3600 || !Number.isFinite(expiresAt) || expiresAt <= now) code = "EXIT_PLAN_EXPIRED";
-    else if ((tp === null && sl === null) || (tp !== null && (!Number.isFinite(tp) || tp <= 0)) || (sl !== null && (!Number.isFinite(sl) || sl <= 0)) || (tp !== null && sl !== null && (source.heldSide === "LONG" ? tp <= sl : tp >= sl))) code = "EXIT_PLAN_PRICE_INVALID";
+    else if ((tp === null && sl === null && !realtime) || (tp !== null && (!Number.isFinite(tp) || tp <= 0)) || (sl !== null && (!Number.isFinite(sl) || sl <= 0)) || (tp !== null && sl !== null && (source.heldSide === "LONG" ? tp <= sl : tp >= sl))) code = "EXIT_PLAN_PRICE_INVALID";
     if (!code && tp !== null && !isProfitableExit(position, tp)) {
       tp = null;
-      if (sl === null) code = "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE";
+      if (sl === null && !realtime) code = "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE";
       else rejected.push({ positionId: source.positionId, code: "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE" });
     }
     if (code) { rejected.push({ positionId: source.positionId, code }); continue; }
     seen.add(source.positionId);
-    plans.push({ ...source, entryPrice: positionEntryPrice(position), takeProfitPrice: tp, stopLossPrice: sl, observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
+    plans.push({ ...source, entryPrice: positionEntryPrice(position), takeProfitPrice: tp, stopLossPrice: sl, realtimeTakeProfit: realtime, observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
   }
   return { plans, rejected };
 }
@@ -130,17 +147,29 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
   const long = plan.heldSide === "LONG";
   const stop = plan.stopLossPrice !== null && (long ? quote.price <= plan.stopLossPrice : quote.price >= plan.stopLossPrice);
   const pnl = exitNetPnl(position, quote.price);
-  const profit = plan.takeProfitPrice !== null
+  const targetProfit = plan.takeProfitPrice !== null
     && (long ? quote.price >= plan.takeProfitPrice : quote.price <= plan.takeProfitPrice)
     && isProfitableExit(position, quote.price);
+  const realtimeProfit = plan.realtimeTakeProfit
+    && realtimeValueAbove(market.account, plan.realtimeTakeProfit.valueAbove)
+    && (long ? quote.price >= plan.realtimeTakeProfit.takeProfitPrice : quote.price <= plan.realtimeTakeProfit.takeProfitPrice)
+    && isProfitableExit(position, quote.price);
+  const profit = targetProfit || realtimeProfit;
   if (!stop && !profit) return { status: "ARMED", quotePrice: quote.price };
   const exitType = stop ? "STOP_LOSS" : "TAKE_PROFIT";
-  const triggerPrice = stop ? plan.stopLossPrice : plan.takeProfitPrice;
+  const triggerPrice = stop ? plan.stopLossPrice : targetProfit ? plan.takeProfitPrice : plan.realtimeTakeProfit.takeProfitPrice;
   return {
     status: "TRIGGERED", position, quotePrice: quote.price, netPnl: pnl?.netPnl ?? null, grossPnl: pnl?.grossPnl ?? null,
     decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType, targetPositionIds: [plan.positionId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
-      exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && profit) || (!long && stop) ? "GTE" : "LTE" } },
+      exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && !stop) || (!long && stop) ? "GTE" : "LTE",
+        ...(!stop && !targetProfit && realtimeProfit ? { realtimeValueAbove: plan.realtimeTakeProfit.valueAbove } : {}) } },
   };
+}
+
+export function realtimeValueAbove(account, threshold) {
+  const value = account?.realtimeValueChange;
+  return (typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
+    && Number.isFinite(Number(value)) && Number.isFinite(threshold) && Number(value) > threshold;
 }
 
 export function exitGuardAllowsPrice(guard, price, now = Date.now()) {

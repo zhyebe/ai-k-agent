@@ -33,6 +33,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const messages = body.input || body.messages || body.contents.map(item => ({ content: item.parts[0].text }));
       const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
       assert.match(prompt, /realtimeValueChange > 1/);
+      assert.match(prompt, /realtime_take_profit:\{value_above:1,take_profit_price:正数\}/);
       assert.match(prompt, /只离场当前盈利的持仓/);
       assert.match(prompt, /不等2–5个价格点/);
       assert.match(prompt, /等于1、零、负数或缺失均不触发/);
@@ -49,7 +50,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
         action: triggered ? "SELL" : "HOLD", exit_type: triggered ? "TAKE_PROFIT" : null,
         target_position_ids: triggered ? ["P-profit"] : [], bullish_profit_probability: 0.65, bearish_profit_probability: 0.25,
         holding_plan: { decision: triggered ? "EXIT_NOW" : "HOLD_FOR_TARGET", rationale: "趋势向上；仅兑现当前盈利持仓" },
-        exit_plans: positions.map(p => ({ position_id: p.positionOrderId, held_side: "LONG", quantity: 1, valid_for_sec: 120, take_profit_price: triggered && p.positionOrderId === "P-profit" ? 101.5 : 108, stop_loss_price: 95 })),
+        exit_plans: positions.map(p => ({ position_id: p.positionOrderId, held_side: "LONG", quantity: 1, valid_for_sec: 120, take_profit_price: triggered && p.positionOrderId === "P-profit" ? 101.5 : 108, stop_loss_price: 95,
+          realtime_take_profit: { value_above: 1, take_profit_price: p.orderPrice + 1.5 } })),
       })));
     });
     for (amount of [null, -1, 0, 1, 1.01]) {
@@ -59,6 +61,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.equal(result.action, amount > 1 ? "SELL" : "HOLD");
       assert.deepEqual(result.targetPositionIds, amount > 1 ? ["P-profit"] : []);
       assert.equal(result.bullishProfitProbability, 0.65);
+      assert.deepEqual(result.exitPlans[0].realtimeTakeProfit, { valueAbove: 1, takeProfitPrice: 101.5 });
     }
     assert.equal(calls, 5);
   });

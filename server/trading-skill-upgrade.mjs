@@ -9,6 +9,7 @@ const previousContentHashes = new Map([
   ["v0.3.85", "3cc0c177613869780ad1516090d9f10c49b8b8cadb98fc245460a58821ba9ca7"],
   ["v0.3.86", "e1d1c98e5a1c70a320eef9fc466fdcfac44125bc26d7a7e4a9bffd871074e6fa"],
   ["v0.3.87", "42b8a628920f659d83d180eebb90bdc15c3e8105643ee09cedac7bba68a639c9"],
+  ["v0.3.88", "d9f86e86f92aff3a9d659ca69efa6306179ace714956cd08ab46fc21d6040ae6"],
 ]);
 
 // Upgrade only the exact reviewed project experience, never users' later edits.
@@ -22,7 +23,7 @@ export async function tradingSkillUpgrade(skill) {
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: "v0.3.88",
+    version: "v0.3.90",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),

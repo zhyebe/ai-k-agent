@@ -9,7 +9,7 @@ import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
-import { executableExitQuote, exitGuardAllowsPrice } from "./exit-policy.mjs";
+import { executableExitQuote, exitGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -648,7 +648,8 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED" };
     const market = parseHaohanPageSnapshot(snapshot, { symbol });
     const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: exitGuard?.heldSide }, Date.now());
-    const allowed = quote && exitGuardAllowsPrice(exitGuard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(exitGuard, dialogPrice));
+    const allowed = quote && exitGuardAllowsPrice(exitGuard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(exitGuard, dialogPrice))
+      && (exitGuard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, exitGuard.realtimeValueAbove));
     return { ok: Boolean(allowed), code: "EXIT_CONDITION_CHANGED" };
   };
   const withCompleted = (result) => {

@@ -6,6 +6,27 @@ import { requestDecision } from "../server/provider.mjs";
 import { suggestOrderPreview } from "../server/execution.mjs";
 import { state } from "../server/store.mjs";
 
+for (const action of ["BUY", "SELL"]) {
+  test(`${action}: an explicit additional entry survives an omitted existing-position exit plan`, async t => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      calls++;
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        action, target_symbol: "DGKZ", entry_price: 100, bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
+        holding_plan: { decision: "HOLD_FOR_TARGET", rationale: "旧仓持有，新机会可以增加一笔" }, exit_plans: [],
+      }) } }] }));
+    });
+    const result = await requestDecision({ apiKey: "fixture", baseUrl: "https://fixture.invalid", model: "deepseek-chat" }, {
+      account: { positionsVerified: true, positions: [{ positionOrderId: "old", side: "买入", quantity: 1 }] },
+      executionPolicy: { conditionalExits: true },
+    }, { fastAnalysis: true });
+    assert.equal(calls, 1, "unrelated plan omissions must not delay a complete new entry with another model call");
+    assert.equal(result.action, action);
+    assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
+    assert.ok(result.riskFlags.includes("INCOMPLETE_EXIT_PLAN"), "the omitted plan remains visible for continued monitoring");
+  });
+}
+
 for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
   test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with old long/short holdings and their exit plans`, async t => {
     let now = Date.now();

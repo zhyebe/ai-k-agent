@@ -350,7 +350,7 @@ export interface Task {
   tradingSession?: TradingSession;
   sessionCloseState?: { date: string; closesAt: string; status: string; remainingPositions: number | null; remainingOrders?: number; checkedAt: string } | null;
   exitMonitor?: { status: string; checkedAt: string; message: string } | null;
-  exitPlans?: Array<{ positionId: string; heldSide: "LONG" | "SHORT"; quantity: number; takeProfitPrice: number | null; stopLossPrice: number | null; expiresAt: string; status: string }>;
+  exitPlans?: Array<{ positionId: string; heldSide: "LONG" | "SHORT"; quantity: number; takeProfitPrice: number | null; stopLossPrice: number | null; realtimeTakeProfit?: { valueAbove: number; takeProfitPrice: number } | null; expiresAt: string; status: string }>;
   entryQuantity?: number;
   autoDecisionCountdownSec?: number;
   providerId?: string;

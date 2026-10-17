@@ -2202,7 +2202,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const sessionChangedDuringAnalysis = Number(task.target.sessionRevision || 0) !== sessionRevision;
     if (providerSucceeded && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && !decisionExpired(task)) {
       const validated = validateExitPlans(decision, market, task);
-      task.exitPlans = validated.plans;
+      // Omission is not revocation. Keep only still-valid, unchanged AI plans
+      // for positions omitted this round, with their original expiry intact.
+      const suppliedIds = new Set((decision.exitPlans || []).map(p => String(p.positionId ?? p.position_id ?? "")));
+      const retained = (task.exitPlans || []).filter(plan => !suppliedIds.has(plan.positionId)
+        && ["ARMED", "TRIGGERED", "QUOTE_UNVERIFIED"].includes(evaluateExitPlan(plan, market).status));
+      task.exitPlans = [...validated.plans, ...retained];
       task.decision.exitPlanRejections = validated.rejected;
     }
     task.decision.positionAudit = { observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true, positions: updatePositionTracking(task, market), holdingPlan: decision.holdingPlan || null };
