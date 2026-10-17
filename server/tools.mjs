@@ -8,7 +8,7 @@ import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstru
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
-import { parseHaohanPageSnapshot } from "./haohan.mjs";
+import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote, exitGuardAllowsPrice } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
@@ -45,6 +45,16 @@ async function pageHasLoginSuccess(page, adapter) {
   if (!page || !adapter?.login) return false;
   const currentUrl = page.url();
   if (isLoginUrl(currentUrl)) return false;
+  if (adapter.id === "haohan-readonly") {
+    // Expired sessions can leave both the trading route and old quotes visible.
+    // Neither those nor cached sessionStorage keys prove a live login.
+    try {
+      const visibleText = await page.locator("body").innerText({ timeout: 800 });
+      if (haohanLoginRequired({ url: currentUrl, visibleText })) return false;
+      const loginButton = page.locator(adapter.login.submitSelector).first();
+      if (await loginButton.isVisible() && await page.locator(adapter.login.passwordSelector).first().isVisible()) return false;
+    } catch { return false; }
+  }
   if (adapter.login.successUrlPattern && new RegExp(adapter.login.successUrlPattern, "i").test(currentUrl)) return true;
   if (adapter.login.successSelector) {
     try {
@@ -190,6 +200,15 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
     } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
   }
   try {
+    // A session-expiry notice may overlay the trading page without navigating.
+    // Open only the reviewed same-origin login route when its form is absent.
+    const loginFormVisible = await page.locator(adapter.login.passwordSelector).first().isVisible()
+      && await page.locator(adapter.login.submitSelector).first().isVisible();
+    if (adapter.login.entryUrl && !loginFormVisible) {
+      const loginUrl = new URL(adapter.login.entryUrl);
+      if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
+      await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+    }
     await page.locator(adapter.login.usernameSelector).first().fill(credential.username);
     await page.locator(adapter.login.passwordSelector).first().fill(credential.password);
     await prepareLoginForm(page, adapter);
@@ -207,6 +226,7 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
       return { ok: false, code: "LOGIN_NOT_CONFIRMED", message: detail ? `登录提交后仍未确认：${detail}` : "登录提交后未确认进入目标页面", credentialRef, adapterId: adapter.id, url: page.url() };
     }
     const navigation = await navigateAfterLogin(page, adapter, credential, targetUrl);
+    if (!await pageHasLoginSuccess(page, adapter)) return { ok: false, authenticated: false, code: "LOGIN_NOT_CONFIRMED", message: "返回目标页后登录尚未恢复，将自动重试", url: page.url() };
     return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: page.url(), ...navigation };
   } catch (error) {
     return { ok: false, code: "LOGIN_FAILED", message: error.message, credentialRef, adapterId: adapter.id };

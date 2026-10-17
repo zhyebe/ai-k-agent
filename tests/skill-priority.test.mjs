@@ -45,7 +45,8 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);
   assert.match(content, /疑似闪 K 及其瞬时显示价格不纳入方向、概率/);
   assert.match(content, /不能仅凭一次剧烈波动就认定假 K/);
-  assert.match(content, /趋势向上且买涨可执行就本轮返回 BUY/);
+  assert.match(content, /分别评估大趋势与当前入场点/);
+  assert.match(content, /已有早期可执行优势可以入场/);
   assert.doesNotMatch(content, /具体阻断证据|下次可行动条件/);
   const evidence = approvedKnowledgeForAnalysis([
     { id: "other", title: "其他经验", status: "APPROVED", version: "v2", content: "保留其他经验全文", updatedAt: "2026-10-15" },

@@ -22,6 +22,7 @@ const pendingSubmissionCancels = new Map();
 const positionExitRuns = new Map();
 const positionExitCancels = new Map();
 const actionPhaseLocks = new Set();
+const loginRecoveryRuns = new Map();
 const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
@@ -1383,6 +1384,19 @@ async function ensureConnected(task, connector, run, runtime, assertCurrent = ()
 }
 
 async function ensureLoggedIn(task, connector, run, pageResult, runtime, assertCurrent = () => {}) {
+  // Analysis and the fast exit monitor share one browser and one login attempt.
+  if (loginRecoveryRuns.has(task.id)) {
+    const result = await loginRecoveryRuns.get(task.id);
+    assertCurrent();
+    return result;
+  }
+  const operation = performLoginCheck(task, connector, run, pageResult, runtime, assertCurrent);
+  loginRecoveryRuns.set(task.id, operation);
+  try { return await operation; }
+  finally { if (loginRecoveryRuns.get(task.id) === operation) loginRecoveryRuns.delete(task.id); }
+}
+
+async function performLoginCheck(task, connector, run, pageResult, runtime, assertCurrent) {
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
   assertCurrent();
   const loginState = await runtime.browserLoginStatus({ sessionId, adapterId: task.target.adapterId || connector?.adapterId });
@@ -1419,10 +1433,39 @@ async function ensureLoggedIn(task, connector, run, pageResult, runtime, assertC
     return login;
   }
   task.target.loginStatus = login.authenticated ? "authenticated" : "credential_required";
+  if (login.authenticated) {
+    task.target.sessionRevision = Number(task.target.sessionRevision || 0) + 1;
+    task.monitorFailureCount = 0;
+    setNextPoll(task, 0);
+    const controller = controllerLoops.get(task.id);
+    if (controller && !controller.running && !controller.stopped) {
+      clearTimeout(controller.timer);
+      controller.timer = null;
+      scheduleController(task.id, 0);
+    }
+  }
   completeWorkflow(task, "login", login.authenticated ? "登录已提交" : "已填充登录表单");
   appendAgentOutput({ taskId: task.id, runId: run.id, stage: "login", message: login.authenticated ? "登录已提交，等待交易页" : "登录表单已填充但未确认提交" });
   persistTask(task);
   return login;
+}
+
+async function observeWithLoginRecovery(task, connector, run, runtime, observe, assertCurrent) {
+  const revision = Number(task.target.sessionRevision || 0);
+  const market = await observe();
+  assertCurrent();
+  if (market?.code !== "REAUTH_REQUIRED") return market;
+  // A concurrent monitor may already have recovered while this read was queued.
+  if (Number(task.target.sessionRevision || 0) === revision) {
+    const login = await ensureLoggedIn(task, connector, run, market, runtime, assertCurrent);
+    assertCurrent();
+    if (!login.ok || !login.authenticated) return { ...login, ok: false, code: "REAUTH_REQUIRED", loginCode: login.code };
+  }
+  appendAgentOutput({ taskId: task.id, runId: run.id, stage: "login", message: "登录已恢复，立即重新读取持仓和委托并继续监控" });
+  // Only retry the read. Never replay an order whose submission is uncertain.
+  const fresh = await observe();
+  assertCurrent();
+  return fresh;
 }
 
 function stopForLoginFailure(task, run, result) {
@@ -1875,7 +1918,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
 
     logStage(task, run, "collect", "读取网页可见数据与只读行情");
-    const market = await runtime.observeMarket(task, connector);
+    const market = await observeWithLoginRecovery(task, connector, run, runtime,
+      () => runtime.observeMarket(task, connector), assertCurrent);
     assertCurrent();
     if (!market.ok) {
       const paused = market.code === "REAUTH_REQUIRED";
@@ -1883,6 +1927,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.decision = holdDecision(market.code, paused ? "重新登录后重试" : "数据采集恢复后重试");
       task.status = paused ? "BLOCKED" : "PAUSED";
       task.target.loginStatus = paused ? "REAUTH_REQUIRED" : task.target.loginStatus;
+      setNextPoll(task, monitorRetryDelay(task));
       appendAgentOutput({ taskId, runId: run.id, stage: "collect", level: "error", message: `数据采集暂停：${market.message}`, data: { code: market.code } });
       addEvent("market_paused", `数据采集暂停：${market.message}`, { taskId, code: market.code, runId: run.id });
       finishAgentRun(run.id, { status: "paused", action: "HOLD", route, code: market.code });
@@ -1890,6 +1935,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       return { task, market, run, route };
     }
     const previousMarket = task.market;
+    const sessionRevision = Number(task.target.sessionRevision || 0);
     task.market = toTaskMarket(market);
     reconcilePendingPosition(task, market);
     syncTaskMetricsFromMarket(task, market);
@@ -2120,7 +2166,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         let account = market.account;
         try {
           for (const target of targets) {
-            const fresh = await runtime.observeExecutionMarket(task, connector, { accountScope: "positions", target: { symbol: target.symbol, symbolName: target.symbolName, instrumentId: target.instrumentId } });
+            const fresh = await observeWithLoginRecovery(task, connector, run, runtime,
+              () => runtime.observeExecutionMarket(task, connector, { accountScope: "positions", target: { symbol: target.symbol, symbolName: target.symbolName, instrumentId: target.instrumentId } }), assertCurrent);
             assertCurrent();
             if (!fresh?.ok || fresh.account?.positionsVerified !== true) throw new Error(fresh?.code || "EXIT_OBSERVATION_UNVERIFIED");
             books.push(...(fresh.books?.length ? fresh.books : [fresh]));
@@ -2152,7 +2199,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
     task.decision = { ...decision, runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
     const positionChangedDuringAnalysis = Number(task.exitExecutionRevision || 0) !== exitRevisionAtStart;
-    if (providerSucceeded && !positionChangedDuringAnalysis && !decisionExpired(task)) {
+    const sessionChangedDuringAnalysis = Number(task.target.sessionRevision || 0) !== sessionRevision;
+    if (providerSucceeded && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && !decisionExpired(task)) {
       const validated = validateExitPlans(decision, market, task);
       task.exitPlans = validated.plans;
       task.decision.exitPlanRejections = validated.rejected;
@@ -2249,7 +2297,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const cancelAssessedOrders = async (orderIds) => {
       // A complete cancellation is independent of missing entry/exit plan
       // fields. The browser still verifies the exact order and its remainder.
-      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !orderAssessmentSucceeded || positionChangedDuringAnalysis || decisionExpired(task)) return;
+      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !orderAssessmentSucceeded || positionChangedDuringAnalysis || sessionChangedDuringAnalysis || decisionExpired(task)) return;
       const cancellationAbort = new AbortController();
       const cancelSubmission = () => cancellationAbort.abort(new Error("ORDER_CANCEL_ABORTED"));
       pendingSubmissionCancels.set(task.id, cancelSubmission);
@@ -2301,7 +2349,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     // A complete AI exit is executable immediately in both entry modes. Exit
     // plans remain a fallback trigger for later monitoring, never a gate that
     // can swallow an explicit TAKE_PROFIT/STOP_LOSS action.
-    const canPromptOrder = providerSucceeded && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
+    const canPromptOrder = providerSucceeded && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
@@ -2309,7 +2357,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         skipped: true,
         reason: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
         route,
-        code: closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES",
+        code: sessionChangedDuringAnalysis ? "SESSION_CHANGED_DURING_ANALYSIS" : closingEntryBlocked ? "SESSION_CLOSING_NO_ENTRY" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : sameKEntry ? "ENTRY_ALREADY_HANDLED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
@@ -2344,7 +2392,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
-      const boundaryMessage = closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
+      const boundaryMessage = sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析" : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });
     }
@@ -2460,10 +2508,9 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       && Array.isArray(latestAccount.positions) && !latestAccount.positions.some(position => Number(position.quantity) > 0)) {
       return { skipped: true, reason: "MANUAL_ENTRY_WAITING" };
     }
-    let market = await runtime.observeExecutionMarket(task, connector, {
-      signal: exitAbort.signal,
-      accountScope: firstClosingWindow.active ? "full" : "positions",
-    });
+    const observe = (accountScope) => observeWithLoginRecovery(task, connector, { id: null }, runtime,
+      () => runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope }), assertCurrent);
+    let market = await observe(firstClosingWindow.active ? "full" : "positions");
     assertCurrent();
     task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
     if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
@@ -2472,7 +2519,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     // The observation can straddle the daily closing boundary. Read orders
     // before assessing that boundary, without treating an omitted table as empty.
     if (closing.active && !firstClosingWindow.active) {
-      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope: "full" });
+      market = await observe("full");
       assertCurrent();
       if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
       closing = sessionCloseWindow(task, currentTime());
@@ -2508,7 +2555,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
         if (pending.entrustedOrderIds?.length && pending.entrustedOrderIds.every(id => cancelledIds.has(id))) pending.status = "CANCELLED";
       }
       task.unsettledActions = (task.unsettledActions || []).filter(p => p.status !== "CANCELLED");
-      market = await runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope: "full" });
+      market = await observe("full");
       assertCurrent();
       closing = sessionCloseWindow(task, currentTime());
       if (!market.ok || market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {

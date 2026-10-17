@@ -34,6 +34,7 @@ registerConnectorAdapter({
   dataSource: "browser-dom",
   manualLoginOnly: true,
   login: {
+    entryUrl: "https://smyw.haohandahan.cn/client/#/login",
     usernameSelector: 'input[placeholder="请输入手机号码"], input[placeholder*="手机"], input[type="tel"], input[type="text"]',
     passwordSelector: 'input[placeholder="请输入密码"], input[type="password"]',
     consentSelector: 'input.el-checkbox__original[type="checkbox"]',

@@ -622,6 +622,13 @@ export function accountMetricsFromMarket(account = {}, current = {}) {
   };
 }
 
+export function haohanLoginRequired({ url = "", visibleText = "" } = {}) {
+  const text = String(visibleText).replace(/\s+/g, " ");
+  return /#\/login(?:[/?#]|$)/i.test(String(url))
+    || /(?:登录|登陆)(?:状态|信息|会话)?(?:已|已经)?(?:过期|失效|超时)|(?:会话|session)(?:已|已经)?(?:过期|失效|超时)|请重新(?:登录|登陆)|未(?:登录|登陆)/i.test(text)
+    || (!/最新价/.test(text) && /密码登录|账号登录|手机(?:号)?登录|请输入手机号码/.test(text));
+}
+
 export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timeframe = "15m", now = Date.now() } = {}) {
   const pageUrl = normalizeUrl(snapshot.url);
   const title = String(snapshot.title || "").slice(0, 160);
@@ -629,7 +636,7 @@ export function parseHaohanPageSnapshot(snapshot = {}, { symbol = "DGJJ", timefr
   const capturedAt = Number.isFinite(Number(snapshot.capturedAt)) ? Number(snapshot.capturedAt) : now;
   if (!isHaohanTarget(pageUrl)) return { ok: false, code: "BROWSER_TARGET_MISMATCH", message: "当前页面不是浩瀚数贸目标", page: { url: pageUrl, title } };
   const instrument = extractHaohanPageInstrument(snapshot);
-  if (/#\/login(?:\?|$)/.test(String(snapshot.url || "")) || (!/最新价/.test(visibleText) && /登录|密码登录/.test(visibleText))) {
+  if (haohanLoginRequired(snapshot)) {
     return { ok: false, code: "REAUTH_REQUIRED", message: "目标网页登录态已失效，需要重新登录", page: { url: pageUrl, title, instrument }, instrument, observedAt: new Date(capturedAt).toISOString(), executionEnabled: false };
   }
   const tables = Array.isArray(snapshot.tables) ? snapshot.tables : [];

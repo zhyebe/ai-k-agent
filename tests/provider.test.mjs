@@ -663,7 +663,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /correct persistent directional bias/);
     assert.match(prompt, /Report UNKNOWN if evidence is insufficient/);
     assert.match(prompt, /invalidation field is one structural price/);
-    assert.match(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
+    assert.match(prompt, /趋势方向与当前入场时机分别判断/);
     assert.doesNotMatch(prompt, /下次可行动条件/);
     assert.doesNotMatch(prompt, /数据过期或风险超限时失效/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
