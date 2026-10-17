@@ -74,6 +74,10 @@ function compactPersistedMarket(market) {
 
 function compactModelDiagnostics(value, includeAttempts = true) {
   if (!value || typeof value !== "object") return null;
+  const numbers = (source, keys) => Object.fromEntries(keys
+    .filter(key => Number.isFinite(source?.[key]) && source[key] >= 0)
+    .map(key => [key, source[key]]));
+  const usage = numbers(value.usage, ["inputTokens", "outputTokens", "cachedInputTokens", "cacheCreationInputTokens", "reasoningTokens"]);
   return {
     wireApi: value.wireApi,
     jsonStatus: value.jsonStatus,
@@ -81,6 +85,8 @@ function compactModelDiagnostics(value, includeAttempts = true) {
     stopReason: value.stopReason,
     textLength: value.textLength,
     contentHash: value.contentHash,
+    ...numbers(value, ["requestBytes", "responseDurationMs", "providerAttempts"]),
+    ...(Object.keys(usage).length ? { usage } : {}),
     ...(value.jsonError !== undefined ? { jsonError: value.jsonError } : {}),
     ...(value.retryError ? { retryError: value.retryError } : {}),
     ...(includeAttempts && Array.isArray(value.attempts) ? { attempts: value.attempts.slice(0, 2).map(item => compactModelDiagnostics(item, false)) } : {}),

@@ -28,6 +28,17 @@ test("MySQL runtime retains configured quantity and cancellation evidence", () =
   assert.deepEqual(restored.decision.cancelOrderIds, ["O-1"]);
 });
 
+test("performance diagnostics survive restart with only numeric usage and per-attempt timings", () => {
+  const timing = { requestBytes: 64000, responseDurationMs: 38041, providerAttempts: 1 };
+  const usage = { inputTokens: 12000, outputTokens: 1800, reasoningTokens: 900, cachedInputTokens: 0 };
+  const diagnostics = { wireApi: "chat", ...timing, usage: { ...usage, prompt: "private prompt", cacheCreationInputTokens: -1 }, attempts: [{ ...timing, usage: { ...usage, reasoning: "private thinking" } }] };
+  const restored = compactTaskRuntime(JSON.parse(JSON.stringify(compactTaskRuntime({ decision: { action: "BUY", modelDiagnostics: diagnostics } }))));
+  assert.deepEqual(restored.decision.modelDiagnostics.usage, usage);
+  assert.deepEqual(restored.decision.modelDiagnostics.attempts[0].usage, usage);
+  for (const [key, value] of Object.entries(timing)) assert.equal(restored.decision.modelDiagnostics[key], value);
+  assert.doesNotMatch(JSON.stringify(restored), /private/);
+});
+
 test("last model failure survives successful rounds and restart with both sanitized attempts", () => {
   const failed = { wireApi: "anthropic", jsonStatus: "INVALID_JSON", jsonError: "TRUNCATED_JSON", contentTypes: ["text"], stopReason: "end_turn", textLength: 22, contentHash: "a".repeat(64) };
   const complete = { ...failed, jsonStatus: "COMPLETE_JSON", jsonError: "", contentHash: "b".repeat(64) };

@@ -83,9 +83,9 @@ export function buildConversationMessages(context = {}) {
   return configuredRounds
     .slice(-MAX_CONVERSATION_ROUNDS)
     .map(compactRound)
-    .flatMap((round) => [
+    .flatMap(({ decision, ...round }) => [
       { role: "user", content: JSON.stringify({ type: "prior_monitoring_round", ...round }) },
-      { role: "assistant", content: JSON.stringify(round.decision) },
+      { role: "assistant", content: JSON.stringify(decision) },
     ]);
 }
 
@@ -587,13 +587,39 @@ function parseModelContent(content) {
   return result(null, /[\[{]/.test(text) ? "INVALID_JSON_SYNTAX" : "NO_JSON_OBJECT");
 }
 
+function modelTokenUsage(payload, wireApi) {
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const usage = payload.usage || {};
+  const gemini = payload.usageMetadata || {};
+  let inputTokens = count(usage.input_tokens ?? usage.prompt_tokens);
+  let outputTokens = count(usage.output_tokens ?? usage.completion_tokens);
+  let cachedInputTokens = count(usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens);
+  let reasoningTokens = count(usage.output_tokens_details?.reasoning_tokens ?? usage.completion_tokens_details?.reasoning_tokens);
+  let cacheCreationInputTokens;
+  if (wireApi === "anthropic") {
+    cachedInputTokens = count(usage.cache_read_input_tokens);
+    cacheCreationInputTokens = count(usage.cache_creation_input_tokens);
+    // Anthropic input_tokens excludes cache reads/writes; normalize to total input.
+    if (inputTokens !== undefined) inputTokens += (cachedInputTokens ?? 0) + (cacheCreationInputTokens ?? 0);
+  } else if (wireApi === "gemini") {
+    inputTokens = count(gemini.promptTokenCount);
+    cachedInputTokens = count(gemini.cachedContentTokenCount);
+    reasoningTokens = count(gemini.thoughtsTokenCount);
+    const candidates = count(gemini.candidatesTokenCount);
+    // Gemini reports generated answer and thinking tokens separately.
+    outputTokens = candidates === undefined ? undefined : candidates + (reasoningTokens ?? 0);
+  }
+  return Object.fromEntries(Object.entries({ inputTokens, outputTokens, cachedInputTokens, cacheCreationInputTokens, reasoningTokens }).filter(([, value]) => count(value) !== undefined));
+}
+
 function modelDiagnostics(payload, content, parsed, wireApi, jsonError) {
   const knownTypes = new Set(["text", "output_text", "input_text", "thinking", "reasoning", "analysis", "redacted_thinking", "message", "tool_use", "tool_result", "refusal"]);
   const parts = payload.content || payload.output || payload.choices?.[0]?.message?.content || payload.candidates?.[0]?.content?.parts;
   const contentTypes = Array.isArray(parts) ? [...new Set(parts.map((part) => part?.thought ? "thinking" : knownTypes.has(part?.type) ? part.type : typeof part?.text === "string" ? "text" : "unknown"))] : typeof parts === "string" ? ["text"] : [];
   const reason = payload.stop_reason || payload.choices?.[0]?.finish_reason || payload.candidates?.[0]?.finishReason || payload.incomplete_details?.reason || payload.status || "";
   const stopReason = ["end_turn", "stop", "max_tokens", "length", "tool_use", "stop_sequence", "content_filter", "STOP", "MAX_TOKENS", "completed", "incomplete", "max_output_tokens"].includes(reason) ? reason : reason ? "unknown" : "";
-  return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", jsonError, contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex") };
+  const usage = modelTokenUsage(payload, wireApi);
+  return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", jsonError, contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex"), ...(Object.keys(usage).length ? { usage } : {}) };
 }
 
 function providerReady(provider) {
@@ -607,12 +633,14 @@ async function requestProviderJson(provider, messages, options = {}) {
   let lastPayload = null;
   const candidates = providerRequestCandidates(provider);
   const signal = requestSignal(options.timeoutMs, options.signal);
+  const startedAt = performance.now();
   for (let index = 0; index < candidates.length; index += 1) {
     const candidate = candidates[index];
+    const body = JSON.stringify(providerRequestBody(candidate.provider, messages, options));
     const response = await fetch(candidate.url, {
       method: "POST",
       headers: providerHeaders(candidate.provider, apiKey),
-      body: JSON.stringify(providerRequestBody(candidate.provider, messages, options)),
+      body,
       ...(signal ? { signal } : {}),
     });
     let payload;
@@ -627,7 +655,8 @@ async function requestProviderJson(provider, messages, options = {}) {
     if (response.ok) {
       const content = extractModelText(payload);
       const { parsed, jsonError } = parseModelContent(content);
-      const diagnostics = modelDiagnostics(payload, content, parsed, resolveProviderWireApi(candidate.provider), jsonError);
+      const diagnostics = { ...modelDiagnostics(payload, content, parsed, resolveProviderWireApi(candidate.provider), jsonError),
+        requestBytes: Buffer.byteLength(body), responseDurationMs: Math.round(performance.now() - startedAt), providerAttempts: index + 1 };
       return { content, parsed, stopReason: diagnostics.stopReason, modelDiagnostics: diagnostics };
     }
     lastResponse = response;
@@ -784,13 +813,12 @@ export async function requestDecision(provider, context, options = {}) {
     }
     delete wireContext.recentRounds;
   }
-  const fastAnalysisPrompt = "Latency-critical live decision. Return one complete, compact JSON object; no markdown or long explanation. Keep analysis_summary within 180 Chinese characters, invalidation to one structural price within 40 Chinese characters and do not list future BUY/SELL changes, missing data, or session close, each board summary within 80, reason_codes/risk_flags/key_levels/watch_conditions at most 3 items each, and each order assessment reason short. Put action, exit_type, target_position_ids, every supplied order_assessments item, and both directional probabilities first. Cover every account.openOrders ID with KEEP/CANCEL and compare expected fill value versus cancellation and margin release; order_assessments and exit_plans are not subject to the three-item cap. Always include forecast_horizon.next_k for timing, forecast_horizon.next_10k for the broad trend path and holding_plan with AI-estimated holding duration; neither horizon is a holding limit. Lead with broad trend. Exclude suspect flash-K prices from all predictive evidence; a spike alone or unknown persistence cannot prove a flash K. Keep executable bid/ask separate. Assess every open position and monitored book; preserve exact IDs, honest probabilities, entry/exit prices and net-cost reasoning. Do not spend output restating source Skills or historical rounds. Resolve action/probability consistency in this same response.";
+  const fastAnalysisPrompt = "Latency-critical live decision. Lead with broad trend. Return one complete compact JSON object, no markdown, step-by-step narration or repeated alternatives. analysis_summary: at most 120 Chinese characters, main direction + action + decisive evidence; each rationale/reason/board summary: one short sentence, preferably within 40 characters. State a fact once in its relevant field; do not restate Skills or history. Preserve required fields, exact IDs, honest probabilities, prices, signed PnL, costs and uncertainty. Put action, exit_type, target_position_ids, order_assessments and both directional probabilities first. Include forecast_horizon.next_k, next_10k and holding_plan with estimated duration; these are checkpoints, not holding limits. Cover EVERY supplied position, open order and monitored book; exit_plans/order_assessments/board_assessments have NO item cap. Only reason_codes/risk_flags/key_levels/watch_conditions have at most 3 items each. invalidation: one structural price, at most 40 characters. Before finishing, check JSON syntax, complete IDs and action/exit consistency in this same response; brevity never permits omitting a position, KEEP/CANCEL decision or actionable exit condition.";
   const messages = [
     { role: "system", content: `${coreObjectivePrompt}\n${defaultSystemPrompt}\n${entryRecognitionPrompt}\nUser-configured entry quantity: ${requestContext.strategy?.entryQuantity ?? 1} per new order. Assess liquidity, costs and exposure for this quantity; exits use actual position quantity.\n${positionObservationPrompt}\n${conservativeExitPrompt}\n${holdingDurationPrompt}\n${conditionalExitPrompt}\n${netExitPrompt}\n${pendingOrderPrompt}\n${pendingTransferPrompt}\n${orderBookPrompt}\n${operatorPrompt}\n${permanentCounterpartyPrompt}${options.fastAnalysis ? `\n${fastAnalysisPrompt}` : ""}` },
     ...conversationMessages,
     ...(requestContext.executionPolicy?.rulesBlockExecution === false ? [{ role: "system", content: "Live execution fact: context.rules are advisory evidence, including modes named BLOCK or REVIEW; they do not block software submission or request human takeover. Assess their market evidence yourself; do not invent an ATR system block. context.executionPolicy.entryMode describes who clicks a new entry; closing positions and cancelling AI-selected orders are automatic in both entry modes. Keep all market and Skill evidence, honest probabilities and existing entry requirements." }] : []),
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),
-    { role: "system", content: entryRecognitionPrompt },
     { role: "user", content: JSON.stringify(wireContext) },
   ];
   messages[0].content = `${quickProfitExitPrompt}\n${messages[0].content}`;
