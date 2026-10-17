@@ -159,12 +159,12 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据→AI 先判断多周期大趋势，再大胆预测涨跌路径与持仓/离场时机→主机只按 AI 动作执行。概率仅作方向预测记录，不作固定门槛；多单靠上涨盈利，空单靠下跌盈利。恢复趋势持仓，持仓多久由AI判断，5根不是持仓上限或固定止盈止损期限。逐仓比较当前与上一轮已核实可成交盈亏；亏损持续扩大或AI预计继续扩大时立即止损，不等长期回本或大趋势完全反转。正常回撤仍需恢复依据，单个未核实闪K不证明持续扩亏，真实反向行情不能当噪声忽略。疑似闪K及其瞬时显示价格不纳入预测，真实可成交bid/ask独立用于执行校验。趋势延续时争取最大预期净收益，损失扩大时优先最小损失离场。",
+    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；目标是约2–5个价格点的可兑现收益，2–5是价格差，不是K线根数或百分比，扣除已知费用滑点后再判断净收益。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "MAXIMIZE_EXPECTED_NET_PROFIT", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {

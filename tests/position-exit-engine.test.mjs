@@ -66,6 +66,36 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
+for (const autoDecisionEnabled of [false, true]) {
+  for (const heldSide of ["LONG", "SHORT"]) {
+    test(`${autoDecisionEnabled ? "automatic" : "manual"} ${heldSide}: AI plan observes -1, captures 3 price points after costs, and still protects at its loss boundary`, async () => {
+      const isLong = heldSide === "LONG";
+      const quote = (f, signedPoints) => {
+        const price = 100 + (isLong ? signedPoints : -signedPoints);
+        f.market.orderBook = { bids: [{ price: isLong ? price : price - 1, volume: 100 }], asks: [{ price: isLong ? price + 1 : price, volume: 100 }] };
+      };
+      for (const [points, exitType] of [[3, "TAKE_PROFIT"], [-3, "STOP_LOSS"]]) {
+        const f = setup(`forecast-points-${autoDecisionEnabled}-${heldSide}-${exitType}`, [{ ...long("P1"), side: isLong ? "买入" : "卖出", roundTripFee: 2 }], { autoDecisionEnabled });
+        quote(f, -1);
+        f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide, quantity: 1, validForSec: 120,
+          takeProfitPrice: isLong ? 103 : 97, stopLossPrice: isLong ? 97 : 103,
+          rationale: "AI预测正常回撤可恢复，目标毛利3点扣费2后净利1，持续恶化至保护边界则止损" }] }, f.market, f.task).plans;
+        assert.equal(f.task.exitPlans.length, 1);
+        for (let observation = 0; observation < 2; observation++) {
+          await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+          assert.equal(f.submitted.length, 0, "stable one-point loss must not manufacture an exit outside AI conditions");
+        }
+        quote(f, points);
+        await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+        assert.equal(f.submitted.length, 1);
+        assert.equal(f.submitted[0].exitType, exitType);
+        assert.equal(f.submitted[0].action, isLong ? "SELL" : "BUY");
+        assert.deepEqual(f.submitted[0].targetPositionIds, ["P1"]);
+      }
+    });
+  }
+}
+
 for (const unverifiedField of ["positionsVerified", "openOrdersVerified"]) {
   test(`crossing into closing rereads full scope and cannot mark an empty ${unverifiedField} snapshot flat`, async () => {
     const f = setup(`crossing-unverified-${unverifiedField}`, []);

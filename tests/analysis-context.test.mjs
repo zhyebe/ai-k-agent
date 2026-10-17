@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
-test("入场由 AI 趋势识别，恢复趋势持仓并由AI判断扩亏离场", () => {
+test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI判断离场", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
   assert.equal(entry.minimumProbability, null);
   assert.equal(entry.decisionMode, "AI_RECOGNITION");
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.equal(exit.profitGoal, "MAXIMIZE_EXPECTED_NET_PROFIT");
+  assert.equal(exit.profitGoal, "REALIZE_PREDICTED_NET_PROFIT");
   assert.equal("profitHorizonMaxK" in exit, false);
   assert.equal("fixedCandleExit" in exit, false);
   assert.equal(exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
@@ -17,10 +17,10 @@ test("入场由 AI 趋势识别，恢复趋势持仓并由AI判断扩亏离场",
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["转让"]);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /5根不是持仓上限或固定止盈止损期限/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /2–5是价格差，不是K线根数或百分比/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /当前与上一轮/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /亏损持续扩大或AI预计继续扩大/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /不等长期回本或大趋势完全反转/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /亏1点不自动离场/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /持续扩亏且继续持有更可能恶化/);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, true);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);

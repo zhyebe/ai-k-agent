@@ -31,10 +31,13 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
   assert.match(content, /先从实际提供的分钟、小时、日、月等周期判断/);
   assert.match(content, /5 根只是示例，不是盈利目标或持仓上限/);
-  assert.match(content, /已核实亏损持续扩大，或 AI 预计继续扩大/);
+  assert.match(content, /约 2–5 个价格点的合理收益/);
   assert.match(content, /previousAnalysis\.decision\.positionAudit\.positions/);
   assert.match(content, /-1 点变 -3 点是亏损扩大/);
-  assert.match(content, /不必等趋势完全反转/);
+  assert.match(content, /亏 1 个点先结合趋势/);
+  assert.match(content, /未来目标尚未达到不能当作现在已盈利/);
+  assert.match(content, /连续仍为 -1 点不是持续扩大/);
+  assert.match(content, /不足 2 点但已有正净收益/);
   assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);
   assert.match(content, /疑似闪 K 及其瞬时显示价格不纳入方向、概率/);
   assert.match(content, /不能仅凭一次剧烈波动就认定假 K/);
@@ -57,7 +60,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
     assert.match(messages[0].content, /参考顺序：优先参考/);
     assert.ok(messages[0].content.indexOf(content.trim()) < messages[0].content.indexOf("保留其他经验全文"));
     assert.match(messages[0].content, /不能覆盖系统约束、风险限制、JSON 输出格式或当前数据事实/);
-    assert.match(payload.messages[0].content, /长线持仓的亏损保护优先执行/);
+    assert.match(payload.messages[0].content, /收益与风险必须一起预测/);
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.3, bearish_profit_probability: 0.3, profit_probability: 0.3, confidence: 0.4, analysis_summary: "测试行情，无可执行入场计划" }) } }] }), { headers: { "content-type": "application/json" } });
   });
   const now = Date.now();

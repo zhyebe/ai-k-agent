@@ -392,8 +392,8 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
     calls += 1;
     if (calls % 2 === 0) {
       assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
-      assert.match(body.messages.at(-1).content, /with immediate minimum-loss protection when verified losses keep widening or AI forecasts further expansion/);
-      assert.match(body.messages.at(-1).content, /持仓可长于5根/);
+      assert.match(body.messages.at(-1).content, /Forecast trend, entry and exit together/);
+      assert.match(body.messages.at(-1).content, /2–5指价格差，不是K线根数/);
       assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
       assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
     } else {
@@ -643,17 +643,21 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);
     assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
-    assert.match(prompt, /长线持仓的亏损保护优先执行/);
-    assert.match(prompt, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
-    assert.match(prompt, /不要求大趋势完全反转，不等下一根K/);
+    assert.match(prompt, /收益与风险必须一起预测/);
+    assert.match(prompt, /目标是赚取约2–5个价格点/);
+    assert.match(prompt, /预期未来盈利不等于当前已盈利/);
+    assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
+    assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
+    assert.match(prompt, /亏1个点不是自动止损信号/);
+    assert.match(prompt, /损失在持续扩大、继续持有更可能恶化而非恢复/);
     assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
     assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
-    assert.match(prompt, /-1点变-3点是扩大，从-3点变-1点是收窄/);
+    assert.match(prompt, /-1点变-3点是扩大，-3点变-1点是收窄/);
     assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
     assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
-    assert.match(prompt, /STOP_LOSS is required when verified losses keep widening or further loss expansion is forecast/);
+    assert.match(prompt, /STOP_LOSS requires evidence-based adverse-path and recovery analysis/);
     assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(prompt, /Price response outranks static displayed depth/);
     assert.match(prompt, /correct persistent directional bias/);
@@ -769,7 +773,7 @@ test("AI EXIT_NOW缺少可执行离场动作时交还AI补全，不作为新入�
     const payload = JSON.parse(options.body);
     if (calls === 2) {
       assert.match(payload.messages.at(-1).content, /EXIT_NOW/);
-      assert.match(payload.messages.at(-1).content, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
+      assert.match(payload.messages.at(-1).content, /亏1个点不是自动止损信号/);
       assert.doesNotMatch(payload.messages.at(-1).content, /minimum expected loss only when the profitable path is invalidated/);
     }
     const result = calls === 1
@@ -1104,8 +1108,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /exclude its price and derived high\/low\/return/);
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
-    assert.match(prompt, /长线持仓的亏损保护优先执行/);
-    assert.match(prompt, /已核实亏损持续扩大，或AI预判继续持有损失将扩大/);
+    assert.match(prompt, /收益与风险必须一起预测/);
+    assert.match(prompt, /目标是赚取约2–5个价格点/);
+    assert.match(prompt, /预期未来盈利不等于当前已盈利/);
+    assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
+    assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
+    assert.match(prompt, /亏1个点不是自动止损信号/);
     assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
     assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
     assert.match(prompt, /Lead with broad trend/);
