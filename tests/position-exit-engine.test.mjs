@@ -96,6 +96,35 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
+for (const autoDecisionEnabled of [false, true]) {
+  for (const heldSide of ["LONG", "SHORT"]) {
+    test(`${autoDecisionEnabled ? "automatic" : "manual"} ${heldSide}: AI closes only the profit, then protects worsening loss with a negative account total`, async () => {
+      const isLong = heldSide === "LONG";
+      const f = setup(`realtime-profit-${autoDecisionEnabled}-${heldSide}`, [
+        { ...long("P-profit"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 100 : 103, roundTripFee: 1 },
+        { ...long("P-loss"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 105 : 98, roundTripFee: 1 },
+      ], { autoDecisionEnabled });
+      f.market.account.realtimeValueChange = 1.01;
+      f.market.orderBook = { bids: [{ price: 101.5, volume: 100 }], asks: [{ price: 101.5, volume: 100 }] };
+      f.task.exitPlans = validateExitPlans({ exitPlans: [
+        { positionId: "P-profit", heldSide, quantity: 1, validForSec: 120, takeProfitPrice: 101.5, rationale: "AI读取实时货值变化大于1，只兑现当前盈利仓；趋势判断保留" },
+        { positionId: "P-loss", heldSide, quantity: 1, validForSec: 120, takeProfitPrice: isLong ? 108 : 95, stopLossPrice: isLong ? 95 : 108, rationale: "亏损仓仍在恢复路径，继续趋势分析" },
+      ] }, f.market, f.task).plans;
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.deepEqual(f.submitted.map(item => [item.targetPositionIds, item.action, item.exitType]), [[["P-profit"], isLong ? "SELL" : "BUY", "TAKE_PROFIT"]]);
+      assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["P-loss"]);
+      f.market.account.realtimeValueChange = -10;
+      const protectionPrice = isLong ? 95 : 108;
+      f.market.orderBook = { bids: [{ price: protectionPrice, volume: 100 }], asks: [{ price: protectionPrice, volume: 100 }] };
+      await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+      assert.equal(f.submitted.length, 2);
+      assert.equal(f.submitted[1].exitType, "STOP_LOSS");
+      assert.deepEqual(f.submitted[1].targetPositionIds, ["P-loss"]);
+      assert.deepEqual(f.market.account.positions, []);
+    });
+  }
+}
+
 for (const unverifiedField of ["positionsVerified", "openOrdersVerified"]) {
   test(`crossing into closing rereads full scope and cannot mark an empty ${unverifiedField} snapshot flat`, async () => {
     const f = setup(`crossing-unverified-${unverifiedField}`, []);

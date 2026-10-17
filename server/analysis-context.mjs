@@ -164,7 +164,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", realtimeValueRule: "保留多周期趋势判断；当前account.realtimeValueChange（网页实时货值变化）严格大于1时，AI立即离场当前可成交净盈利持仓，不等2–5个价格点或更大趋势收益；账户汇总不代表每仓盈利，亏损、持平和未知持仓单独分析。等于1、零、负数或缺失不触发本条规则，不替代原有趋势止盈止损。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {

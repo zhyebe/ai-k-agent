@@ -31,7 +31,11 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
   assert.match(content, /先从实际提供的分钟、小时、日、月等周期判断/);
   assert.match(content, /5 根只是示例，不是盈利目标或持仓上限/);
-  assert.match(content, /约 2–5 个价格点的合理收益/);
+  assert.match(content, /realtimeValueChange > 1/);
+  assert.match(content, /只离场当前盈利的持仓/);
+  assert.match(content, /保留多周期趋势判断/);
+  assert.match(content, /止损独立于汇总值大于 1 的止盈规则/);
+  assert.match(content, /不等 2–5 个价格点/);
   assert.match(content, /previousAnalysis\.decision\.positionAudit\.positions/);
   assert.match(content, /-1 点变 -3 点是亏损扩大/);
   assert.match(content, /亏 1 个点先结合趋势/);
