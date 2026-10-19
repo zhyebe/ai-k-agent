@@ -53,19 +53,65 @@ function scopedSession(message, apiBaseUrl) {
   return crypto.createHash("sha256").update(`${apiBaseUrl}\n${message.userId}\n${sessionId}`).digest("hex").slice(0, 32);
 }
 
+function browserOperationPriority(method) {
+  if (["browserLogin", "browserLoginStatus", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry", "fillSuggestionForm"].includes(method)) return 100;
+  if (["observeExecutionMarket", "readTradeControls"].includes(method)) return 80;
+  if (method === "openMarketBrowser") return 40;
+  return 10;
+}
+
+function enqueueSessionOperation(sessionId, method, signal, deadlineAt, operation) {
+  let state = queues.get(sessionId);
+  if (!state || typeof state !== "object" || !Array.isArray(state.pending)) {
+    state = { running: false, sequence: 0, pending: [] };
+    queues.set(sessionId, state);
+  }
+  const job = { method, signal, deadlineAt, operation, priority: browserOperationPriority(method), sequence: state.sequence++ };
+  const result = new Promise((resolve, reject) => { job.resolve = resolve; job.reject = reject; });
+  const removeOnAbort = () => {
+    if (job.started) return;
+    const index = state.pending.indexOf(job);
+    if (index >= 0) {
+      state.pending.splice(index, 1);
+      job.reject(signal.reason || new Error("DESKTOP_BROWSER_CALL_CANCELLED"));
+    }
+  };
+  signal.addEventListener("abort", removeOnAbort, { once: true });
+  state.pending.push(job);
+  state.pending.sort((left, right) => right.priority - left.priority || left.sequence - right.sequence);
+  const drain = async () => {
+    if (state.running) return;
+    state.running = true;
+    try {
+      while (state.pending.length) {
+        const next = state.pending.shift();
+        if (next.signal.aborted) {
+          next.reject(next.signal.reason || new Error("DESKTOP_BROWSER_CALL_CANCELLED"));
+          continue;
+        }
+        next.started = true;
+        try { next.resolve(await next.operation()); }
+        catch (error) { next.reject(error); }
+        finally { next.signal.removeEventListener("abort", removeOnAbort); }
+      }
+    } finally {
+      state.running = false;
+      if (!state.pending.length && queues.get(sessionId) === state) queues.delete(sessionId);
+    }
+  };
+  drain().catch((error) => { if (!job.started) job.reject(error); });
+  return result;
+}
+
 async function executeBrowserCall(app, message, apiBaseUrl, signal) {
   if (!message.userId) throw new Error("DESKTOP_BROWSER_USER_REQUIRED");
   const sessionId = scopedSession(message, apiBaseUrl);
   const withBrowser = async (operation) => {
-    const previous = queues.get(sessionId) || Promise.resolve();
-    const queued = previous.catch(() => {}).then(async () => {
+    return enqueueSessionOperation(sessionId, message.method, signal, message.deadlineAt, async () => {
       signal.throwIfAborted();
       if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
       return operation();
     });
-    queues.set(sessionId, queued);
-    try { return await queued; }
-    finally { if (queues.get(sessionId) === queued) queues.delete(sessionId); }
   };
   const execute = async () => {
     signal.throwIfAborted();

@@ -198,6 +198,27 @@ test("live auto mode submits the AI action without a confirmation dialog", async
   assert.equal(state.orders.find((order) => order.taskId === task.id)?.status, "submitted");
 });
 
+test("登录过期时自动恢复并把原动作标记为待核实，下一轮可继续执行", async () => {
+  const task = insertTask(`task_live_reauth_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.target.credentialRef = "credential:test-recovery";
+  task.pendingAction = buildPendingAction(task, task.decision);
+  let loginChecks = 0;
+  let loginAttempts = 0;
+  await assert.rejects(confirmPendingAction(task.id, {
+    source: "auto_timeout",
+    runtime: {
+      submitSuggestionForm: async () => { throw new Error("REAUTH_REQUIRED"); },
+      browserLoginStatus: async () => { loginChecks += 1; return { ok: true, authenticated: false }; },
+      browserLogin: async () => { loginAttempts += 1; return { ok: true, authenticated: true }; },
+    },
+  }), /REAUTH_REQUIRED/);
+  assert.equal(loginChecks, 1);
+  assert.equal(loginAttempts, 1);
+  assert.equal(task.pendingAction.status, "UNVERIFIED");
+  assert.equal(task.pendingAction.retryAfterLogin, true);
+  assert.equal(task.target.loginStatus, "authenticated");
+});
+
 test("auto click without a verified write request keeps monitoring for reconciliation", async () => {
   const task = insertTask(`task_live_unverified_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);

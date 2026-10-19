@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   boardCoverageForTargets,
+  detectFlashK,
   enrichReadOnlyMarket,
   fetchHaohanMarket,
   fetchHaohanKlineHistory,
@@ -82,6 +83,25 @@ test("浩瀚 K 线按真实列位解析 OHLC、成交量和库存", () => {
 test("浩瀚分时行单独解析为逐笔数据", () => {
   const tick = normalizeHaohanTimelineTick([1700000000000, 103, 100, 25, 102, "1"]);
   assert.deepEqual(tick, { timestamp: 1700000000000, price: 103, volume: 25, referencePrice: 100, averagePrice: 102, flag: "1" });
+});
+
+test("闪K必须有短暂出现后消失/回归证据才从分析价格中排除", () => {
+  const base = (price, timestamp) => ({ timestamp, open: price, high: price, low: price, close: price, volume: 1 });
+  const symbol = `FLASH-${Date.now()}`;
+  const t0 = 1_700_000_000_000;
+  assert.equal(detectFlashK({ symbol, timeframe: "1m", history: [base(100, t0)], latest: { price: 100 }, now: t0 }).suspected, false);
+  assert.equal(detectFlashK({ symbol, timeframe: "1m", history: [base(105, t0 + 5000)], latest: { price: 105 }, now: t0 + 5000 }).suspected, false);
+  const reverted = detectFlashK({ symbol, timeframe: "1m", history: [base(100, t0 + 9000)], latest: { price: 100 }, now: t0 + 9000 });
+  assert.equal(reverted.suspected, true);
+  assert.equal(reverted.price, 105);
+  assert.equal(reverted.excludeFromAnalysis, true);
+});
+
+test("单次 ATR 大波动没有连续消失证据，不判定为闪K", () => {
+  const t0 = 1_700_100_000_000;
+  const history = Array.from({ length: 30 }, (_, index) => ({ timestamp: t0 + index * 60000, open: 100, high: index === 29 ? 130 : 101, low: 99, close: index === 29 ? 130 : 100, volume: 10 }));
+  const result = detectFlashK({ symbol: `ANOMALY-${Date.now()}`, timeframe: "1m", history, latest: { price: 130 }, now: t0 + 29 * 60000 });
+  assert.equal(result.suspected, false);
 });
 
 test("K 线历史请求使用目标周期并返回真实数据", async () => {

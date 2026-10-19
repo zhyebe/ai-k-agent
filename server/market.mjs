@@ -387,6 +387,74 @@ function isCompleteCandle(candle) {
     && (candle.volume === null || (Number.isFinite(candle.volume) && candle.volume >= 0));
 }
 
+// A flash K is a transient display quote, not a confirmed market print. Keep
+// the detector deliberately evidence-based: one large range is only an ATR
+// anomaly; a price must briefly appear and then revert/disappear in consecutive
+// observations (or in a short tick burst) before it is excluded from analysis.
+const flashKObservationHistory = new Map();
+
+function flashIdentity({ symbol = "", symbolName = "", instrumentId = "", timeframe = "" } = {}) {
+  return [symbol, symbolName, instrumentId, timeframe].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join("|") || "default";
+}
+
+function priceNear(left, right, tolerance = 0.001) {
+  const a = Number(left);
+  const b = Number(right);
+  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) / Math.max(Math.abs(b), 1) <= tolerance;
+}
+
+export function detectFlashK({ symbol = "", symbolName = "", instrumentId = "", timeframe = "", history = [], ticks = [], latest = {}, now = Date.now() } = {}) {
+  const currentCandle = Array.isArray(history) ? history.at(-1) : null;
+  const currentPrice = Number(latest?.price ?? currentCandle?.close);
+  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return { suspected: false, reason: "LATEST_PRICE_MISSING" };
+  const identity = flashIdentity({ symbol, symbolName, instrumentId, timeframe });
+  const samples = flashKObservationHistory.get(identity) || [];
+  const current = { at: Number(now) || Date.now(), price: currentPrice, timestamp: currentCandle?.timestamp || null, wickless: Boolean(currentCandle && priceNear(currentCandle.high, Math.max(currentCandle.open, currentCandle.close), 0.00001) && priceNear(currentCandle.low, Math.min(currentCandle.open, currentCandle.close), 0.00001)) };
+  samples.push(current);
+  while (samples.length > 8) samples.shift();
+  flashKObservationHistory.set(identity, samples);
+
+  let transientPrice = null;
+  let reason = "";
+  const before = samples.at(-3);
+  const transient = samples.at(-2);
+  if (before && transient && samples.length >= 3
+    && transient.wickless
+    && Number(transient.at) - Number(before.at) <= 15000
+    && Number(now) - Number(transient.at) <= 15000
+    && !priceNear(transient.price, before.price, 0.001)
+    && priceNear(currentPrice, before.price, 0.001)) {
+    transientPrice = transient.price;
+    reason = "TRANSIENT_REVERTED";
+  }
+
+  const validTicks = (Array.isArray(ticks) ? ticks : [])
+    .map((tick) => ({ price: Number(tick?.price), at: new Date(tick?.timestamp || 0).getTime() }))
+    .filter((tick) => Number.isFinite(tick.price) && tick.price > 0 && Number.isFinite(tick.at))
+    .sort((left, right) => left.at - right.at);
+  if (!transientPrice && current.wickless && validTicks.length >= 3) {
+    const first = validTicks[0];
+    const last = validTicks.at(-1);
+    const prices = validTicks.map((tick) => tick.price);
+    const extreme = prices.reduce((best, price) => Math.abs(price / first.price - 1) > Math.abs(best / first.price - 1) ? price : best, first.price);
+    const extremeCount = prices.filter((price) => priceNear(price, extreme, 0.0001)).length;
+    if (last.at - first.at <= 10000 && extremeCount === 1 && Math.abs(extreme / first.price - 1) >= 0.002 && priceNear(last.price, first.price, 0.001)) {
+      transientPrice = extreme;
+      reason = "SHORT_TICK_SPIKE_REVERTED";
+    }
+  }
+  return transientPrice === null
+    ? { suspected: false, reason: "NO_DISAPPEARING_PRICE" }
+    : {
+      suspected: true,
+      price: transientPrice,
+      timestamp: transient?.timestamp || currentCandle?.timestamp || null,
+      reason,
+      excludeFromAnalysis: true,
+      preserveExecutableQuotes: true,
+    };
+}
+
 function sma(values, period) {
   if (values.length < period) return null;
   return values.slice(-period).reduce((sum, value) => sum + value, 0) / period;
@@ -514,6 +582,7 @@ function timeframeFingerprint(snapshot) {
     period: snapshot.period,
     history: snapshot.history,
     ticks: snapshot.ticks || [],
+    flashK: snapshot.flashK || null,
     missingFields: snapshot.missingFields,
     code: snapshot.code || "",
   };
@@ -530,6 +599,7 @@ function bookFingerprint(book) {
     orderBook: orderBookFingerprint(book?.orderBook || book?.pageView?.orderBook),
     changePct: book?.changePct,
     trend: book?.trend,
+    flashK: book?.flashK || null,
     dataQuality: book?.dataQuality || "",
     historyCount: book?.historyCount || history.length,
     lastTimestamp: last?.timestamp || null,
@@ -552,6 +622,7 @@ function serializeBoardBook(market) {
     indicators: market.indicators || null,
     trend: market.trend || "unknown",
     anomaly: Boolean(market.anomaly),
+    flashK: market.flashK || null,
     history: Array.isArray(market.history) ? market.history : [],
     historyCount: market.historyCount || market.history?.length || 0,
     completeHistoryCount: market.completeHistoryCount || 0,
@@ -822,6 +893,7 @@ export function marketDataFingerprint(market = {}) {
     account: market.account || null,
     orderBook: orderBookFingerprint(market.orderBook || market.pageView?.orderBook),
     changePct: market.changePct,
+    flashK: market.flashK || null,
     dataQuality: market.dataQuality || "",
     missingFields: market.missingFields || [],
     marketClosed: Boolean(market.marketClosed),
@@ -835,7 +907,7 @@ export function marketDataFingerprint(market = {}) {
   return crypto.createHash("sha256").update(JSON.stringify(canonicalFingerprintValue(material))).digest("hex");
 }
 
-function buildTimeframeSnapshot({ timeframe, period = null, history = [], source = "", rawData = [], endpoint = "", responseCount = 0, requestedCount = null, dataAt = null, ticks = [], ok = true, code = "", message = "" }) {
+function buildTimeframeSnapshot({ symbol = "", symbolName = "", instrumentId = "", timeframe, period = null, history = [], source = "", rawData = [], endpoint = "", responseCount = 0, requestedCount = null, dataAt = null, ticks = [], ok = true, code = "", message = "" }) {
   const normalizedTimeframe = normalizeHaohanTimeframe(timeframe);
   const normalizedHistory = normalizeHistory(history);
   const indicators = calculateIndicators(normalizedHistory);
@@ -865,6 +937,7 @@ function buildTimeframeSnapshot({ timeframe, period = null, history = [], source
     })),
     trend: indicators.trend,
     anomaly: indicators.anomaly,
+    flashK: detectFlashK({ symbol, symbolName, instrumentId, timeframe: normalizedTimeframe, history: normalizedHistory, ticks }),
     missingFields,
     dataQuality: missingFields.length ? "LIMITED" : "VERIFIED",
     ticks: Array.isArray(ticks) ? ticks : [],
@@ -878,12 +951,14 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
   for (const [key, value] of Object.entries(timeframes || {})) {
     if (!value || typeof value !== "object") continue;
     const normalized = normalizeHaohanTimeframe(key || value.timeframe || primaryTimeframe);
-    timeframeEntries.set(normalized, buildTimeframeSnapshot({ timeframe: normalized, ...value }));
+    timeframeEntries.set(normalized, buildTimeframeSnapshot({ symbol, symbolName, instrumentId, timeframe: normalized, ...value }));
   }
   if (!timeframeEntries.has(primaryTimeframe)) {
-    timeframeEntries.set(primaryTimeframe, buildTimeframeSnapshot({ timeframe: primaryTimeframe, history, source }));
+    timeframeEntries.set(primaryTimeframe, buildTimeframeSnapshot({ symbol, symbolName, instrumentId, timeframe: primaryTimeframe, history, ticks, source }));
   }
   const primary = timeframeEntries.get(primaryTimeframe);
+  const flashK = detectFlashK({ symbol, symbolName, instrumentId, timeframe: primaryTimeframe, history: primary.history, ticks, latest: quote, now: new Date(observedAt || Date.now()).getTime() });
+  primary.flashK = flashK;
   const normalizedTicks = Array.isArray(ticks) ? ticks : [];
   const primaryHistory = primary.history;
   const current = primaryHistory.at(-1);
@@ -950,6 +1025,7 @@ export function enrichReadOnlyMarket({ symbol, symbolName, instrumentId = null, 
     indicators: primary.indicators,
     trend: primary.trend,
     anomaly: primary.anomaly,
+    flashK,
     freshnessSec,
     dataQuality: blockingMissingFields(missingFields).length ? "LIMITED" : "VERIFIED",
     missingFields: [...new Set(missingFields)],

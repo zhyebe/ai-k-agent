@@ -23,6 +23,8 @@ const positionExitRuns = new Map();
 const positionExitCancels = new Map();
 const actionPhaseLocks = new Set();
 const loginRecoveryRuns = new Map();
+const LOGIN_HEARTBEAT_INTERVAL_MS = 5000;
+const SUBMITTING_RECOVERY_TIMEOUT_MS = 15000;
 const DEFAULT_MONITOR_POLL_MS = 0;
 const DEFAULT_MONITOR_RETRY_MS = 1000;
 const MAX_MONITOR_POLL_MS = 120000;
@@ -544,28 +546,45 @@ async function openPendingAction(task, { runtime, run } = {}) {
       if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
       await confirmPendingAction(task.id, { source: "auto_timeout", runtime });
     } catch (error) {
-      task.pendingAction = {
-        ...task.pendingAction,
-        status: "CANCELLED",
-        source: "auto_timeout",
-        resolvedAt: new Date().toISOString(),
-        formSubmitBlocked: false,
-        message: `${task.pendingAction.message}；自动执行失败：${error.message}，下一轮继续监控并重新判断`,
-      };
-      task.nextTrigger = task.pendingAction.message;
-      if (!task.pendingAction.exitType) task.lastEntryKWindow = null;
-      setNextPoll(task, monitorRetryDelay(task));
-      addEvent("automatic_order_failed", task.pendingAction.message, { taskId: task.id, code: error?.message || "TRADE_SUBMIT_FAILED" });
-      if (run) {
-        appendAgentOutput({
+      const recoveryPending = task.pendingAction?.status === "UNVERIFIED" && task.pendingAction.retryAfterLogin === true;
+      if (recoveryPending) {
+        // Login recovery already marked the write uncertain. Preserve it so the
+        // next cycle reads real positions/orders before deciding whether to retry.
+        task.nextTrigger = "登录已恢复；继续核实原动作并按结果执行后续监控";
+        setNextPoll(task, 0);
+        addEvent("automatic_order_recovery", task.nextTrigger, { taskId: task.id, pendingActionId: task.pendingAction.id, code: error?.message || "REAUTH_REQUIRED" });
+        if (run) appendAgentOutput({
           taskId: task.id,
           runId: run.id,
-          stage: "action",
+          stage: "login",
           kind: "order",
-          level: "error",
-          message: task.pendingAction.message,
-          data: { pendingActionId: task.pendingAction.id, source: "auto_timeout", submitted: false, retryScheduled: true, code: error?.message || "TRADE_SUBMIT_FAILED" },
+          message: task.nextTrigger,
+          data: { pendingActionId: task.pendingAction.id, source: "auto_timeout", submitted: false, retryScheduled: true, code: error?.message || "REAUTH_REQUIRED" },
         });
+      } else {
+        task.pendingAction = {
+          ...task.pendingAction,
+          status: "CANCELLED",
+          source: "auto_timeout",
+          resolvedAt: new Date().toISOString(),
+          formSubmitBlocked: false,
+          message: `${task.pendingAction.message}；自动执行失败：${error.message}，下一轮继续监控并重新判断`,
+        };
+        task.nextTrigger = task.pendingAction.message;
+        if (!task.pendingAction.exitType) task.lastEntryKWindow = null;
+        setNextPoll(task, monitorRetryDelay(task));
+        addEvent("automatic_order_failed", task.pendingAction.message, { taskId: task.id, code: error?.message || "TRADE_SUBMIT_FAILED" });
+        if (run) {
+          appendAgentOutput({
+            taskId: task.id,
+            runId: run.id,
+            stage: "action",
+            kind: "order",
+            level: "error",
+            message: task.pendingAction.message,
+            data: { pendingActionId: task.pendingAction.id, source: "auto_timeout", submitted: false, retryScheduled: true, code: error?.message || "TRADE_SUBMIT_FAILED" },
+          });
+        }
       }
       persistTask(task);
     }
@@ -748,6 +767,7 @@ function reconcilePositionAction(task, market, pending) {
     status: "CONFIRMED",
     source: pending.source || "manual_browser",
     resolvedAt: new Date().toISOString(),
+    retryAfterLogin: false,
     formSubmitBlocked: false,
     message: `${pendingActionLabel(pending)}已通过持仓变化核实，继续监控`,
   };
@@ -817,6 +837,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       task.pendingAction = {
         ...task.pendingAction,
         status: "SUBMITTING",
+          submissionStartedAt: new Date().toISOString(),
           message: `正在向${pendingTargetLabel(task.pendingAction)}执行${actionLabel}…`,
       };
       persistTask(task);
@@ -845,15 +866,39 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         }, { signal: submissionAbort.signal });
         submissionAbort.signal.throwIfAborted();
         assertSubmissionCurrent();
+        if (submitted && /REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(submitted.code || submitted.message || ""))) {
+          const error = new Error(submitted.code || "REAUTH_REQUIRED");
+          error.code = submitted.code || "REAUTH_REQUIRED";
+          throw error;
+        }
       } catch (error) {
         if (getTask(taskId) === task && taskGeneration(task) === generation && !task.stopLocked && task.pendingAction?.id === pendingId && task.pendingAction?.status === "SUBMITTING") {
+          const authExpired = /REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""));
           task.pendingAction = {
             ...task.pendingAction,
-            status: "WAITING",
-            message: `确认后下单失败：${error?.message || "目标页未响应，请重试或取消"}`,
+            status: authExpired ? "UNVERIFIED" : "WAITING",
+            retryAfterLogin: authExpired,
+            formSubmitBlocked: false,
+            message: authExpired
+              ? "登录态已失效；已自动恢复登录并继续核实本次动作，确认未成交后立即重试"
+              : `确认后下单失败：${error?.message || "目标页未响应，请重试或取消"}`,
           };
+          if (authExpired) task.target.loginStatus = "REAUTH_REQUIRED";
           task.nextTrigger = task.pendingAction.message;
+          if (authExpired) setNextPoll(task, 0);
           persistTask(task);
+        }
+        if (/REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""))) {
+          try {
+            const connector = getConnector(task.target.connectorId);
+            await ensureLoggedIn(task, connector, { id: task.activeRunId || null }, { code: "REAUTH_REQUIRED" }, resolveRuntime(runtime, { userId: task.ownerUserId || "" }), () => assertCycleCurrent(task, generation));
+          } catch (recoveryError) {
+            task.pendingAction = {
+              ...task.pendingAction,
+              loginRecoveryError: String(recoveryError?.message || recoveryError || "LOGIN_RECOVERY_FAILED").slice(0, 240),
+            };
+            persistTask(task);
+          }
         }
         throw error;
       } finally {
@@ -1105,7 +1150,23 @@ function setNextPoll(task, delayMs = monitoringPollIntervalMs(task)) {
 }
 
 function pauseForPendingAction(task) {
-  return task?.pendingAction?.status === "SUBMITTING";
+  const pending = task?.pendingAction;
+  if (pending?.status !== "SUBMITTING") return false;
+  // A browser call can be interrupted by a desktop reconnect or an expired
+  // session. Do not leave the whole controller paused forever; keep the
+  // action as UNVERIFIED so the next observation reconciles the real order.
+  const startedAt = new Date(pending.submissionStartedAt || pending.createdAt || 0).getTime();
+  if (Number.isFinite(startedAt) && startedAt > 0 && Date.now() - startedAt >= SUBMITTING_RECOVERY_TIMEOUT_MS) {
+    pending.status = "UNVERIFIED";
+    pending.formSubmitBlocked = false;
+    pending.message = "下单请求超过响应时限；保留为待核实状态，继续读取真实委托与持仓";
+    pending.recoveryAt = new Date().toISOString();
+    pendingSubmissionCancels.get(task.id)?.();
+    pendingSubmissionCancels.delete(task.id);
+    persistTask(task);
+    return false;
+  }
+  return true;
 }
 
 function resumeMonitoringAfterAction(task) {
@@ -1385,15 +1446,18 @@ async function ensureConnected(task, connector, run, runtime, assertCurrent = ()
 
 async function ensureLoggedIn(task, connector, run, pageResult, runtime, assertCurrent = () => {}) {
   // Analysis and the fast exit monitor share one browser and one login attempt.
-  if (loginRecoveryRuns.has(task.id)) {
-    const result = await loginRecoveryRuns.get(task.id);
+  // Key by browser session so two concurrent controller paths cannot navigate
+  // the same page through separate login flows.
+  const loginKey = task.target.browserSessionId || `task:${task.id}`;
+  if (loginRecoveryRuns.has(loginKey)) {
+    const result = await loginRecoveryRuns.get(loginKey);
     assertCurrent();
     return result;
   }
   const operation = performLoginCheck(task, connector, run, pageResult, runtime, assertCurrent);
-  loginRecoveryRuns.set(task.id, operation);
+  loginRecoveryRuns.set(loginKey, operation);
   try { return await operation; }
-  finally { if (loginRecoveryRuns.get(task.id) === operation) loginRecoveryRuns.delete(task.id); }
+  finally { if (loginRecoveryRuns.get(loginKey) === operation) loginRecoveryRuns.delete(loginKey); }
 }
 
 async function performLoginCheck(task, connector, run, pageResult, runtime, assertCurrent) {
@@ -1401,6 +1465,7 @@ async function performLoginCheck(task, connector, run, pageResult, runtime, asse
   assertCurrent();
   const loginState = await runtime.browserLoginStatus({ sessionId, adapterId: task.target.adapterId || connector?.adapterId });
   assertCurrent();
+  task.target.loginHeartbeatAt = new Date().toISOString();
   const needsLogin = pageResult?.code === "REAUTH_REQUIRED" || /#\/login/.test(String(pageResult?.url || pageResult?.page?.url || "")) || !loginState.authenticated;
   if (!needsLogin && pageResult?.ok) {
     task.target.loginStatus = "authenticated";
@@ -1452,6 +1517,21 @@ async function performLoginCheck(task, connector, run, pageResult, runtime, asse
 
 async function observeWithLoginRecovery(task, connector, run, runtime, observe, assertCurrent) {
   const revision = Number(task.target.sessionRevision || 0);
+  const lastHeartbeatAt = task.target.loginHeartbeatAt ? new Date(task.target.loginHeartbeatAt).getTime() : NaN;
+  const heartbeatDue = (task.target.loginStatus === "authenticated" || Number.isFinite(lastHeartbeatAt))
+    && (!Number.isFinite(lastHeartbeatAt) || Date.now() - lastHeartbeatAt >= LOGIN_HEARTBEAT_INTERVAL_MS);
+  if (heartbeatDue && typeof runtime.browserLoginStatus === "function") {
+    const sessionId = task.target.browserSessionId || `task:${task.id}`;
+    let loginState = null;
+    try { loginState = await runtime.browserLoginStatus({ sessionId, adapterId: task.target.adapterId || connector?.adapterId }); } catch {}
+    assertCurrent();
+    task.target.loginHeartbeatAt = new Date().toISOString();
+    if (loginState && loginState.authenticated === false) {
+      const login = await ensureLoggedIn(task, connector, run, { code: "REAUTH_REQUIRED", url: loginState?.url || "" }, runtime, assertCurrent);
+      assertCurrent();
+      if (!login?.ok || !login.authenticated) return { ...login, ok: false, code: "REAUTH_REQUIRED", loginCode: login?.code };
+    }
+  }
   const market = await observe();
   assertCurrent();
   if (market?.code !== "REAUTH_REQUIRED") return market;
@@ -2311,6 +2391,17 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: cancellationAbort.signal });
       } catch (error) {
         cancellation = { ok: false, results: orderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message })) };
+        if (/REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""))) {
+          try {
+            const login = await ensureLoggedIn(task, connector, run, { code: "REAUTH_REQUIRED" }, runtime, assertCurrent);
+            if (login?.ok && login.authenticated) {
+              cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: cancellationAbort.signal });
+              appendAgentOutput({ taskId, runId: run.id, stage: "login", kind: "order", message: "登录已恢复，继续重试原委托撤单" });
+            }
+          } catch (recoveryError) {
+            cancellation = { ok: false, results: orderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_REAUTH_FAILED", message: recoveryError.message || "登录恢复失败" })) };
+          }
+        }
       } finally {
         if (pendingSubmissionCancels.get(task.id) === cancelSubmission) pendingSubmissionCancels.delete(task.id);
       }
@@ -2345,7 +2436,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const previousEntryKWindow = task.pendingAction && !task.pendingAction.exitType
       ? (["CANCELLED", "REJECTED"].includes(task.pendingAction.status) ? (task.pendingAction.entrustedOrderIds?.length ? task.lastEntryKWindow : null) : task.pendingAction.entryKWindow || (task.pendingAction.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null))
       : task.lastEntryKWindow;
-    const sameKEntry = !task.decision.exitType && previousEntryKWindow === nextCandleTarget({}, Date.now()).closeTime;
+    const sameKEntry = !task.decision.exitType && !task.pendingAction?.retryAfterLogin
+      && previousEntryKWindow === nextCandleTarget({}, Date.now()).closeTime;
     const executionBlocked = !liveExecution && (rulePaused || holdRequired);
     const closeWindow = sessionCloseWindow(task);
     const closingEntryBlocked = isLiveTask(task) && closeWindow.active && !task.decision.exitType;
@@ -2418,8 +2510,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (state.analyses.length > 20) state.analyses.length = 20;
     persistAnalysis(analysis);
     finishAgentRun(run.id, { status: providerSucceeded ? "completed" : "error", action: task.decision.action, route, code: providerSucceeded ? execution.code || route : decision.riskFlags.find((code) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "ANALYSIS_INCOMPLETE"].includes(code)) || "ANALYSIS_INCOMPLETE" });
-    if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task);
-    else if (pauseForPendingAction(task)) task.nextPollAt = null;
+    if (monitoringIntent(task)) setNextPoll(task, pauseForPendingAction(task) ? DEFAULT_MONITOR_RETRY_MS : undefined);
       persistTask(task);
     return { task, market: task.market, evidence, execution, run, route, analysisTriggered: true };
   } catch (error) {
@@ -2481,7 +2572,7 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
   }
   const failed = result.market?.ok !== true || result.task.lastAnalysisSucceeded === false || ["REAUTH_REQUIRED", "CONNECT_FAILED", "COLLECT_FAILED"].includes(result.route);
   task.monitorFailureCount = failed ? Math.max(1, Number(task.monitorFailureCount || 0)) : 0;
-  if (monitoringIntent(task) && !pauseForPendingAction(task)) setNextPoll(task, failed ? monitorRetryDelay(task) : monitoringPollIntervalMs(task));
+  if (monitoringIntent(task)) setNextPoll(task, failed ? monitorRetryDelay(task) : (pauseForPendingAction(task) ? DEFAULT_MONITOR_RETRY_MS : monitoringPollIntervalMs(task)));
   persistTask(task);
   return result;
 }
@@ -2493,7 +2584,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
   positionExitCancels.set(taskId, cancelExit);
   const operation = Promise.resolve().then(async () => {
     const task = getTask(taskId);
-    if (!task || !isLiveTask(task) || !monitoringIntent(task) || !task.target?.browserSessionId || actionPhaseLocks.has(taskId) || pendingConfirmLocks.has(taskId)) return { skipped: true };
+    if (!task || !isLiveTask(task) || !monitoringIntent(task) || !task.target?.browserSessionId) return { skipped: true };
     const generation = taskGeneration(task);
     const assertCurrent = () => { exitAbort.signal.throwIfAborted(); assertCycleCurrent(task, generation); };
     const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "" });
@@ -2515,11 +2606,12 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     }
     const observe = (accountScope) => observeWithLoginRecovery(task, connector, { id: null }, runtime,
       () => runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope }), assertCurrent);
-    let market = await observe(firstClosingWindow.active ? "full" : "positions");
+    const monitorPendingOrders = unsettledActions(task).some((pending) => !pending.exitType || pending.entrustedOrderIds?.length)
+      || Number(task.market?.account?.openOrders?.length || 0) > 0;
+    let market = await observe(firstClosingWindow.active || monitorPendingOrders ? "full" : "positions");
     assertCurrent();
     task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
     if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
-    if (actionPhaseLocks.has(taskId) || pendingConfirmLocks.has(taskId)) return { skipped: true };
     let closing = sessionCloseWindow(task, currentTime());
     // The observation can straddle the daily closing boundary. Read orders
     // before assessing that boundary, without treating an omitted table as empty.
@@ -2590,6 +2682,19 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     }
     const submitted = [];
     const failures = [];
+    // A model action phase is safe to overlap: its snapshot is invalidated if
+    // this exit changes the position. Only a browser write already in flight
+    // owns the task action slot; let that write finish, then retry this exact
+    // exit plan on the next fast cycle.
+    if (pendingConfirmLocks.has(taskId)) {
+      task.exitMonitor = {
+        status: "ACTION_PHASE_WAITING",
+        checkedAt: market.observedAt,
+        message: "已完成持仓读取；当前动作提交结束后立即继续执行离场计划",
+      };
+      persistTask(task);
+      return { submitted, deferred: true, reason: "ACTION_PHASE_WAITING" };
+    }
     for (const candidate of candidates) {
       assertCurrent();
       if (!isTradingSwitchOn()) break;

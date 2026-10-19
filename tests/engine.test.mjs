@@ -260,6 +260,57 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
+test("自动登录后保留未核实动作并在下一轮继续观测后执行", async () => {
+  const taskId = `reauth_submit_resume_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  Object.assign(task, {
+    mode: "LIVE",
+    autoDecisionEnabled: true,
+    status: "MONITORING",
+    monitoringEnabled: true,
+    target: { ...task.target, credentialRef: "stored-credential", browserSessionId: taskId },
+  });
+  const market = testMarketSnapshot("reauth-submit-0", 100);
+  market.account = { ...market.account, positionsVerified: true, positions: [], openOrdersVerified: true, openOrders: [] };
+  let loginChecks = 0;
+  let submissions = 0;
+  const runtime = {
+    openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
+    browserLoginStatus: async () => ({ ok: true, authenticated: ++loginChecks === 1 || loginChecks > 2 }),
+    browserLogin: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => ({ ...market, fingerprint: `reauth-submit-${loginChecks}` }),
+    requestDecision: async (_provider, context) => ({
+      action: "BUY",
+      targetSymbol: context.market.symbol,
+      bullishProfitProbability: 0.6,
+      bearishProfitProbability: 0.3,
+      targetPositionPct: 10,
+      maxOrderValuePct: 4,
+      evidenceIds: [context.evidenceIds[0]],
+      riskFlags: [],
+    }),
+    submitSuggestionForm: async () => {
+      submissions += 1;
+      if (submissions === 1) throw new Error("REAUTH_REQUIRED");
+      return { ok: true, submitted: true, code: "TRADE_SUBMITTED" };
+    },
+  };
+  try {
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(submissions, 1);
+    assert.equal(task.pendingAction.status, "UNVERIFIED");
+    assert.equal(task.pendingAction.retryAfterLogin, true);
+    assert.equal(task.target.loginStatus, "authenticated");
+    await runMonitoringCycle(taskId, { runtime });
+    assert.equal(submissions, 2);
+    assert.equal(task.pendingAction.status, "AWAITING_FILL");
+    assert.equal(task.unsettledActions.length, 1);
+  } finally {
+    stopController(taskId);
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
 for (const autoDecisionEnabled of [false, true]) {
   for (const side of ["买", "卖"]) {
     for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {

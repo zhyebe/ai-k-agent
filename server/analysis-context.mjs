@@ -256,7 +256,7 @@ export function nextCandleTarget(market = {}, nowMs = null) {
     return timestamp !== null && timestamp <= lastPrint;
   });
   const lastClosed = closedMinutes.at(-1) || null;
-  const liveTicks = recentLiveTicks(market.ticks, now);
+  const liveTicks = recentLiveTicks(ticksWithoutFlashK(market.ticks, market, market), now);
   const formingTicks = ticksAsCandles(liveTicks).filter((candle) => {
     const timestamp = finiteNumber(candle?.timestamp);
     return timestamp !== null && timestamp >= lastPrint && timestamp < nextPrint;
@@ -362,7 +362,8 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   const windows = analysisLayerWindows(now);
   const timeframes = {};
   const layers = windows.layers.map((layer) => {
-    const history = layerCandles(market, layer);
+    const sourceSnapshot = market.timeframes?.[layer.timeframe] || {};
+    const history = historyWithoutFlashK(layerCandles(market, layer), sourceSnapshot, market);
     timeframes[layer.timeframe] = {
       timeframe: layer.timeframe,
       label: layer.label,
@@ -388,7 +389,7 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
     quote: market.quote,
     latest: market.latest || market.quote,
   }, now);
-  const liveTicks = recentLiveTicks(market.ticks, now);
+  const liveTicks = recentLiveTicks(ticksWithoutFlashK(market.ticks, market, market), now);
   const raw = market.raw && typeof market.raw === "object" && !Array.isArray(market.raw)
     ? Object.fromEntries(Object.entries(market.raw).filter(([key]) => key !== "timeline"))
     : market.raw;
@@ -540,6 +541,7 @@ function timeframeMetadata(timeframe, snapshot, history) {
     period: snapshot.period ?? null,
     trend: snapshot.trend || "unknown",
     anomaly: Boolean(snapshot.anomaly),
+    flashK: snapshot.flashK || null,
     indicators: snapshot.indicators || null,
     dataQuality: snapshot.dataQuality || "UNKNOWN",
     missingFields: Array.isArray(snapshot.missingFields) ? snapshot.missingFields : [],
@@ -548,6 +550,25 @@ function timeframeMetadata(timeframe, snapshot, history) {
     completeHistoryCount: snapshot.completeHistoryCount ?? 0,
     firstTimestamp: history[0]?.timestamp || null,
     lastTimestamp: history.at(-1)?.timestamp || null,
+  });
+}
+
+function historyWithoutFlashK(history, snapshot, market = {}) {
+  const flash = snapshot?.flashK?.suspected ? snapshot.flashK : market?.flashK?.suspected ? market.flashK : null;
+  const timestamp = String(flash?.timestamp || "");
+  if (!flash || !timestamp) return Array.isArray(history) ? history : [];
+  return (Array.isArray(history) ? history : []).filter((candle) => String(candle?.timestamp || "") !== timestamp);
+}
+
+function ticksWithoutFlashK(ticks, snapshot, market = {}) {
+  const flash = snapshot?.flashK?.suspected ? snapshot.flashK : market?.flashK?.suspected ? market.flashK : null;
+  if (!flash) return Array.isArray(ticks) ? ticks : [];
+  const flashPrice = Number(flash.price);
+  const flashTimestamp = String(flash.timestamp || "");
+  return (Array.isArray(ticks) ? ticks : []).filter((tick) => {
+    const sameTimestamp = flashTimestamp && String(tick?.timestamp || "") === flashTimestamp;
+    const samePrice = Number.isFinite(flashPrice) && Number.isFinite(Number(tick?.price)) && Math.abs(Number(tick.price) - flashPrice) / Math.max(Math.abs(flashPrice), 1) <= 0.00001;
+    return !(sameTimestamp && samePrice);
   });
 }
 
@@ -587,7 +608,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
   for (const [timeframeKey, rawSnapshot] of timeframeEntries(market)) {
     const timeframe = String(rawSnapshot.timeframe || timeframeKey);
     const snapshot = sanitizeReadOnlyValue(rawSnapshot);
-    const history = Array.isArray(rawSnapshot.history) ? rawSnapshot.history : [];
+    const history = historyWithoutFlashK(rawSnapshot.history, rawSnapshot, market);
     const rows = history.map(compactMarketCandle);
     const chunks = history.length ? chunkRows(rows, maxRows, rowBudget) : [];
     const timeframeStart = segments.length;
@@ -610,7 +631,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
         rows: chunk,
       }));
     });
-    const timeframeTicks = Array.isArray(rawSnapshot.ticks) ? rawSnapshot.ticks : [];
+    const timeframeTicks = ticksWithoutFlashK(rawSnapshot.ticks, rawSnapshot, market);
     if (timeframeTicks.length) {
       const tickRows = timeframeTicks.map(compactMarketTick);
       let tickOffset = 0;
@@ -653,7 +674,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     for (const [timeframeKey, rawSnapshot] of timeframeEntries(book)) {
       const timeframe = String(rawSnapshot.timeframe || timeframeKey);
       const snapshot = sanitizeReadOnlyValue(rawSnapshot);
-      const history = Array.isArray(rawSnapshot.history) ? rawSnapshot.history : [];
+      const history = historyWithoutFlashK(rawSnapshot.history, rawSnapshot, book);
       const rows = history.map(compactMarketCandle);
       const chunks = history.length ? chunkRows(rows, maxRows, rowBudget) : [];
       chunks.forEach((chunk, chunkIndex) => {
@@ -779,20 +800,22 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
   const timeframes = {};
   for (const [key, rawSnapshot] of timeframeEntries(market)) {
     const snapshot = rawSnapshot || {};
+    const history = historyWithoutFlashK(snapshot.history, snapshot, market);
     timeframes[key] = {
       timeframe: snapshot.timeframe || key,
       label: snapshot.label || key,
       period: snapshot.period ?? null,
       trend: snapshot.trend || "unknown",
       anomaly: Boolean(snapshot.anomaly),
+      flashK: snapshot.flashK || null,
       indicators: snapshot.indicators || null,
       dataQuality: snapshot.dataQuality || "UNKNOWN",
       missingFields: Array.isArray(snapshot.missingFields) ? snapshot.missingFields : [],
-      historyCount: snapshot.historyCount ?? snapshot.history?.length ?? 0,
-      completeHistoryCount: snapshot.completeHistoryCount ?? 0,
-      firstTimestamp: snapshot.history?.[0]?.timestamp || null,
-      lastTimestamp: snapshot.history?.at(-1)?.timestamp || null,
-      recentHistory: recentRows(snapshot.history, recentRowsPerTimeframe, compactMarketCandle),
+      historyCount: history.length,
+      completeHistoryCount: history.filter((candle) => !candle?.partial).length,
+      firstTimestamp: history[0]?.timestamp || null,
+      lastTimestamp: history.at(-1)?.timestamp || null,
+      recentHistory: recentRows(history, recentRowsPerTimeframe, compactMarketCandle),
       analysisLayer: snapshot.analysisLayer || null,
     };
   }
@@ -808,6 +831,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     indicators: market.indicators,
     trend: market.trend,
     anomaly: market.anomaly,
+    flashK: market.flashK || null,
     freshnessSec: market.freshnessSec,
     dataQuality: market.dataQuality,
     missingFields: market.missingFields || [],
@@ -831,6 +855,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
       pageView: book.pageView || null,
       changePct: book.changePct,
       trend: book.trend,
+      flashK: book.flashK || null,
       dataQuality: book.dataQuality,
       missingFields: Array.isArray(book.missingFields) ? book.missingFields : [],
       historyCount: book.historyCount || book.history?.length || 0,
