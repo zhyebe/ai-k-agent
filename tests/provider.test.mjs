@@ -672,12 +672,17 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /40% 不再是入场硬门、上限或 HOLD 触发器/);
     assert.doesNotMatch(prompt, /selected probability must be >=|hard entry requirement|BUY requires bullish_profit_probability >=/);
     assert.match(prompt, /AI recognizes the broad market trend first/);
+    assert.match(prompt, /历史 trend 字段、已完成 K 线和片段 trend 只是过去的证据，不是下单条件/);
+    assert.match(prompt, /入场依据是从当前可成交价出发对未来路径的预测/);
+    assert.match(prompt, /预测亏损将继续扩大、恢复路径失效或继续持有的预期损失更大/);
     assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
     assert.match(prompt, /趋势内回撤/);
     assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);
     assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
     assert.match(prompt, /收益与风险必须一起预测/);
+    assert.match(prompt, /亏损也是预测对象/);
+    assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
     assert.match(prompt, /目标是赚取约2–5个价格点/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
