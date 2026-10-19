@@ -206,14 +206,25 @@ function providerRequestCandidates(provider) {
 
 function chatCompletionsBody(provider, messages, options = {}) {
   const officialDeepSeek = new URL(provider.baseUrl).hostname === "api.deepseek.com";
+  const officialGlm = isOfficialGlm(provider);
   const fastStepFive = options.fastAnalysis === true && isOfficialStepFive(provider);
+  const fastGlm = options.fastAnalysis === true && officialGlm;
   return {
     model: provider.model,
     messages,
     // DeepSeek defaults to high-effort thinking; live decisions use its documented fast mode.
     ...(options.fastAnalysis === true && officialDeepSeek ? { thinking: { type: "disabled" } } : {}),
+    // GLM-4.5/4.7 defaults to dynamic thinking. Live decisions need the final
+    // answer promptly; otherwise some responses contain only reasoning_content.
+    ...(fastGlm ? { thinking: { type: "disabled" }, max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 8192)) } : {}),
     ...(fastStepFive ? { reasoning_effort: "high", max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 65536)) } : {}),
   };
+}
+
+function isOfficialGlm(provider) {
+  let hostname = "";
+  try { hostname = new URL(provider.baseUrl).hostname.toLowerCase(); } catch {}
+  return hostname === "open.bigmodel.cn" || hostname.endsWith(".bigmodel.cn");
 }
 
 function isOfficialStepFive(provider) {
