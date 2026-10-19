@@ -1001,6 +1001,29 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         return task;
       }
       if (!submitted?.ok || submitted.submitted !== true) {
+        if (["EXIT_CONDITION_CHANGED", "EXIT_QUOTE_UNVERIFIED"].includes(String(submitted?.code || ""))) {
+          task.pendingAction = {
+            ...task.pendingAction,
+            status: "CANCELLED",
+            source: "realtime_recheck",
+            resolvedAt: new Date().toISOString(),
+            formSubmitBlocked: false,
+            message: "确认前盘口或持仓条件已变化，未提交订单；已重新读取，下一轮交给 AI 重新判断",
+          };
+          setNextPoll(task, 0);
+          task.nextTrigger = task.pendingAction.message;
+          addEvent("automatic_order_recheck", task.pendingAction.message, { taskId, pendingActionId: task.pendingAction.id, code: submitted.code, submitted: false });
+          appendAgentOutput({
+            taskId,
+            runId: task.activeRunId || "",
+            stage: "action",
+            kind: "order",
+            message: task.pendingAction.message,
+            data: { pendingActionId: task.pendingAction.id, source: "realtime_recheck", submitted: false, retryScheduled: true, code: submitted.code },
+          });
+          persistTask(task);
+          return task;
+        }
         if (submitted?.uncertain === true) {
           task.pendingAction = {
             ...task.pendingAction,
@@ -1230,7 +1253,9 @@ function pauseForPendingAction(task) {
 
 function resumeMonitoringAfterAction(task) {
   if (!monitoringIntent(task) || pauseForPendingAction(task)) return;
+  const recheckMessage = task.pendingAction?.source === "realtime_recheck" ? task.pendingAction.message : "";
   setNextPoll(task, 0);
+  if (recheckMessage) task.nextTrigger = recheckMessage;
   persistTask(task);
   if (!controllerLoops.has(task.id)) {
     startController(task.id, { userId: task.ownerUserId || "" });

@@ -13,6 +13,41 @@ const PROFILE_LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket
 let browserClosing = false;
 let sessionFactory = null;
 
+function browserLifecycleError(error) {
+  return /target crashed|target page, context or browser has been closed|browser has been closed|page has been closed|context has been closed|browser disconnected/i.test(String(error?.message || error || ""));
+}
+
+function trackSessionPage(session) {
+  if (!session || !session.page || session.page.__axiomHealthTracked) return session;
+  session.pageCrashed = false;
+  session.pageClosed = false;
+  try {
+    session.page.__axiomHealthTracked = true;
+    session.page.on("crash", () => { session.pageCrashed = true; });
+    session.page.on("close", () => { session.pageClosed = true; });
+  } catch {}
+  return session;
+}
+
+async function restoreBrowserSession(sessionId, oldSession = sessions.get(String(sessionId || "default"))) {
+  const key = String(sessionId || "default");
+  let restoreUrl = String(oldSession?.lastUrl || "");
+  if (!restoreUrl) {
+    try { restoreUrl = safeUrl(oldSession?.page?.url?.() || ""); } catch {}
+  }
+  await closeBrowserSession(key);
+  const fresh = await getSession(key, false);
+  if (restoreUrl && isAllowedUrl(restoreUrl)) {
+    try {
+      await fresh.page.goto(restoreUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+      fresh.lastUrl = restoreUrl;
+    } catch (error) {
+      if (browserLifecycleError(error)) throw error;
+    }
+  }
+  return fresh;
+}
+
 export function setBrowserSessionFactory(factory) {
   sessionFactory = factory;
   browserClosing = false;
@@ -160,6 +195,7 @@ async function getSession(sessionId = "default", allowRecreate = true) {
     if (!launch) {
       launch = createSession(key)
         .then((created) => {
+          trackSessionPage(created);
           sessions.set(key, created);
           return created;
         })
@@ -170,13 +206,14 @@ async function getSession(sessionId = "default", allowRecreate = true) {
     }
     session = await launch;
   }
-  try {
-    if (session.page.isClosed()) session.page = await session.context.newPage();
-  } catch (error) {
-    if (!allowRecreate) throw error;
-    await closeBrowserSession(key);
-    return getSession(key, false);
+  const pageBroken = session.pageCrashed === true || session.pageClosed === true || (() => {
+    try { return session.page.isClosed(); } catch { return true; }
+  })();
+  if (pageBroken) {
+    if (!allowRecreate) throw new Error("BROWSER_PAGE_BROKEN");
+    return restoreBrowserSession(key, session);
   }
+  trackSessionPage(session);
   return { ...session, sessionId: key };
 }
 
@@ -451,10 +488,11 @@ async function collectChartSamples(page) {
   return samples;
 }
 
-export async function openBrowserPage({ sessionId = "default", url, waitMs = 1200, expectedHostname = "" } = {}) {
+export async function openBrowserPage({ sessionId = "default", url, waitMs = 1200, expectedHostname = "" } = {}, recoveryAttempt = 0) {
   if (!isAllowedUrl(url)) return { ok: false, code: "DOMAIN_NOT_ALLOWED", message: "目标域名不在浏览器白名单中" };
   try {
     const session = await getSession(sessionId);
+    session.lastUrl = safeUrl(String(url));
     await session.page.goto(String(url), { waitUntil: "domcontentloaded", timeout: 20000 });
     if (waitMs > 0) await session.page.waitForTimeout(Math.min(5000, Number(waitMs) || 0));
     const finalHostname = hostnameOf(session.page.url());
@@ -464,13 +502,23 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
     const snapshot = await readVisiblePage(sessionId);
     return { ok: true, sessionId: session.sessionId, mode: session.mode, ...snapshot };
   } catch (error) {
+    if (browserLifecycleError(error) && recoveryAttempt < 1) {
+      try {
+        await restoreBrowserSession(sessionId);
+        return openBrowserPage({ sessionId, url, waitMs, expectedHostname }, recoveryAttempt + 1);
+      } catch (recoveryError) {
+        const recoveryMessage = recoveryError instanceof Error ? recoveryError.message : String(recoveryError);
+        return { ok: false, code: "BROWSER_NAVIGATION_FAILED", message: recoveryMessage.split("\n")[0].slice(0, 500) };
+      }
+    }
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, code: "BROWSER_NAVIGATION_FAILED", message: message.split("\n")[0].slice(0, 500) };
   }
 }
 
-export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false, inspectCandles = false, accountScope = "full" } = {}) {
-  const session = sessions.get(String(sessionId || "default"));
+export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false, inspectCandles = false, accountScope = "full" } = {}, recoveryAttempt = 0) {
+  const key = String(sessionId || "default");
+  const session = sessions.has(key) ? await getSession(key) : null;
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
     const orderTables = inspectPositions && accountScope !== "positions" ? await collectCurrentOrderTables(session.page, collectTables) : [];
@@ -509,6 +557,14 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
       capturedAt: Date.now(),
     };
   } catch (error) {
+    if (browserLifecycleError(error) && recoveryAttempt < 1) {
+      try {
+        await restoreBrowserSession(key, session);
+        return readVisiblePage(key, { inspectPositions, quick, inspectCandles, accountScope }, recoveryAttempt + 1);
+      } catch (recoveryError) {
+        return { ok: false, code: "BROWSER_READ_FAILED", message: recoveryError instanceof Error ? recoveryError.message : String(recoveryError) };
+      }
+    }
     return { ok: false, code: "BROWSER_READ_FAILED", message: error instanceof Error ? error.message : String(error) };
   }
 }
@@ -600,8 +656,19 @@ export async function collectAllPageBoards(sessionId, instruments = [], { restor
 }
 
 export async function getBrowserPage(sessionId = "default") {
-  const session = sessions.get(String(sessionId || "default"));
-  return session?.page || null;
+  const key = String(sessionId || "default");
+  if (!sessions.has(key)) return null;
+  try {
+    return (await getSession(key)).page || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function recoverBrowserSession(sessionId = "default") {
+  const key = String(sessionId || "default");
+  if (!sessions.has(key)) return null;
+  return (await restoreBrowserSession(key)).page || null;
 }
 
 export async function closeBrowserSession(sessionId = "default") {

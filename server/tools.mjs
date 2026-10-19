@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
-import { getBrowserPage, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
+import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession, selectPageBoardInstrument } from "./browser.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
@@ -41,6 +41,33 @@ async function pageHasSessionAuth(page, adapter) {
   }
 }
 
+function browserLifecycleError(error) {
+  return /target crashed|target page, context or browser has been closed|browser has been closed|page has been closed|context has been closed|browser disconnected/i.test(String(error?.message || error || ""));
+}
+
+async function firstVisibleLocator(page, selector, { timeout = 0, label = "控件" } = {}) {
+  const deadline = Date.now() + Math.max(0, Number(timeout) || 0);
+  do {
+    const candidates = page.locator(selector);
+    const count = await candidates.count();
+    for (let index = 0; index < count; index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isVisible().catch((error) => { if (browserLifecycleError(error)) throw error; return false; })
+        && !await candidate.isDisabled().catch((error) => { if (browserLifecycleError(error)) throw error; return false; })) return candidate;
+    }
+    if (!timeout || Date.now() >= deadline) break;
+    await page.waitForTimeout(100);
+  } while (Date.now() < deadline);
+  throw new Error(`${label}_NOT_FOUND`);
+}
+
+async function optionalVisibleLocator(page, selector) {
+  try { return await firstVisibleLocator(page, selector); } catch (error) {
+    if (browserLifecycleError(error)) throw error;
+    return null;
+  }
+}
+
 async function pageHasLoginSuccess(page, adapter) {
   if (!page || !adapter?.login) return false;
   const currentUrl = page.url();
@@ -51,9 +78,13 @@ async function pageHasLoginSuccess(page, adapter) {
     try {
       const visibleText = await page.locator("body").innerText({ timeout: 800 });
       if (haohanLoginRequired({ url: currentUrl, visibleText })) return false;
-      const loginButton = page.locator(adapter.login.submitSelector).first();
-      if (await loginButton.isVisible() && await page.locator(adapter.login.passwordSelector).first().isVisible()) return false;
-    } catch { return false; }
+      const loginButton = await optionalVisibleLocator(page, adapter.login.submitSelector);
+      const password = await optionalVisibleLocator(page, adapter.login.passwordSelector);
+      if (loginButton && password) return false;
+    } catch (error) {
+      if (browserLifecycleError(error)) throw error;
+      return false;
+    }
   }
   if (adapter.login.successUrlPattern && new RegExp(adapter.login.successUrlPattern, "i").test(currentUrl)) return true;
   if (adapter.login.successSelector) {
@@ -73,8 +104,8 @@ async function pageHasLoginSuccess(page, adapter) {
 async function prepareLoginForm(page, adapter) {
   const selector = String(adapter?.login?.consentSelector || "").trim();
   if (!selector) return;
-  const consent = page.locator(selector).first();
-  if (await consent.count() < 1) return;
+  const consent = await optionalVisibleLocator(page, selector);
+  if (!consent) return;
   let checked = false;
   try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
   if (checked) return;
@@ -146,13 +177,26 @@ async function navigateAfterLogin(page, adapter, credential, requestedUrl = "") 
 }
 
 export async function browserLoginStatus({ sessionId = "default", adapterId = "" } = {}) {
-  const page = await getBrowserPage(sessionId);
-  const adapter = getConnectorAdapter(adapterId);
-  if (!page || !adapter) return { ok: false, authenticated: false, code: "BROWSER_SESSION_NOT_FOUND" };
-  let matchesTarget = false;
-  try { matchesTarget = Boolean(adapter.match({ type: adapter.type, url: page.url() })); } catch {}
-  if (!matchesTarget) return { ok: false, authenticated: false, code: "LOGIN_TARGET_MISMATCH", url: page.url() };
-  return { ok: true, authenticated: await pageHasLoginSuccess(page, adapter), url: page.url() };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const page = await getBrowserPage(sessionId);
+    const adapter = getConnectorAdapter(adapterId);
+    if (!page || !adapter) return { ok: false, authenticated: false, code: "BROWSER_SESSION_NOT_FOUND" };
+    try {
+      let matchesTarget = false;
+      try { matchesTarget = Boolean(adapter.match({ type: adapter.type, url: page.url() })); } catch {}
+      if (!matchesTarget) return { ok: false, authenticated: false, code: "LOGIN_TARGET_MISMATCH", url: page.url() };
+      return { ok: true, authenticated: await pageHasLoginSuccess(page, adapter), url: page.url() };
+    } catch (error) {
+      if (browserLifecycleError(error) && attempt === 0) {
+        try { await recoverBrowserSession(sessionId); } catch (recoveryError) {
+          return { ok: false, authenticated: false, code: "BROWSER_RECOVERY_FAILED", message: recoveryError.message };
+        }
+        continue;
+      }
+      return { ok: false, authenticated: false, code: "BROWSER_READ_FAILED", message: error.message };
+    }
+  }
+  return { ok: false, authenticated: false, code: "BROWSER_READ_FAILED" };
 }
 
 export async function browserNavigate({ url, sessionId = "default" }) {
@@ -184,53 +228,65 @@ export async function browserLogin({ sessionId = "default", credentialRef, adapt
 
 // Desktop receives an owner-checked credential for this call only; never persist it locally.
 export async function browserLoginWithCredential({ sessionId = "default", credentialRef, adapterId, targetUrl = "", submit = true }, credential) {
-  const page = await getBrowserPage(sessionId);
-  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
   if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND" };
   const resolvedAdapterId = adapterId || credential?.target?.adapterId;
   const adapter = getConnectorAdapter(resolvedAdapterId);
   if (!adapterCanLogin(resolvedAdapterId) || adapter.reviewStatus !== "APPROVED") return { ok: false, code: "LOGIN_FLOW_REQUIRES_TARGET_ADAPTER", message: "目标站点登录字段需要已审核的连接器适配器", adapterId: resolvedAdapterId || "" };
-  const currentUrl = page.url();
-  let adapterMatchesCurrentPage = false;
-  try { adapterMatchesCurrentPage = Boolean(adapter.match({ type: "website", url: currentUrl })); } catch {}
-  if (!adapterMatchesCurrentPage) return { ok: false, code: "LOGIN_TARGET_MISMATCH", message: "当前浏览器页面与连接器适配器目标不一致", adapterId: adapter.id, url: currentUrl };
-  if (credential?.target?.url) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const page = await getBrowserPage(sessionId);
+    if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
     try {
-      if (new URL(currentUrl).hostname !== new URL(credential.target.url).hostname) return { ok: false, code: "CREDENTIAL_TARGET_MISMATCH", message: "凭据目标与当前浏览器页面不一致" };
-    } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
+      const currentUrl = page.url();
+      let adapterMatchesCurrentPage = false;
+      try { adapterMatchesCurrentPage = Boolean(adapter.match({ type: "website", url: currentUrl })); } catch {}
+      if (!adapterMatchesCurrentPage) return { ok: false, code: "LOGIN_TARGET_MISMATCH", message: "当前浏览器页面与连接器适配器目标不一致", adapterId: adapter.id, url: currentUrl };
+      if (credential?.target?.url) {
+        try {
+          if (new URL(currentUrl).hostname !== new URL(credential.target.url).hostname) return { ok: false, code: "CREDENTIAL_TARGET_MISMATCH", message: "凭据目标与当前浏览器页面不一致" };
+        } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
+      }
+      // A session-expiry notice may overlay the trading page without navigating.
+      // Open only the reviewed same-origin login route when its form is absent.
+      const loginFormVisible = Boolean(await optionalVisibleLocator(page, adapter.login.passwordSelector)
+        && await optionalVisibleLocator(page, adapter.login.submitSelector));
+      if (adapter.login.entryUrl && !loginFormVisible) {
+        const loginUrl = new URL(adapter.login.entryUrl);
+        if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
+        await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+      }
+      const username = await firstVisibleLocator(page, adapter.login.usernameSelector, { timeout: 12000, label: "LOGIN_USERNAME" });
+      const password = await firstVisibleLocator(page, adapter.login.passwordSelector, { timeout: 12000, label: "LOGIN_PASSWORD" });
+      const submitButton = await firstVisibleLocator(page, adapter.login.submitSelector, { timeout: 12000, label: "LOGIN_SUBMIT" });
+      await username.fill(String(credential.username || ""), { timeout: 12000 });
+      await password.fill(String(credential.password || ""), { timeout: 12000 });
+      await prepareLoginForm(page, adapter);
+      if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
+      await submitButton.click({ timeout: 12000 });
+      const deadline = Date.now() + Math.max(5000, Number(adapter.login.successTimeoutMs) || 20000);
+      let authenticated = false;
+      while (Date.now() < deadline) {
+        authenticated = await pageHasLoginSuccess(page, adapter);
+        if (authenticated) break;
+        await page.waitForTimeout(250);
+      }
+      if (!authenticated) {
+        const detail = await loginErrorText(page, adapter);
+        return { ok: false, code: "LOGIN_NOT_CONFIRMED", message: detail ? `登录提交后仍未确认：${detail}` : "登录提交后未确认进入目标页面", credentialRef, adapterId: adapter.id, url: page.url() };
+      }
+      const navigation = await navigateAfterLogin(page, adapter, credential, targetUrl);
+      if (!await pageHasLoginSuccess(page, adapter)) return { ok: false, authenticated: false, code: "LOGIN_NOT_CONFIRMED", message: "返回目标页后登录尚未恢复，将自动重试", url: page.url() };
+      return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: page.url(), ...navigation };
+    } catch (error) {
+      if (browserLifecycleError(error) && attempt === 0) {
+        try { await recoverBrowserSession(sessionId); } catch (recoveryError) {
+          return { ok: false, code: "BROWSER_RECOVERY_FAILED", message: recoveryError.message, credentialRef, adapterId: adapter.id };
+        }
+        continue;
+      }
+      return { ok: false, code: "LOGIN_FAILED", message: error.message, credentialRef, adapterId: adapter.id };
+    }
   }
-  try {
-    // A session-expiry notice may overlay the trading page without navigating.
-    // Open only the reviewed same-origin login route when its form is absent.
-    const loginFormVisible = await page.locator(adapter.login.passwordSelector).first().isVisible()
-      && await page.locator(adapter.login.submitSelector).first().isVisible();
-    if (adapter.login.entryUrl && !loginFormVisible) {
-      const loginUrl = new URL(adapter.login.entryUrl);
-      if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
-      await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
-    }
-    await page.locator(adapter.login.usernameSelector).first().fill(credential.username);
-    await page.locator(adapter.login.passwordSelector).first().fill(credential.password);
-    await prepareLoginForm(page, adapter);
-    if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
-    await page.locator(adapter.login.submitSelector).first().click();
-    const deadline = Date.now() + Math.max(5000, Number(adapter.login.successTimeoutMs) || 20000);
-    let authenticated = false;
-    while (Date.now() < deadline) {
-      authenticated = await pageHasLoginSuccess(page, adapter);
-      if (authenticated) break;
-      await page.waitForTimeout(250);
-    }
-    if (!authenticated) {
-      const detail = await loginErrorText(page, adapter);
-      return { ok: false, code: "LOGIN_NOT_CONFIRMED", message: detail ? `登录提交后仍未确认：${detail}` : "登录提交后未确认进入目标页面", credentialRef, adapterId: adapter.id, url: page.url() };
-    }
-    const navigation = await navigateAfterLogin(page, adapter, credential, targetUrl);
-    if (!await pageHasLoginSuccess(page, adapter)) return { ok: false, authenticated: false, code: "LOGIN_NOT_CONFIRMED", message: "返回目标页后登录尚未恢复，将自动重试", url: page.url() };
-    return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: page.url(), ...navigation };
-  } catch (error) {
-    return { ok: false, code: "LOGIN_FAILED", message: error.message, credentialRef, adapterId: adapter.id };
-  }
+  return { ok: false, code: "LOGIN_FAILED", message: "登录重试失败", credentialRef, adapterId: adapter.id };
 }
 
 function runProcess(command, args, cwd, timeoutMs) {

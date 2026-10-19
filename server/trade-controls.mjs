@@ -6,54 +6,86 @@ const ROWS = "tr, [role='row'], .el-table__row, .position-row";
 
 async function findControl(root, labels, selector = BUTTONS) {
   const index = await root.locator(selector).evaluateAll((nodes, wanted) => {
-    const compact = (value) => String(value || "").replace(/\s+/g, "");
+    const compact = (value) => String(value || "").replace(/[\s:：|｜]/g, "");
     return nodes.findIndex((node) => {
       const rect = node.getBoundingClientRect();
       const style = getComputedStyle(node);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none"
-        && wanted.includes(compact(node.value || node.getAttribute("aria-label") || node.textContent));
+        && wanted.some((label) => {
+          const value = compact(node.value || node.getAttribute("aria-label") || node.textContent);
+          return value === label || value.includes(label);
+        });
     });
   }, labels.map((label) => label.replace(/\s+/g, "")));
   return index < 0 ? null : root.locator(selector).nth(index);
 }
 
 export async function activateTradeControl(page, label) {
-  const control = await findControl(page, [label], TABS);
-  if (!control) return false;
-  const active = ["当前委托", "持仓明细", "历史委托"].includes(label) && await control.evaluate((node) => {
-    return node.getAttribute("aria-selected") === "true"
-      || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active");
-  }).catch(() => false);
-  // The trading site refreshes tab data when a tab is mounted. Avoid clicking
-  // an already active tab: its live DOM is already updating by itself.
-  if (active) return true;
-  await control.click({ timeout: 5000 });
-  return true;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const control = await findControl(page, [label], TABS);
+    if (!control) {
+      await page.waitForTimeout(150);
+      continue;
+    }
+    const active = ["当前委托", "持仓明细", "历史委托"].includes(label) && await control.evaluate((node) => {
+      return node.getAttribute("aria-selected") === "true"
+        || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active");
+    }).catch(() => false);
+    // The trading site refreshes tab data when a tab is mounted. Avoid clicking
+    // an already active tab: its live DOM is already updating by itself.
+    if (active) return true;
+    try {
+      await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+      await control.click({ timeout: 5000 });
+      return true;
+    } catch (error) {
+      if (attempt === 2) throw error;
+      await page.waitForTimeout(150);
+    }
+  }
+  return false;
 }
 
 export async function fillTradeFields(root, fields) {
   const filled = [];
   for (const { labels, value } of fields) {
     if (value == null) continue;
-    const match = await root.locator("input").evaluateAll((inputs, wanted) => {
-      const compact = (value) => String(value || "").replace(/[\s:：]/g, "");
-      const visible = (node) => {
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== "hidden";
-      };
-      for (let index = 0; index < inputs.length; index += 1) {
-        const input = inputs[index];
-        if (!visible(input) || /checkbox|radio|hidden|button|submit/.test(input.type) || input.disabled || input.readOnly) continue;
-        const container = input.closest(".inputWrap, .el-form-item, li, label, .form-item") || input.parentElement;
-        const labels = [...(input.labels || []), ...container.querySelectorAll("label, span, p, .el-form-item__label")];
-        const label = labels.find((node) => visible(node) && wanted.includes(compact(node.textContent)));
-        if (label) return { index, label: compact(label.textContent) };
+    let match = null;
+    for (let attempt = 0; attempt < 3 && !match; attempt += 1) {
+      match = await root.locator("input").evaluateAll((inputs, wanted) => {
+        const compact = (value) => String(value || "").replace(/[\s:：]/g, "");
+        const visible = (node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== "hidden";
+        };
+        for (let index = 0; index < inputs.length; index += 1) {
+          const input = inputs[index];
+          if (!visible(input) || /checkbox|radio|hidden|button|submit/.test(input.type) || input.disabled || input.readOnly) continue;
+          const container = input.closest(".inputWrap, .el-form-item, li, label, .form-item") || input.parentElement;
+          const labels = [...(input.labels || []), ...container.querySelectorAll("label, span, p, .el-form-item__label")];
+          const label = labels.find((node) => visible(node) && wanted.some((item) => {
+            const text = compact(node.textContent);
+            return text === item || text.includes(item);
+          }));
+          if (label) return { index, label: compact(label.textContent) };
+        }
+        return null;
+      }, labels.map((label) => label.replace(/[\s:：]/g, "")));
+      if (!match) {
+        await root.page().waitForTimeout(150);
+        continue;
       }
-      return null;
-    }, labels.map((label) => label.replace(/[\s:：]/g, "")));
-    if (!match) continue;
-    await root.locator("input").nth(match.index).fill(String(value), { timeout: 5000 });
-    filled.push(match.label);
+      try {
+        const input = root.locator("input").nth(match.index);
+        await input.scrollIntoViewIfNeeded({ timeout: 2500 });
+        await input.fill(String(value), { timeout: 5000 });
+      } catch (error) {
+        if (attempt === 2) throw error;
+        match = null;
+        await root.page().waitForTimeout(150);
+      }
+    }
+    if (match) filled.push(match.label);
   }
   return filled;
 }
@@ -72,15 +104,27 @@ export async function prepareTradeEntry(page, action) {
 
 export async function clickTradeEntry(page, action) {
   const labels = action === "SELL" ? ["卖出订立", "卖订立"] : ["买入订立", "买订立"];
-  const control = await findControl(page, labels);
-  if (!control) return { clicked: false, code: "SUBMIT_BUTTON_NOT_FOUND", tried: labels };
-  await acceptTradeAgreement(control);
-  try {
-    await control.click({ timeout: 5000 });
-    return { clicked: true, label: labels[0] };
-  } catch (error) {
-    return { clicked: false, code: await control.isDisabled() ? "SUBMIT_BUTTON_DISABLED" : "SUBMIT_CLICK_FAILED", message: error.message, tried: labels };
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const control = await findControl(page, labels);
+    if (!control) {
+      await page.waitForTimeout(150);
+      continue;
+    }
+    try {
+      await acceptTradeAgreement(control);
+      await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+      await control.click({ timeout: 5000 });
+      return { clicked: true, label: labels[0] };
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await page.waitForTimeout(150);
+    }
   }
+  if (!lastError) return { clicked: false, code: "SUBMIT_BUTTON_NOT_FOUND", tried: labels };
+  const current = await findControl(page, labels).catch(() => null);
+  const disabled = current ? await current.isDisabled().catch(() => false) : false;
+  return { clicked: false, code: disabled ? "SUBMIT_BUTTON_DISABLED" : "SUBMIT_CLICK_FAILED", message: lastError.message, tried: labels };
 }
 
 async function acceptTradeAgreement(control) {
@@ -165,8 +209,13 @@ export async function clickPositionTransfer(page, input) {
   if (!target) return { clicked: false, code: "EXIT_POSITION_NOT_FOUND" };
   const control = await findControl(target.row, ["转让"], "button, input[type='button'], [role='button'], a, .spotS, [data-action], span");
   if (!control) return { clicked: false, code: "EXIT_CONTROL_NOT_FOUND", targetPositionIds: input.targetPositionIds };
-  await control.click({ timeout: 5000 });
-  return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity };
+  try {
+    await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+    await control.click({ timeout: 5000 });
+    return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity };
+  } catch (error) {
+    return { clicked: false, code: "EXIT_CLICK_FAILED", message: error.message, targetPositionIds: input.targetPositionIds };
+  }
 }
 
 export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm } = {}) {

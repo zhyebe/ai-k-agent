@@ -354,6 +354,32 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
+test("实时条件变化不记录自动下单失败，立即重新读取交给 AI", async () => {
+  const taskId = `task_recheck_after_condition_change_${Date.now()}`;
+  const task = insertNorthstarTask(taskId);
+  task.mode = "LIVE";
+  task.autoDecisionEnabled = true;
+  task.status = "MONITORING";
+  task.monitoringEnabled = true;
+  task.target.url = "https://smyw.haohandahan.cn/client/#/transcc";
+  task.market = testMarketSnapshot("condition-change", 100);
+  task.market.account.positions = [{ symbol: "BTC/USDT", positionOrderId: "P-change", side: "买", quantity: 1, orderPrice: 99 }];
+  task.decision = { action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-change"], targetSymbol: "BTC/USDT", bullishProfitProbability: 0.7, bearishProfitProbability: 0.7, riskFlags: [] };
+  task.pendingAction = buildPendingAction(task, task.decision);
+  try {
+    const result = await confirmPendingAction(taskId, {
+      source: "auto_timeout",
+      runtime: { submitSuggestionForm: async () => ({ ok: false, submitted: false, code: "EXIT_CONDITION_CHANGED" }) },
+    });
+    assert.equal(result.pendingAction.status, "CANCELLED");
+    assert.equal(result.pendingAction.source, "realtime_recheck");
+    assert.match(result.pendingAction.message, /未提交订单/);
+    assert.equal(result.nextTrigger, result.pendingAction.message);
+  } finally {
+    state.tasks = state.tasks.filter((item) => item.id !== taskId);
+  }
+});
+
 for (const autoDecisionEnabled of [false, true]) {
   for (const price of [98, 102]) {
     test(`${autoDecisionEnabled ? "自动" : "手动"}模式越过旧离场价${price}仍先分析，AI持仓判断不被价格替代`, async () => {
