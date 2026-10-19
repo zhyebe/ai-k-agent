@@ -10,7 +10,8 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
   assert.equal(exit.profitGoal, "REALIZE_PREDICTED_NET_PROFIT");
-  assert.match(exit.realtimeValueRule, /realtimeValueChange.*严格大于1/);
+  assert.match(exit.realtimeValueRule, /realtimeValueChange.*大于等于2/);
+  assert.deepEqual(exit.profitFallback, { threshold: 2, comparison: "GTE", independentOfAiPlans: true });
   assert.match(exit.realtimeValueRule, /保留多周期趋势判断/);
   assert.match(exit.realtimeValueRule, /当前可成交净盈利持仓/);
   assert.equal("profitHorizonMaxK" in exit, false);

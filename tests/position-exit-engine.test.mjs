@@ -25,6 +25,39 @@ function setup(id, positions, extras = {}) {
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
 
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide}: profit >= 2 closes without any AI plan, even when account total is negative`, async () => {
+    const isLong = heldSide === "LONG";
+    const f = setup(`profit-fallback-${automatic}-${heldSide}`, [
+      { ...long("profit", 2), side: isLong ? "买入" : "卖出", roundTripFee: 1 },
+      { ...long("loss"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 110 : 90 },
+    ], { autoDecisionEnabled: automatic });
+    f.market.account.realtimeValueChange = -10;
+    const price = 100 + (isLong ? 1.5 : -1.5);
+    f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.deepEqual(f.submitted.map(s => [s.targetPositionIds[0], s.action, s.exitType, s.quantity]), [
+      ["profit", isLong ? "SELL" : "BUY", "TAKE_PROFIT", 2],
+    ]);
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["loss"]);
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 1, "profit fallback never becomes a mechanical loss stop");
+  });
+}
+
+test("account realtime value exactly 2 closes only profitable positions without waiting for a distant or expired AI target", async () => {
+  const f = setup("account-profit-fallback", [long("profit"), { ...long("loss"), orderPrice: 110 }]);
+  f.market.orderBook = { bids: [{ price: 101, volume: 100 }], asks: [{ price: 102, volume: 100 }] };
+  f.task.exitPlans = [{ positionId: "profit", expiresAt: new Date(Date.now() - 1000).toISOString() }];
+  f.market.account.realtimeValueChange = 1.99;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 0);
+  f.market.account.realtimeValueChange = 2;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.deepEqual(f.submitted.map(s => s.targetPositionIds), [["profit"]]);
+  assert.equal(f.submitted[0].exitGuard.realtimeValueAtLeast, 2);
+});
+
 for (const automatic of [false, true]) {
   test(`${automatic ? "automatic" : "manual"}: additional entry keeps omitted valid old plans without extending their expiry`, async t => {
     const f = setup(`entry-retains-plans-${automatic}`, [long("P1"), long("P2")], { autoDecisionEnabled: automatic });
@@ -61,15 +94,15 @@ for (const automatic of [false, true]) {
 for (const automatic of [false, true]) {
   test(`${automatic ? "automatic" : "manual"}: AI-authorized realtime profit exits all profitable long/short holdings before distant targets`, async () => {
     const f = setup(`realtime-condition-${automatic}`, [
-      { ...long("profit-long"), roundTripFee: 2 },
-      { ...long("profit-short"), side: "卖出", orderPrice: 110, roundTripFee: 2 },
+      { ...long("profit-long"), roundTripFee: 4 },
+      { ...long("profit-short"), side: "卖出", orderPrice: 111, roundTripFee: 4 },
       { ...long("loss"), orderPrice: 108, roundTripFee: 2 },
     ], { autoDecisionEnabled: automatic });
     f.market.account.realtimeValueChange = 0;
     f.task.exitPlans = validateExitPlans({ exitPlans: f.market.account.positions.map(p => ({
       positionId: p.positionOrderId, heldSide: p.side === "买入" ? "LONG" : "SHORT", quantity: 1, validForSec: 300,
       takeProfitPrice: p.side === "买入" ? 115 : 95, stopLossPrice: p.side === "买入" ? 96 : 115,
-      realtime_take_profit: { value_above: 1, take_profit_price: p.side === "买入" ? p.orderPrice + 3 : p.orderPrice - 3 },
+      realtime_take_profit: { value_above: 1, take_profit_price: p.side === "买入" ? p.orderPrice + 5 : p.orderPrice - 5 },
     })) }, f.market, f.task).plans;
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.submitted.length, 0);

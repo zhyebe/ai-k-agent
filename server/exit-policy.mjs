@@ -2,6 +2,7 @@ import { summarizeOrderBook } from "./order-book.mjs";
 import { effectiveTradingSession } from "./trading-session.mjs";
 
 export const DEFAULT_SESSION_CLOSE = Object.freeze({ leadMinutes: 5, timezone: "Asia/Shanghai" });
+export const PROFIT_EXIT_THRESHOLD = 2;
 
 export function parseSessionClose(value = DEFAULT_SESSION_CLOSE) {
   if (!value || typeof value !== "object") return null;
@@ -74,6 +75,41 @@ export function executableExitQuote(market, position, now = Date.now()) {
   const direction = heldDirection(position);
   const quote = direction === "LONG" ? depth.bids[0] : direction === "SHORT" ? depth.asks[0] : null;
   return quote?.price > 0 && quote.volume > 0 ? { price: quote.price, volume: quote.volume, observedAt } : null;
+}
+
+export function profitFallbackExit(position, market, now = Date.now()) {
+  if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) > 0) return null;
+  const quote = executableExitQuote(market, position, now);
+  const pnl = quote && exitNetPnl(position, quote.price);
+  if (!pnl || !isProfitableExit(position, quote.price)) return null;
+  // Deduct known whole-position fees. Without fees this remains gross PnL,
+  // explicitly recorded as such; never manufacture a net-profit amount.
+  const positionProfit = pnl.netPnl ?? pnl.grossPnl;
+  const ownProfit = positionProfit >= PROFIT_EXIT_THRESHOLD;
+  if (!ownProfit && !realtimeValueAtLeast(market.account, PROFIT_EXIT_THRESHOLD)) return null;
+  const long = heldDirection(position) === "LONG";
+  const minProfit = ownProfit ? PROFIT_EXIT_THRESHOLD : 0;
+  const triggerPrice = pnl.entryPrice + (long ? 1 : -1) * ((pnl.fees ?? 0) + minProfit) / pnl.quantity;
+  return {
+    position, quotePrice: quote.price, grossPnl: pnl.grossPnl, netPnl: pnl.netPnl, profitFallback: true,
+    decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType: "TAKE_PROFIT",
+      targetPositionIds: [position.positionOrderId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
+      exitGuard: { positionId: position.positionOrderId, heldSide: long ? "LONG" : "SHORT", quantity: pnl.quantity,
+        expiresAt: new Date(now + 10000).toISOString(), triggerPrice, comparison: long ? "GTE" : "LTE",
+        profitFallback: { entryPrice: pnl.entryPrice, fees: pnl.fees, minProfit },
+        ...(!ownProfit ? { realtimeValueAtLeast: PROFIT_EXIT_THRESHOLD } : {}) } },
+  };
+}
+
+export function profitExitGuardAllowsPosition(guard, position, price) {
+  if (!guard?.profitFallback) return true;
+  if (!position || position.positionOrderId !== guard.positionId || heldDirection(position) !== guard.heldSide
+    || Number(position.quantity) !== guard.quantity || Number(position.frozenQuantity || 0) > 0
+    || positionEntryPrice(position) !== guard.profitFallback.entryPrice) return false;
+  const fees = numericValue(position.roundTripFee, position.totalFees, guard.profitFallback.fees);
+  const pnl = exitNetPnl({ ...position, roundTripFee: fees }, price);
+  const profit = pnl && (pnl.netPnl ?? pnl.grossPnl);
+  return profit > 0 && profit >= guard.profitFallback.minProfit;
 }
 
 export function normalizeExitPlans(value) {
@@ -170,6 +206,12 @@ export function realtimeValueAbove(account, threshold) {
   const value = account?.realtimeValueChange;
   return (typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
     && Number.isFinite(Number(value)) && Number.isFinite(threshold) && Number(value) > threshold;
+}
+
+export function realtimeValueAtLeast(account, threshold) {
+  const value = account?.realtimeValueChange;
+  return (typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
+    && Number.isFinite(Number(value)) && Number.isFinite(threshold) && Number(value) >= threshold;
 }
 
 export function exitGuardAllowsPrice(guard, price, now = Date.now()) {

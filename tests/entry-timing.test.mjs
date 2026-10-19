@@ -103,9 +103,11 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /不是等待精确极值/);
       assert.match(prompt, /只要任一方向存在有证据支持、可证伪的正净收益路径/);
       assert.match(prompt, /预测入场价尚未到但限价成交后的预期净收益仍为正时，用同方向 LIMIT/);
+      assert.match(prompt, /持仓和旧委托不是全局入场锁/);
+      assert.match(prompt, /下一 K 或新的价格\/趋势机会必须重新判断并可再次下单/);
       assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
-      assert.match(prompt, /realtimeValueChange > 1/);
+      assert.match(prompt, /realtimeValueChange.*大于等于2/);
       const value = JSON.stringify({ action: "BUY", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
         analysis_summary: "主判断：偏涨；预测回踩98后向103，采用限价入场" });

@@ -32,20 +32,21 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const body = JSON.parse(options.body);
       const messages = body.input || body.messages || body.contents.map(item => ({ content: item.parts[0].text }));
       const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
-      assert.match(prompt, /realtimeValueChange > 1/);
-      assert.match(prompt, /realtime_take_profit:\{value_above:1,take_profit_price:正数\}/);
+      assert.match(prompt, /realtimeValueChange.*大于等于2/);
+      assert.match(prompt, /每笔持仓.*利润大于等于2时也必须立即离场/);
+      assert.match(prompt, /不要求先有realtime_take_profit或有效exit_plans/);
       assert.match(prompt, /只离场当前盈利的持仓/);
       assert.match(prompt, /不等2–5个价格点/);
-      assert.match(prompt, /等于1、零、负数或缺失均不触发/);
-      assert.match(prompt, /保留多周期趋势判断/);
+      assert.match(prompt, /低于2不触发金额兜底/);
+      assert.match(prompt, /保留多周期趋势/);
       assert.match(prompt, /确认亏损持续扩大、继续持有更不利时立即返回EXIT_NOW、STOP_LOSS/);
-      assert.match(prompt, /不以等待回本或账户汇总未大于1为由延迟止损/);
+      assert.match(prompt, /不因账户汇总未达2或等待回本延迟/);
       const context = JSON.parse(messages.at(-1).content);
       assert.equal(context.account.realtimeValueChange, amount);
       assert.equal(context.account.dayPnl, 99);
       assert.equal(context.market.trend, "up");
       assert.deepEqual(context.account.positions, positions);
-      const triggered = amount !== null && amount > 1;
+      const triggered = amount !== null && amount >= 2;
       return new Response(JSON.stringify(envelope(apiFormat, {
         action: triggered ? "SELL" : "HOLD", exit_type: triggered ? "TAKE_PROFIT" : null,
         target_position_ids: triggered ? ["P-profit"] : [], bullish_profit_probability: 0.65, bearish_profit_probability: 0.25,
@@ -54,16 +55,16 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
           realtime_take_profit: { value_above: 1, take_profit_price: p.orderPrice + 1.5 } })),
       })));
     });
-    for (amount of [null, -1, 0, 1, 1.01]) {
+    for (amount of [null, -1, 0, 1.99, 2, 2.01]) {
       const result = await requestDecision({ apiKey: "test", apiFormat, baseUrl: "https://provider.example.test/v1", model: apiFormat === "chat" ? "deepseek-chat" : "compatible" }, {
         account: { realtimeValueChange: amount, dayPnl: 99, positionsVerified: true, positions }, market: { trend: "up" },
       }, { fastAnalysis: true });
-      assert.equal(result.action, amount > 1 ? "SELL" : "HOLD");
-      assert.deepEqual(result.targetPositionIds, amount > 1 ? ["P-profit"] : []);
+      assert.equal(result.action, amount >= 2 ? "SELL" : "HOLD");
+      assert.deepEqual(result.targetPositionIds, amount >= 2 ? ["P-profit"] : []);
       assert.equal(result.bullishProfitProbability, 0.65);
       assert.deepEqual(result.exitPlans[0].realtimeTakeProfit, { valueAbove: 1, takeProfitPrice: 101.5 });
     }
-    assert.equal(calls, 5);
+    assert.equal(calls, 6);
   });
 }
 
@@ -73,7 +74,7 @@ test("desktop layered analysis retains the realtime amount and trend in the mode
     const input = JSON.parse(body.messages.at(-1).content);
     assert.equal(input.market.account.realtimeValueChange, 1.01);
     assert.equal(input.market.timeframes["1m"].history.length, 1);
-    assert.match(body.messages[0].content, /realtimeValueChange > 1/);
+    assert.match(body.messages[0].content, /realtimeValueChange.*大于等于2/);
     return new Response(JSON.stringify(envelope("chat", { action: "HOLD", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3 })));
   });
   const now = Date.now();

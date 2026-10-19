@@ -537,3 +537,39 @@ for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired",
     }
   });
 }
+
+for (const scenario of ["position-exact-2", "account-exact-2", "account-reversed", "position-reversed", "cost-changed"]) {
+  test(`profit fallback final browser confirmation: ${scenario}`, async () => {
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+      .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div id="realtime">实时货值变化 +2元</div>')
+      .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    await page.reload();
+    const accountRule = scenario.startsWith("account-");
+    const entryPrice = accountRule ? 99.5 : 98;
+    await page.evaluate(({ scenario, entryPrice }) => {
+      const head = document.createElement("th"); head.textContent = "订单价格";
+      document.querySelector("#positions thead tr").append(head);
+      for (const row of document.querySelectorAll("#positions tbody tr")) {
+        const cell = document.createElement("td"); cell.textContent = String(entryPrice); row.append(cell);
+      }
+      const original = window.transfer;
+      window.transfer = (...args) => {
+        original(...args);
+        if (scenario === "account-reversed") document.querySelector("#realtime").textContent = "实时货值变化 +1.99元";
+        if (scenario === "position-reversed") document.querySelector("body > table tr:nth-child(2) td:nth-child(2)").textContent = "99";
+        if (scenario === "cost-changed") document.querySelectorAll("#positions tbody tr")[1].lastChild.textContent = "110";
+      };
+    }, { scenario, entryPrice });
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
+      exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: {
+        positionId: "P-1", heldSide: "LONG", quantity: 2, comparison: "GTE", triggerPrice: accountRule ? 99.75 : 100,
+        expiresAt: new Date(Date.now() + 10000).toISOString(), profitFallback: { entryPrice, fees: accountRule ? 0.5 : 2, minProfit: accountRule ? 0 : 2 },
+        ...(accountRule ? { realtimeValueAtLeast: 2 } : {}),
+      } });
+    const valid = ["position-exact-2", "account-exact-2"].includes(scenario);
+    assert.equal(result.ok, valid, JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, valid ? 1 : 0);
+    if (!valid) assert.equal(result.code, "EXIT_CONDITION_CHANGED");
+  });
+}

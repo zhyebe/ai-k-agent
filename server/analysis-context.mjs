@@ -166,7 +166,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null,
       timing: "买多预测阶段低位入、高位出；买空预测阶段高位入、低位出。分别评估趋势和当前可成交价，未到合适点位可HOLD或明确LIMIT挂单，MARKET不等待预测价。",
       whileHolding: "已有持仓继续逐仓监控，同时独立评估新的买多/买空机会，不等上一单离场，不设持仓单数上限。单笔entryQuantity不是总持仓上限；考虑累计敞口和保证金，同K及同一未成交意图防重复。" },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", realtimeValueRule: "保留多周期趋势判断；当前account.realtimeValueChange（网页实时货值变化）严格大于1时，AI立即离场当前可成交净盈利持仓，不等2–5个价格点或更大趋势收益；账户汇总不代表每仓盈利，亏损、持平和未知持仓单独分析。等于1、零、负数或缺失不触发本条规则，不替代原有趋势止盈止损。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", profitFallback: { threshold: 2, comparison: "GTE", independentOfAiPlans: true }, realtimeValueRule: "保留多周期趋势判断；单仓利润大于等于2，或当前account.realtimeValueChange（网页实时货值变化）大于等于2且该仓盈利时，程序立即兑现当前可成交净盈利持仓；已知费用扣除，未知费用不伪报净利润。不等2–5个价格点或下一轮分析，不依赖AI计划。账户汇总不代表每仓盈利，亏损、持平和未知持仓单独分析。亏损由AI预测持续扩大且恢复更不利时止损。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {

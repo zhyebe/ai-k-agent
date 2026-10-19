@@ -135,6 +135,10 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
         }
         if (message.method === "observeMarket" && result.ok) {
           const compact = analysis.compactCollectedMarket(result);
+          // The API server owns decision validity. Pass its call-start stamp
+          // through the desktop runtime so client clock skew cannot make the
+          // next AI result appear older/newer than the snapshot used.
+          if (message.input?.serverObservedAt) compact.observedAt = message.input.serverObservedAt;
           collectedMarkets.set(sessionId, compact);
           return compact;
         }
@@ -185,6 +189,10 @@ function getCollectedMarket(marketRef, apiBaseUrl, userId) {
   const sessionId = scopedSession({ userId, input: { sessionId: marketRef?.sessionId } }, apiBaseUrl);
   const market = collectedMarkets.get(sessionId);
   if (!market || market.fingerprint !== marketRef?.fingerprint) throw new Error("DESKTOP_MARKET_SNAPSHOT_EXPIRED");
+  // The API server is the authority for snapshot age. Rebind the cached
+  // desktop copy to its server-side observation metadata before AI analysis.
+  if (marketRef?.observedAt) market.observedAt = marketRef.observedAt;
+  if (Number.isFinite(Number(marketRef?.freshnessSec))) market.freshnessSec = Number(marketRef.freshnessSec);
   return market;
 }
 

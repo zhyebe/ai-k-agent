@@ -9,7 +9,7 @@ import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
-import { executableExitQuote, exitGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
+import { executableExitQuote, exitGuardAllowsPrice, profitExitGuardAllowsPosition, realtimeValueAbove, realtimeValueAtLeast } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -648,8 +648,13 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED" };
     const market = parseHaohanPageSnapshot(snapshot, { symbol });
     const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: exitGuard?.heldSide }, Date.now());
+    const position = market.account?.positions?.find(p => p.positionOrderId === exitGuard?.positionId);
     const allowed = quote && exitGuardAllowsPrice(exitGuard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(exitGuard, dialogPrice))
-      && (exitGuard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, exitGuard.realtimeValueAbove));
+      && (exitGuard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, exitGuard.realtimeValueAbove))
+      && (exitGuard?.realtimeValueAtLeast === undefined || realtimeValueAtLeast(market.account, exitGuard.realtimeValueAtLeast))
+      && (!exitGuard?.profitFallback || (market.account?.positionsVerified === true
+        && profitExitGuardAllowsPosition(exitGuard, position, quote.price)
+        && (dialogPrice === null || profitExitGuardAllowsPosition(exitGuard, position, dialogPrice))));
     return { ok: Boolean(allowed), code: "EXIT_CONDITION_CHANGED" };
   };
   const withCompleted = (result) => {

@@ -11,7 +11,7 @@ import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } 
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
-import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, positionEntryPrice, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
+import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, positionEntryPrice, profitFallbackExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -2130,7 +2130,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         const positionContext = updatePositionTracking(task, market, Date.now());
         appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位、出K策略和已审核 Skill 交给 AI 分析" });
         const result = await runtime.requestMarketAnalysis(provider, {
-          marketRef: { sessionId: task.target.browserSessionId || `task:${task.id}`, fingerprint: task.market.fingerprint },
+          marketRef: {
+            sessionId: task.target.browserSessionId || `task:${task.id}`,
+            fingerprint: task.market.fingerprint,
+            observedAt: market.observedAt,
+            freshnessSec: market.freshnessSec,
+          },
           account: { ...task.metrics, ...(market.account || {}), positionContext },
           positions: positionContext,
           rawPositions: market.account?.positions || [],
@@ -2673,7 +2678,18 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
       task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: market.account.positions.length || market.account.openOrders.length ? (closing.overdue ? "OVERDUE" : "CLOSING") : "FLAT_VERIFIED", remainingPositions: market.account.positions.length, remainingOrders: market.account.openOrders.length, checkedAt: market.observedAt };
     } else {
+      // User-authorized profit taking is independent of model availability,
+      // HOLD, omitted/expired plans and distant AI targets. Loss exits still
+      // require the existing AI decision or an AI-authored protective plan.
+      const profitIds = new Set();
+      for (const position of market.account.positions) {
+        const profit = profitFallbackExit(position, market, Date.now());
+        if (!profit) continue;
+        candidates.push(profit);
+        profitIds.add(position.positionOrderId);
+      }
       for (const plan of task.exitPlans || []) {
+        if (profitIds.has(plan.positionId)) continue;
         const result = evaluateExitPlan(plan, market, Date.now());
         plan.status = result.status;
         plan.lastQuotePrice = result.quotePrice ?? null;
@@ -2702,7 +2718,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : "ai_price_trigger", runtime }); }
+      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.profitFallback ? "profit_fallback" : "ai_price_trigger", runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: candidate.position.positionOrderId, code: error.message });

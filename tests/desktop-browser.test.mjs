@@ -67,6 +67,30 @@ test("execution quote monitoring routes to an exit-capable desktop and rejects a
   assert.equal(older.sent.length, 0);
 });
 
+test("market observations use the server clock for decision validity across desktop clock skew", async (t) => {
+  t.after(resetDesktopAiForTests);
+  const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
+  process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
+  t.after(() => { if (previous === undefined) delete process.env.AXIOM_REQUIRE_DESKTOP_BROWSER; else process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = previous; });
+  const socket = new Socket();
+  attachDesktopAiSocket("market-clock-owner", socket);
+  socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
+  const startedAt = Date.now();
+  const operation = callBrowserMethod("observeMarket", "market-clock-owner", { task: { id: "market-clock-task" } });
+  await Promise.resolve();
+  const message = socket.sent[0];
+  assert.ok(Math.abs(Date.parse(message.input.serverObservedAt) - startedAt) < 1000);
+  const desktopObservedAt = new Date(startedAt + 10 * 60 * 1000).toISOString();
+  const book = { symbol: "DGKZ", observedAt: desktopObservedAt, freshnessSec: 600, latest: { price: 105 } };
+  socket.emit("message", JSON.stringify({ type: "browser.result", id: message.id, ok: true, result: { ...book, ok: true, books: [book] } }));
+  const observed = await operation;
+  assert.ok(Math.abs(Date.parse(observed.observedAt) - startedAt) < 1000);
+  assert.equal(observed.desktopObservedAt, desktopObservedAt);
+  assert.ok(Math.max(0, Number(observed.freshnessSec)) <= 1);
+  assert.equal(observed.books[0].desktopObservedAt, desktopObservedAt);
+  assert.ok(Math.max(0, Number(observed.books[0].freshnessSec)) <= 1);
+});
+
 for (const clockSkewMs of [-9000, 9000]) {
   test(`execution quotes use call age with desktop clock skew ${clockSkewMs}ms, without renewing slow reads`, async t => {
     t.after(resetDesktopAiForTests);

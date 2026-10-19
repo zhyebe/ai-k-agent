@@ -1465,6 +1465,8 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
         calls++;
         assert.equal(context.market, undefined);
         assert.equal(context.marketRef.fingerprint, market.fingerprint);
+        assert.equal(context.marketRef.observedAt, market.observedAt);
+        assert.equal(context.marketRef.freshnessSec, market.freshnessSec);
         assert.deepEqual(context.previousAnalysis.exitPlans, task.exitPlans);
         assert.notEqual(context.previousAnalysis.exitPlans, task.exitPlans);
         assert.notEqual(context.previousAnalysis.exitPlans[0], task.exitPlans[0]);
