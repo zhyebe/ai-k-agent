@@ -252,10 +252,12 @@ function responsesBody(provider, messages) {
 function anthropicBody(provider, messages, options = {}) {
   const system = messages.filter((message) => message.role === "system").map((message) => String(message.content || "")).join("\n\n");
   const fastStepFive = options.fastAnalysis === true && isOfficialStepFive(provider);
+  const fastGlm = options.fastAnalysis === true && isGlmModel(provider);
   return {
     model: provider.model,
-    max_tokens: Math.min(fastStepFive ? 65536 : 8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 65536 : 4096))),
+    max_tokens: Math.min(fastStepFive || fastGlm ? 65536 : 8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 65536 : fastGlm ? 8192 : 4096))),
     ...(fastStepFive ? { output_config: { effort: "high" } } : {}),
+    ...(fastGlm ? { thinking: { type: "disabled" } } : {}),
     ...(system ? { system } : {}),
     messages: messages
       .filter((message) => message.role !== "system")
@@ -470,7 +472,7 @@ export async function verifyProvider(provider, { timeoutMs = 30000, signal } = {
       const response = await fetch(candidate.url, {
         method: "POST",
         headers: providerHeaders(candidate.provider, apiKey),
-        body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8 })),
+        body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8, fastAnalysis: true })),
         signal: requestTimeout,
       });
       let payload;
@@ -483,7 +485,8 @@ export async function verifyProvider(provider, { timeoutMs = 30000, signal } = {
       }
       if (response.ok) {
         const content = extractModelText(payload);
-        return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: content ? "模型已返回推理结果" : "模型请求成功" };
+        if (!content) return { ok: false, code: "EMPTY_MODEL_RESPONSE", status: "模型未返回正文", httpStatus: response.status, message: "模型接口返回成功但没有结论正文，请检查模型思考模式和响应协议" };
+        return { ok: true, code: "PROVIDER_MODEL_OK", status: "模型可用", httpStatus: response.status, message: "模型已返回推理结果" };
       }
       const detail = String(payload?.error?.message || payload?.error?.status || payload?.message || "").trim().slice(0, 240);
       lastFailure = { response, detail };

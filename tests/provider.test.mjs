@@ -80,6 +80,24 @@ test("GLM-compatible gateway models disable dynamic thinking in live analysis", 
   assert.deepEqual(body.thinking, { type: "disabled" });
 });
 
+test("GLM models using Anthropic-compatible gateways disable dynamic thinking", async (t) => {
+  let body;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({ content: [{ type: "text", text: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.5, bearish_profit_probability: 0.5 }) }], stop_reason: "end_turn" }));
+  });
+  const result = await requestDecision({
+    apiKey: "test",
+    baseUrl: "https://gateway.example.test/v1/messages",
+    apiFormat: "anthropic",
+    fullUrlMode: true,
+    model: "glm-4.5",
+  }, {}, { fastAnalysis: true });
+  assert.equal(result.action, "HOLD");
+  assert.deepEqual(body.thinking, { type: "disabled" });
+  assert.equal(body.max_tokens, 8192);
+});
+
 test("reasoning-only live responses are re-asked for a conclusion", async (t) => {
   let calls = 0;
   const bodies = [];
@@ -611,6 +629,18 @@ test("provider verification performs a real inference with the configured model"
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("provider verification rejects an HTTP-success response without conclusion text", async (t) => {
+  let body;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "", reasoning_content: "private reasoning" } }] }));
+  });
+  const result = await verifyProvider({ apiKey: "provider-secret", baseUrl: "https://gateway.example.test/v1", model: "glm-4.5", apiFormat: "chat" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "EMPTY_MODEL_RESPONSE");
+  assert.deepEqual(body.thinking, { type: "disabled" });
 });
 
 test("provider configuration rejects non-http endpoints", () => {
