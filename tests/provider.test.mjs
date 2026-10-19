@@ -34,6 +34,16 @@ test("OpenAI-compatible wrapped and streaming choices extract model text", () =>
   const final = '{"action":"HOLD"}';
   assert.equal(extractModelText({ data: { choices: [{ delta: { content: final } }] } }), final);
   assert.equal(extractModelText({ choices: [{ text: final }] }), final);
+  assert.equal(extractModelText({ choices: [{ message: { content: [{ type: "output_text", content: final }] } }] }), final);
+});
+
+test("action aliases from compatible models do not silently become HOLD", async (t) => {
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+    choices: [{ message: { content: JSON.stringify({ action: "buy", bullish_profit_probability: 0.7, bearish_profit_probability: 0.3 }) } }],
+  })));
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test", model: "compatible-model" }, {}, { fastAnalysis: true });
+  assert.equal(result.action, "BUY");
+  assert.equal(result.bullishProfitProbability, 0.7);
 });
 
 test("GLM live Chat Completions disable dynamic thinking so final content is returned", async (t) => {
@@ -51,6 +61,41 @@ test("GLM live Chat Completions disable dynamic thinking so final content is ret
   assert.equal(result.action, "HOLD");
   assert.deepEqual(body.thinking, { type: "disabled" });
   assert.equal(body.max_tokens, 8192);
+});
+
+test("GLM-compatible gateway models disable dynamic thinking in live analysis", async (t) => {
+  let body;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    body = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.5, bearish_profit_probability: 0.5 }) } }] }));
+  });
+  const result = await requestDecision({
+    apiKey: "test",
+    baseUrl: "https://gateway.example.test/v1",
+    apiFormat: "chat",
+    model: "zai-org/GLM-4.5",
+  }, {}, { fastAnalysis: true });
+  assert.equal(result.action, "HOLD");
+  assert.deepEqual(body.thinking, { type: "disabled" });
+});
+
+test("reasoning-only live responses are re-asked for a conclusion", async (t) => {
+  let calls = 0;
+  const bodies = [];
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    calls += 1;
+    const payload = calls === 1
+      ? { choices: [{ message: { content: "", reasoning_content: "private reasoning" }, finish_reason: "stop" }] }
+      : { choices: [{ message: { content: JSON.stringify({ action: "SELL", bullish_profit_probability: 0.2, bearish_profit_probability: 0.7 }) }, finish_reason: "stop" }] };
+    return new Response(JSON.stringify(payload));
+  });
+  const result = await requestDecision({ apiKey: "test-key", baseUrl: "https://provider.example.test", model: "reasoning-model" }, {}, { fastAnalysis: true });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "SELL");
+  assert.equal(result.modelDiagnostics.attempts[0].jsonStatus, "EMPTY_TEXT");
+  assert.equal(result.modelDiagnostics.attempts[1].jsonStatus, "COMPLETE_JSON");
+  assert.match(bodies[1].messages.at(-1).content, /internal reasoning/);
 });
 
 test("a single complete decision inside prose braces is parsed without repairing malformed JSON", async (t) => {

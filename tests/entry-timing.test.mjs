@@ -101,11 +101,14 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /不强制顶层 action 为 HOLD/);
       assert.match(prompt, /主判断：偏涨\/偏跌\/震荡/);
       assert.match(prompt, /不是等待精确极值/);
+      assert.match(prompt, /只要任一方向存在有证据支持、可证伪的正净收益路径/);
+      assert.match(prompt, /预测入场价尚未到但限价成交后的预期净收益仍为正时，用同方向 LIMIT/);
       assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
       assert.match(prompt, /realtimeValueChange > 1/);
-      const value = JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
-        analysis_summary: "主判断：偏涨；当前追价收益不足，预计回踩98后恢复至103", watch_conditions: ["回踩98附近重新评估"] });
+      const value = JSON.stringify({ action: "BUY", order_type: "LIMIT", entry_price: 98, target_price: 98,
+        bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
+        analysis_summary: "主判断：偏涨；预测回踩98后向103，采用限价入场" });
       const response = apiFormat === "anthropic" ? { content: [{ type: "text", text: value }] }
         : apiFormat === "responses" ? { output_text: value }
           : apiFormat === "gemini" ? { candidates: [{ content: { parts: [{ text: value }] } }] }
@@ -114,7 +117,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     });
     const decision = await requestDecision({ apiKey: "fixture", apiFormat, baseUrl: "https://fixture.invalid", model: apiFormat === "chat" ? "deepseek-chat" : "fixture" }, { account: { positions: [] }, market: {} });
     assert.equal(calls, 1);
-    assert.equal(decision.action, "HOLD", "waiting for a better entry remains an AI decision, never forced by probability");
+    assert.equal(decision.action, "BUY", "a worthwhile forecast entry uses an explicit BUY LIMIT plan");
+    assert.equal(decision.orderType, "LIMIT");
+    assert.equal(decision.entryPrice, 98);
     assert.match(decision.analysisSummary, /主判断：偏涨/);
   });
 }
