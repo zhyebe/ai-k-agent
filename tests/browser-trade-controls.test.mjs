@@ -539,7 +539,7 @@ for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired",
 }
 
 for (const scenario of ["position-exact-2", "account-exact-2", "account-reversed", "position-reversed", "cost-changed"]) {
-  test(`profit fallback final browser confirmation: ${scenario}`, async () => {
+  test(`legacy profit fallback is rejected by final browser confirmation: ${scenario}`, async () => {
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div id="realtime">实时货值变化 +2元</div>')
       .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
@@ -567,9 +567,63 @@ for (const scenario of ["position-exact-2", "account-exact-2", "account-reversed
         expiresAt: new Date(Date.now() + 10000).toISOString(), profitFallback: { entryPrice, fees: accountRule ? 0.5 : 2, minProfit: accountRule ? 0 : 2 },
         ...(accountRule ? { realtimeValueAtLeast: 2 } : {}),
       } });
-    const valid = ["position-exact-2", "account-exact-2"].includes(scenario);
-    assert.equal(result.ok, valid, JSON.stringify(result));
-    assert.equal((await page.evaluate(() => window.exits)).length, valid ? 1 : 0);
-    if (!valid) assert.equal(result.code, "EXIT_CONDITION_CHANGED");
+    assert.equal(result.ok, false, JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, 0);
+    assert.equal(result.code, "EXIT_CONDITION_CHANGED");
   });
 }
+
+for (const scenario of ["valid", "quote-changed", "cost-changed", "side-changed", "dialog-changed"]) {
+  test(`explicit AI exit verifies exact holdings and final price: ${scenario}`, async () => {
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+      .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>')
+      .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    await page.reload();
+    await page.evaluate(name => {
+      const head = document.createElement("th"); head.textContent = "订单价格";
+      document.querySelector("#positions thead tr").append(head);
+      for (const row of document.querySelectorAll("#positions tbody tr")) {
+        const cell = document.createElement("td"); cell.textContent = "98"; row.append(cell);
+      }
+      const original = window.transfer;
+      window.transfer = (...args) => {
+        original(...args);
+        if (name === "quote-changed") document.querySelector("body > table tr:nth-child(2) td:nth-child(2)").textContent = "99";
+        if (name === "cost-changed") document.querySelectorAll("#positions tbody tr")[1].lastChild.textContent = "99";
+        if (name === "side-changed") document.querySelectorAll("#positions tbody tr")[1].children[1].textContent = "卖出";
+        if (name === "dialog-changed") new MutationObserver(() => {
+          const input = document.querySelector(".el-dialog input");
+          if (input) { input.value = "99"; setInterval(() => { input.value = "99"; }, 20); }
+        }).observe(document.body, { childList: true });
+      };
+    }, scenario);
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
+      exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: { positions: [{
+        positionId: "P-1", heldSide: "LONG", quantity: 2, entryPrice: 98, exitType: "TAKE_PROFIT",
+        comparison: "EQ", triggerPrice: 100, expiresAt: new Date(Date.now() + 10000).toISOString(),
+      }] } });
+    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, scenario === "valid" ? 1 : 0);
+  });
+}
+
+test("fast observations collect chart evidence and confirm a stable K without a page reload", async t => {
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  const minute = Math.floor(Date.now() / 60000) * 60000 + 120000;
+  let now = minute + 50000;
+  t.mock.method(Date, "now", () => now);
+  await page.evaluate(timestamp => {
+    const chart = document.createElement("div"); chart.id = "hqchart_kline";
+    const row = at => ({ Date: 20261019, timestamp: at, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+    chart.JSChart = { JSChartContainer: { Symbol: "DGKZ", Period: 4, SourceData: { Data: [row(timestamp - 60000), row(timestamp)] } } };
+    document.body.append(chart);
+  }, minute);
+  const task = { timeframe: "1m", target: { browserSessionId: "trade-fixture" } };
+  const connector = { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] };
+  for (const second of [50, 52, 54, 56]) {
+    now = minute + second * 1000;
+    const market = await observeExecutionMarket(task, connector, { target: { symbol: "DGKZ", symbolName: "测试商品" } });
+    assert.equal(market.history.at(-1).confirmation.status, second === 56 ? "CONFIRMED" : "PROVISIONAL");
+  }
+});

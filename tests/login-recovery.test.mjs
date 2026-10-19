@@ -60,17 +60,15 @@ test("fast position monitor recovers login and executes the still-valid AI exit 
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-test("fast position monitor recovers login and takes profit exactly 2 without an AI exit plan", async t => {
+test("fast position monitor recovers login but does not invent an exit without an AI plan", async t => {
   const f = setup(t);
   f.market.account.positions[0].orderPrice = 101;
   let reads = 0, submitted;
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  assert.deepEqual(f.calls, ["read", "login", "read", "submit"]);
-  assert.equal(submitted.exitType, "TAKE_PROFIT");
-  assert.equal(submitted.exitGuard.profitFallback.minProfit, 2);
-  assert.deepEqual(submitted.targetPositionIds, ["P1"]);
+  assert.deepEqual(f.calls, ["read", "login", "read"]);
+  assert.equal(submitted, undefined);
 });
 
 test("simultaneous collection and exit expiry share one automatic login", async t => {

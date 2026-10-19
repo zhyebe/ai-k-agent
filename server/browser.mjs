@@ -469,7 +469,7 @@ export async function openBrowserPage({ sessionId = "default", url, waitMs = 120
   }
 }
 
-export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false, accountScope = "full" } = {}) {
+export async function readVisiblePage(sessionId = "default", { inspectPositions = false, quick = false, inspectCandles = false, accountScope = "full" } = {}) {
   const session = sessions.get(String(sessionId || "default"));
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
@@ -481,7 +481,7 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
       visibleText: document.body?.innerText || "",
     }));
     const tables = inspectPositions ? [...positionTables, ...orderTables] : await collectTables(session.page);
-    const chart = quick ? { klines: [] } : await collectHqChart(session.page);
+    const chart = quick && !inspectCandles ? { klines: [] } : await collectHqChart(session.page);
     const chartSamples = quick || (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
     const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });
     const chartInstrument = chart.symbol && /^\d+$/.test(String(chart.symbol))

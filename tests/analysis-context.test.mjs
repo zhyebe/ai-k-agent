@@ -9,11 +9,12 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.equal(exit.profitGoal, "REALIZE_PREDICTED_NET_PROFIT");
-  assert.match(exit.realtimeValueRule, /realtimeValueChange.*大于等于2/);
-  assert.deepEqual(exit.profitFallback, { threshold: 2, comparison: "GTE", independentOfAiPlans: true });
-  assert.match(exit.realtimeValueRule, /保留多周期趋势判断/);
-  assert.match(exit.realtimeValueRule, /当前可成交净盈利持仓/);
+  assert.equal(exit.profitGoal, "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT");
+  assert.match(exit.realtimeValueRule, /仅作为 AI.*参考/);
+  assert.match(exit.realtimeValueRule, /不是程序硬性离场条件/);
+  assert.equal("profitFallback" in exit, false);
+  assert.match(exit.realtimeValueRule, /多周期趋势/);
+  assert.match(exit.realtimeValueRule, /逐仓可成交盈亏/);
   assert.equal("profitHorizonMaxK" in exit, false);
   assert.equal("fixedCandleExit" in exit, false);
   assert.equal(exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
@@ -185,9 +186,8 @@ test("分析行情分层保留走完的 K 线，并用实时逐笔预测下一�
   assert.equal(fromTicks.ticks.length, 2);
   assert.equal(fromTicks.nextCandle.periodMs, 60000);
   assert.equal(fromTicks.nextCandle.printSecond, 50);
-  assert.equal(fromTicks.timeframes["1m"].history.length, 2);
-  assert.ok(fromTicks.timeframes["1m"].history.every((item) => item.timestamp % 60000 === 0));
-  assert.ok(!fromTicks.timeframes["1m"].history.some((item) => item.timestamp === now - 20_000));
+  assert.equal(fromTicks.timeframes["1m"].history.length, 0, "forming tick aggregates are not fixed K history");
+  assert.equal(fromTicks.ticks.length, 2, "live ticks remain available for nextCandle analysis");
 });
 
 test("下一根K按每分钟第50秒打印预测，不等待整分收盘", () => {
@@ -222,6 +222,22 @@ test("下一根K按每分钟第50秒打印预测，不等待整分收盘", () =>
   }, Date.parse("2026-09-10T03:32:55.000Z"));
   assert.equal(afterPrint.nextCandle.openTime, Date.parse("2026-09-10T03:32:50.000Z"));
   assert.equal(afterPrint.nextCandle.closeTime, Date.parse("2026-09-10T03:33:50.000Z"));
+});
+
+test("未到第50秒或标记 partial 的分钟K不进入固定历史", () => {
+  const now = Date.parse("2026-09-10T03:32:20.000Z");
+  const currentMinute = Date.parse("2026-09-10T03:32:00.000Z");
+  const previousMinute = Date.parse("2026-09-10T03:31:00.000Z");
+  const layered = buildLayeredAnalysisMarket({
+    observedAt: new Date(now).toISOString(),
+    quote: { price: 121 },
+    timeframes: { "1m": { timeframe: "1m", history: [
+      { timestamp: previousMinute, open: 119, high: 120, low: 118, close: 119.5, partial: true },
+      { timestamp: currentMinute, open: 120, high: 122, low: 120, close: 121, partial: false },
+    ] } },
+  }, now);
+  assert.deepEqual(layered.timeframes["1m"].history, []);
+  assert.equal(layered.nextCandle.livePrice, null, "unconfirmed display price is excluded; executable bid/ask remains separate");
 });
 
 test("监控上下文只保留最近1小时分钟数据", () => {

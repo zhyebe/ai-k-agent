@@ -18,6 +18,7 @@ function byteLength(value) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -159,14 +160,14 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；目标是约2–5个价格点的可兑现收益，2–5是价格差，不是K线根数或百分比，扣除已知费用滑点后再判断净收益。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
+    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；盈利和亏损离场均由AI选择最优净结果；约2–5个价格点仅为示例，2–5是价格差，不是K线根数或百分比，扣除已知费用滑点后再判断净收益。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null,
       timing: "买多预测阶段低位入、高位出；买空预测阶段高位入、低位出。分别评估趋势和当前可成交价，未到合适点位可HOLD或明确LIMIT挂单，MARKET不等待预测价。",
       whileHolding: "已有持仓继续逐仓监控，同时独立评估新的买多/买空机会，不等上一单离场，不设持仓单数上限。单笔entryQuantity不是总持仓上限；考虑累计敞口和保证金，同K及同一未成交意图防重复。" },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_PREDICTED_NET_PROFIT", profitFallback: { threshold: 2, comparison: "GTE", independentOfAiPlans: true }, realtimeValueRule: "保留多周期趋势判断；单仓利润大于等于2，或当前account.realtimeValueChange（网页实时货值变化）大于等于2且该仓盈利时，程序立即兑现当前可成交净盈利持仓；已知费用扣除，未知费用不伪报净利润。不等2–5个价格点或下一轮分析，不依赖AI计划。账户汇总不代表每仓盈利，亏损、持平和未知持仓单独分析。亏损由AI预测持续扩大且恢复更不利时止损。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。AI 必须逐仓比较立即兑现与继续持有的未来路径，选择最优盈利离场时机；亏损同样由 AI 判断持续扩亏、恢复路径和最小损失离场时机。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {
@@ -180,15 +181,17 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     doNotWaitForMinuteCloseAt00: true,
     liveQuotesMayUpdateEverySecond: true,
     flashK: {
-      summary: "疑似闪K可能是假显示，其价格与派生指标排除分析；单次大幅波动不等于假K，不能把真实反向走势删掉。缺少连续观察时不能声称已确认真假。真实新鲜可成交bid/ask与显示闪价分开，仍执行AI事先确定的保护条件。",
+      summary: "疑似闪K可能是假显示，其价格与派生指标排除分析；单次大幅波动不等于假K，不能把真实反向走势删掉。新显示K须在第50秒后连续稳定超过5秒才确认；消失、变化或采样中断重新计时，缺少连续观察时不能声称已确认真假。真实新鲜可成交bid/ask与显示闪价分开，仍执行AI事先确定的保护条件。",
       excludeTransientDisplayPriceFromAnalysis: true,
       priceSpikeAloneProvesFlash: false,
       preserveVerifiedExecutableQuotes: true,
     },
   },
   analysis: {
-    summary: "等待本轮 AI 返回完整结果，不要因每分钟第50秒出K而中断分析。分析结束后按常规进入下一轮监控。",
+    summary: "分析期间每2秒独立读取盘面并监控AI已授权条件；持仓、已确认K线证据变化或已有保护条件触发时中止旧分析；普通跳价在结果返回后复核，仅执行仍满足的AI条件，读取最新数据重算；新结果执行前和弹窗确认前再次核对。",
     waitForResult: true,
+    invalidateOnMarketChange: true,
+    independentObservationIntervalMs: 2000,
     onComplete: "CONTINUE_NEXT_ROUND",
   },
   counterparty: {
@@ -238,6 +241,21 @@ export function closedCandlesForAnalysis(history, nowMs, periodMs = MINUTE_MS) {
   });
 }
 
+// A page can expose the current minute candle before the exchange prints it.
+// It is still changing, so it must never enter the fixed-candle history sent
+// to the model. Live ticks remain available through nextCandle/timeline.
+export function confirmedCandlesForAnalysis(history, timeframe, nowMs = Date.now()) {
+  const values = (Array.isArray(history) ? history : []).filter((candle) => candle?.partial !== true && candle?.confirmation?.status !== "PROVISIONAL");
+  if (String(timeframe || "") !== "1m") return values;
+  const cutoff = lastKlinePrintTime(nowMs);
+  return values.filter((candle) => {
+    const timestamp = finiteNumber(candle?.timestamp);
+    const printAt = Math.floor(timestamp / MINUTE_MS) * MINUTE_MS + LIVE_KLINE_PRINT_OFFSET_MS;
+    return timestamp !== null && timestamp <= cutoff
+      && (candle.confirmation?.status === "CONFIRMED" || printAt < Math.floor(nowMs / MINUTE_MS) * MINUTE_MS);
+  });
+}
+
 function recentLiveTicks(ticks, nowMs, windowMs = MINUTE_MS) {
   return (Array.isArray(ticks) ? ticks : []).filter((tick) => {
     const timestamp = finiteNumber(tick?.timestamp);
@@ -250,11 +268,12 @@ export function nextCandleTarget(market = {}, nowMs = null) {
   const periodMs = LIVE_KLINE_PERIOD_MS;
   const lastPrint = lastKlinePrintTime(now);
   const nextPrint = lastPrint + periodMs;
-  const minuteHistory = historyForTimeframe(market, "1m");
-  const closedMinutes = (Array.isArray(minuteHistory) ? minuteHistory : []).filter((candle) => {
-    const timestamp = finiteNumber(candle?.timestamp);
-    return timestamp !== null && timestamp <= lastPrint;
-  });
+  const minuteHistory = historyWithoutFlashK(
+    historyForTimeframe(market, "1m"),
+    market.timeframes?.["1m"],
+    market,
+  );
+  const closedMinutes = confirmedCandlesForAnalysis(minuteHistory, "1m", now);
   const lastClosed = closedMinutes.at(-1) || null;
   const liveTicks = recentLiveTicks(ticksWithoutFlashK(market.ticks, market, market), now);
   const formingTicks = ticksAsCandles(liveTicks).filter((candle) => {
@@ -263,7 +282,7 @@ export function nextCandleTarget(market = {}, nowMs = null) {
   });
   const forming = formingTicks.reduce((current, candle) => mergeCandle(current, candle, lastPrint), null);
   const latestTickPrice = finiteNumber(liveTicks.at(-1)?.price);
-  const livePrice = finiteNumber(market?.quote?.price ?? market?.latest?.price ?? latestTickPrice ?? forming?.close ?? lastClosed?.close);
+  const livePrice = finiteNumber(market?.quote?.price ?? market?.latest?.price ?? latestTickPrice ?? forming?.close);
   const open = finiteNumber(forming?.open ?? market?.quote?.open) ?? livePrice;
   const high = maxNum(maxNum(forming?.high, market?.quote?.high), livePrice);
   const low = minNum(minNum(forming?.low, market?.quote?.low), livePrice);
@@ -275,7 +294,7 @@ export function nextCandleTarget(market = {}, nowMs = null) {
     kind: "NEXT_CANDLE",
     openTime: lastPrint,
     closeTime: nextPrint,
-    lastClosedTime: lastClosed?.timestamp || lastPrint,
+    lastClosedTime: lastClosed?.timestamp ?? null,
     lastClosedClose: lastClosed?.close ?? null,
     livePrice,
     open,
@@ -359,11 +378,16 @@ export function analysisLayerWindows(nowMs = Date.now()) {
 
 export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   const now = analysisNow(market, nowMs);
+  market = excludeUnconfirmedAnalysisData(market, now);
   const windows = analysisLayerWindows(now);
   const timeframes = {};
   const layers = windows.layers.map((layer) => {
     const sourceSnapshot = market.timeframes?.[layer.timeframe] || {};
-    const history = historyWithoutFlashK(layerCandles(market, layer), sourceSnapshot, market);
+    const history = confirmedCandlesForAnalysis(
+      historyWithoutFlashK(layerCandles(market, layer), sourceSnapshot, market),
+      layer.timeframe,
+      now,
+    );
     timeframes[layer.timeframe] = {
       timeframe: layer.timeframe,
       label: layer.label,
@@ -572,6 +596,35 @@ function ticksWithoutFlashK(ticks, snapshot, market = {}) {
   });
 }
 
+// Remove duplicate/derived copies too: excluding an OHLC row alone still lets
+// its wick, indicator, page text or raw chart re-enter the model as evidence.
+function excludeUnconfirmedAnalysisData(market, now) {
+  const excluded = [];
+  const cleanSnapshot = (snapshot, timeframe) => {
+    const original = snapshot.history || [];
+    const history = confirmedCandlesForAnalysis(historyWithoutFlashK(original, snapshot, market), timeframe, now);
+    const kept = new Set(history);
+    const removed = original.filter(c => !kept.has(c));
+    excluded.push(...removed);
+    return { ...snapshot, history, historyCount: history.length,
+      ...(removed.length || snapshot.flashK?.suspected ? { indicators: {}, trend: "unknown", anomaly: false, rawData: undefined } : {}) };
+  };
+  const timeframes = Object.fromEntries(Object.entries(market.timeframes || {}).map(([key, snapshot]) => [key, cleanSnapshot(snapshot, snapshot.timeframe || key)]));
+  const primary = cleanSnapshot(market, market.timeframe || "1m");
+  const dirty = excluded.length > 0 || market.flashK?.suspected;
+  const suspectPrice = price => excluded.some(c => Number(c.close) === Number(price))
+    || (market.flashK?.suspected && Number(price) === Number(market.flashK.price));
+  const quote = value => !value || !dirty ? value : { ...value, price: suspectPrice(value.price) ? null : value.price,
+    open: null, high: null, low: null, changePct: null, quoteChangePct: null };
+  const ticks = ticksWithoutFlashK(market.ticks, market).filter(tick => !dirty || !suspectPrice(tick.price));
+  return { ...primary, timeframes, ticks, quote: quote(market.quote), latest: quote(market.latest),
+    books: (market.books || []).map(book => excludeUnconfirmedAnalysisData(book, now)),
+    ...(dirty ? { indicators: {}, trend: "unknown", anomaly: false, changePct: null, raw: undefined,
+      page: market.page ? { url: market.page.url, title: market.page.title, instrument: market.page.instrument } : null,
+      pageView: market.pageView ? { instrument: market.pageView.instrument, orderBook: market.pageView.orderBook } : null,
+      candleEvidence: { excludedCount: excluded.length, reason: "UNCONFIRMED_OR_FLASH_K", derivedIndicatorsExcluded: true } } : {}) };
+}
+
 // Normalized OHLCV and page fields are canonical; raw API copies repeat the same rows.
 export function compactCollectedMarket(market = {}) {
   const { raw, ...result } = market;
@@ -598,6 +651,8 @@ export function shouldUseSegmentedAnalysis(market = {}) {
 
 export function buildMarketAnalysisSegments(market = {}, options = {}) {
   const fingerprint = String(market.fingerprint || "");
+  const now = analysisNow(market, options.nowMs);
+  market = excludeUnconfirmedAnalysisData(market, now);
   const maxRows = Math.round(Math.min(MAX_SEGMENT_ROWS, Math.max(20, Number(options.maxRows || setting("ANALYSIS_SEGMENT_ROWS", DEFAULT_SEGMENT_ROWS, 20, MAX_SEGMENT_ROWS)))));
   const maxBytes = Math.round(Math.min(MAX_SEGMENT_BYTES, Math.max(20000, Number(options.maxBytes || setting("ANALYSIS_SEGMENT_BYTES", DEFAULT_SEGMENT_BYTES, 20000, MAX_SEGMENT_BYTES)))));
   const rowBudget = Math.max(12000, maxBytes - 1800);
@@ -608,7 +663,11 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
   for (const [timeframeKey, rawSnapshot] of timeframeEntries(market)) {
     const timeframe = String(rawSnapshot.timeframe || timeframeKey);
     const snapshot = sanitizeReadOnlyValue(rawSnapshot);
-    const history = historyWithoutFlashK(rawSnapshot.history, rawSnapshot, market);
+    const history = confirmedCandlesForAnalysis(
+      historyWithoutFlashK(rawSnapshot.history, rawSnapshot, market),
+      timeframe,
+      now,
+    );
     const rows = history.map(compactMarketCandle);
     const chunks = history.length ? chunkRows(rows, maxRows, rowBudget) : [];
     const timeframeStart = segments.length;
@@ -674,7 +733,11 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     for (const [timeframeKey, rawSnapshot] of timeframeEntries(book)) {
       const timeframe = String(rawSnapshot.timeframe || timeframeKey);
       const snapshot = sanitizeReadOnlyValue(rawSnapshot);
-      const history = historyWithoutFlashK(rawSnapshot.history, rawSnapshot, book);
+      const history = confirmedCandlesForAnalysis(
+        historyWithoutFlashK(rawSnapshot.history, rawSnapshot, book),
+        timeframe,
+        now,
+      );
       const rows = history.map(compactMarketCandle);
       const chunks = history.length ? chunkRows(rows, maxRows, rowBudget) : [];
       chunks.forEach((chunk, chunkIndex) => {
@@ -797,10 +860,16 @@ function operatorContext(market = {}) {
 }
 
 export function summarizeMarketForDecision(market = {}, coverage = null, { recentRowsPerTimeframe = 120 } = {}) {
+  const now = analysisNow(market);
+  market = excludeUnconfirmedAnalysisData(market, now);
   const timeframes = {};
   for (const [key, rawSnapshot] of timeframeEntries(market)) {
     const snapshot = rawSnapshot || {};
-    const history = historyWithoutFlashK(snapshot.history, snapshot, market);
+    const history = confirmedCandlesForAnalysis(
+      historyWithoutFlashK(snapshot.history, snapshot, market),
+      snapshot.timeframe || key,
+      now,
+    );
     timeframes[key] = {
       timeframe: snapshot.timeframe || key,
       label: snapshot.label || key,

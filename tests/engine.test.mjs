@@ -235,6 +235,7 @@ for (const autoDecisionEnabled of [false, true]) {
           openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
           browserLoginStatus: async () => ({ ok: true, authenticated: true }),
           observeMarket: async () => market,
+          observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
           fillSuggestionForm: async () => { filled += 1; return { ok: true, filled: true, submitted: false }; },
           submitSuggestionForm: async () => { submitted += 1; return { ok: true, filled: true, submitted: true }; },
           requestDecision: async (_provider, context) => ({
@@ -328,6 +329,7 @@ for (const autoDecisionEnabled of [false, true]) {
           openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
           browserLoginStatus: async () => ({ ok: true, authenticated: true }),
           observeMarket: async () => market,
+          observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
           fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
           submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true }; },
           requestDecision: async (_provider, context) => ({ action, exitType, targetPositionIds: ["P-close"], bullishProfitProbability: 0.2, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
@@ -366,12 +368,13 @@ for (const autoDecisionEnabled of [false, true]) {
         openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
         browserLoginStatus: async () => ({ ok: true, authenticated: true }),
         observeMarket: async () => market,
+        observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
         fillSuggestionForm: async () => { throw new Error("AI_HOLD_MUST_NOT_FILL"); },
         submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
         requestDecision: async (_provider, context) => {
           analyzed += 1;
           assert.equal(context.account.positions[0].positionOrderId, "P-hold");
-          assert.equal(context.strategy.loop.exit.profitGoal, "REALIZE_PREDICTED_NET_PROFIT");
+          assert.equal(context.strategy.loop.exit.profitGoal, "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT");
           assert.equal(context.strategy.loop.exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
           return { action: "HOLD", bullishProfitProbability: 0.3, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], analysisSummary: "继续持仓的预期净结果更好", riskFlags: [] };
         },
@@ -859,6 +862,7 @@ function testMarketSnapshot(fingerprint, price) {
     timeframes: { "1m": { timeframe: "1m", period: 0, history, historyCount: history.length, completeHistoryCount: history.length, ticks: [], missingFields: [], dataQuality: "VERIFIED", ok: true } },
     availableTimeframes: ["1m"],
     timeline: { kind: "timeline", ticks: [{ timestamp: now, price, volume: 3 }], tickCount: 1 },
+    orderBook: { bids: [{ price, volume: 100 }], asks: [{ price: price + 1, volume: 100 }] },
     quote: { price, open: price - 1, high: price + 1, low: price - 2, volume: 200 },
     latest: { price, open: price - 1, high: price + 1, low: price - 2, volume: 200 },
     changePct: 1.2,
@@ -934,6 +938,7 @@ for (const autoDecisionEnabled of [false, true]) {
     let rounds = 0;
     const runtime = {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async (_provider, context) => {
         rounds += 1;
         assert.equal(context.account.openOrders[0].remainingQuantity, 2);
@@ -970,6 +975,7 @@ for (const autoDecisionEnabled of [false, true]) {
       try {
         await runMonitoringCycle(task.id, { runtime: {
           openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+          observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
           requestDecision: async () => ({ action: "HOLD", orderAssessments: [
             { orderId: "O-1", decision: "CANCEL", reason: "入场未成交，占用保证金不划算" },
             { orderId: "O-keep", decision: "KEEP", reason: "保留更有利" },
@@ -1012,6 +1018,7 @@ for (const autoDecisionEnabled of [false, true]) {
             openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
             browserLoginStatus: async () => ({ ok: true, authenticated: true }),
             observeMarket: async () => market,
+            observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
             requestDecision: async (_provider, context) => {
               assert.equal(context.account.positions.some((position) => position.positionOrderId === "P-partial"), true);
               assert.equal(context.account.openOrders.some((order) => order.orderId === "O-cancel"), true);
@@ -1097,6 +1104,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const runtime = {
         openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
         observeMarket: async () => ({ ...market, fingerprint: `recovery-${phase}` }),
+        observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
         requestDecision: async (_provider, context, options) => {
           assert.equal(context.executionPolicy.rulesBlockExecution, false);
           assert.equal(context.executionPolicy.entryMode, autoDecisionEnabled ? "automatic" : "manual_submit");
@@ -1158,6 +1166,7 @@ test("JSON格式纠正成功后只执行纠正决策一次，并记录恢复诊�
   const runtime = {
     openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     requestDecision: async (_provider, context, options) => requestDecision(provider, context, options),
     submitSuggestionForm: async (input) => { submitted.push(input); return { ok: true, filled: true, submitted: true }; },
     cancelOpenOrders: async () => assert.fail("partial invalid cancellation must never execute"),
@@ -1181,6 +1190,7 @@ test("AI KEEP does not invoke cancellation", async () => {
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "HOLD", orderAssessments: [{ orderId: "O-keep", decision: "KEEP" }], riskFlags: [] }),
       cancelOpenOrders: async () => assert.fail("KEEP must preserve the order"),
     } });
@@ -1197,6 +1207,7 @@ test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-1"], bullishProfitProbability: 0.1, bearishProfitProbability: 0.1, riskFlags: [] }),
       cancelOpenOrders: async () => ({ ok: false, results: [{ orderId: "O-1", cancelled: false, code: "ORDER_CANCEL_REJECTED" }] }),
       submitSuggestionForm: async (input) => { submitted += 1; assert.equal(input.quantity, 5); return { ok: true, submitted: true }; },
@@ -1216,6 +1227,7 @@ test("AI立即离场先于无关撤单执行，慢撤单不拖延离场", async 
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-1"], riskFlags: [] }),
       submitSuggestionForm: async () => { actions.push("exit"); return { ok: true, submitted: true }; },
       cancelOpenOrders: async () => { actions.push("cancel"); assert.deepEqual(actions, ["exit", "cancel"]); return { ok: true, results: [{ orderId: "O-1", cancelled: true }] }; },
@@ -1237,6 +1249,7 @@ test(`AI${cancelled ? "撤销" : "未能撤销"}旧离场委托后${cancelled ? 
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-old"], riskFlags: [] }),
       cancelOpenOrders: async () => { actions.push("cancel"); return { ok: cancelled, results: [{ orderId: "O-old", cancelled }] }; },
       submitSuggestionForm: async (input) => { actions.push("exit"); assert.deepEqual(input.targetPositionIds, ["P-1"]); return { ok: true, submitted: true }; },
@@ -1258,6 +1271,7 @@ test(`撤单${failure}后${autoDecisionEnabled ? "自动" : "手动"}模式持�
   let attempts = 0;
   const runtime = {
     openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     requestDecision: async (_provider, context) => {
       rounds += 1;
       assert.equal(context.account.frozenFunds, 3000);
@@ -1301,6 +1315,7 @@ test("启动时已有转让委托，按AI关联的持仓先撤单再离场", asy
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], orderAssessments: [{ orderId: "O-old", decision: "CANCEL", targetPositionIds: ["P-1"] }], riskFlags: [] }),
       cancelOpenOrders: async () => { actions.push("cancel"); return { ok: true, results: [{ orderId: "O-old", cancelled: true }] }; },
       submitSuggestionForm: async () => { actions.push("exit"); return { ok: true, submitted: true }; },
@@ -1324,6 +1339,7 @@ test("待核实离场不阻挡立即入场，旧单继续独立核实且自动�
     openMarketBrowser: async () => ({ ok: true }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => observed,
+    observeExecutionMarket: async () => ({ ...observed, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => { filled += 1; return { ok: true, filled: true }; },
     submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, filled: true, submitted: true }; },
     requestDecision: async (_provider, context) => ({ action, targetSymbol: "BTC/USDT", confidence: 0.7, bullishProfitProbability: 0.52, bearishProfitProbability: 0.44, evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
@@ -1366,6 +1382,7 @@ test("已提交的持仓不重复转让，其他持仓立即离场", async () =>
     openMarketBrowser: async () => ({ ok: true }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, filled: true, submitted: true }; },
     requestDecision: async (_provider, context) => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"], evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
   };
@@ -1393,6 +1410,7 @@ test("连续 K 可入场多笔，同一个新增持仓不会重复核实多笔�
     openMarketBrowser: async () => ({ ok: true }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => observed,
+    observeExecutionMarket: async () => ({ ...observed, observedAt: new Date().toISOString() }),
     submitSuggestionForm: async () => { submissions += 1; return { ok: true, filled: true, submitted: true }; },
     requestDecision: async (_provider, context) => ({ action, targetSymbol: "BTC/USDT", bullishProfitProbability: 0.52, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [] }),
   };
@@ -1433,6 +1451,7 @@ test("未读到持仓不代表离场成交，下一次真实空仓才核实", as
     openMarketBrowser: async () => ({ ok: true }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     requestDecision: async () => ({ action: "HOLD", bullishProfitProbability: 0.2, bearishProfitProbability: 0.2, riskFlags: [] }),
   };
   try {
@@ -1459,6 +1478,7 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
       openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
       browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => { throw new Error("SERVER_ANALYSIS_FORBIDDEN"); },
       requestSegmentReview: async () => { throw new Error("SERVER_SEGMENT_FORBIDDEN"); },
       requestMarketAnalysis: async (_provider, context) => {
@@ -1498,6 +1518,7 @@ for (const autoDecisionEnabled of [false, true]) {
         openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
         browserLoginStatus: async () => ({ ok: true, authenticated: true }),
         observeMarket: async () => market,
+        observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
         requestMarketAnalysis: async () => ({ market, decision: {
           action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-client-exit"], targetSymbol: "BTC/USDT", targetSymbolName: "测试品种",
           entryPrice: 100, takeProfitPrice: 105, targetPrice: 105, bullishProfitProbability: 0.2, bearishProfitProbability: 0.8, profitProbability: 0.8,
@@ -1534,6 +1555,7 @@ test("生产客户端 AI 自动入场直接提交，不被浏览器分析模式�
       openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
       browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestMarketAnalysis: async (_provider, context) => ({ market, decision: {
         action: "BUY", targetSymbol: "BTC/USDT", targetSymbolName: "测试品种", targetPrice: 100,
         bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, profitProbability: 0.55,
@@ -1623,6 +1645,7 @@ test("持仓未平时即使行情指纹不变也继续交给模型判断离场",
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => snapshot,
+    observeExecutionMarket: async () => ({ ...snapshot, observedAt: new Date().toISOString() }),
     requestDecision: async (_provider, context) => {
       requests.push(context);
       return { action: "HOLD", confidence: 0.5, profitProbability: 0.5, bullishProfitProbability: 0.4, bearishProfitProbability: 0.3, riskFlags: [], evidenceIds: [context.evidenceIds[0]], invalidation: "测试失效条件", decisionTtlSec: 300 };
@@ -1657,6 +1680,7 @@ test("持仓监控在客户端分析时改用分层 K 线窗口", async () => {
       openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
       browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => market,
+      observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => { throw new Error("SERVER_ANALYSIS_FORBIDDEN"); },
       requestMarketAnalysis: async (_provider, context) => {
         window = context.monitoringWindow;
@@ -1813,6 +1837,7 @@ test("大行情快照先完成全量片段 AI 复核，再生成最终方向建�
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     requestSegmentReview: async (_provider, segment) => {
       segmentCalls += 1;
       return { ok: true, segmentId: segment.segmentId, contentHash: segment.contentHash, rowCount: segment.rowCount, kind: segment.kind, timeframe: segment.timeframe, summary: `已复核 ${segment.kind}`, trend: "up", bullishEvidence: [], bearishEvidence: [], riskFlags: [], keyLevels: [], confidence: 0.7 };
@@ -1940,6 +1965,7 @@ test("手动模式同一 K 不重复提示，下一 K 可再次提示入场", as
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => observed,
+    observeExecutionMarket: async () => ({ ...observed, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false, fields: ["买价", "买量"] }),
     requestDecision: async (_provider, context) => ({
       action: "BUY", confidence: 0.7, profitProbability: 0.6,
@@ -1977,6 +2003,7 @@ test("红线触发时即使 AI 买卖概率过线也不得进入下单流程", a
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => { throw new Error("blocked trade reached form"); },
     requestDecision: async (_provider, context) => ({
       action: "BUY", confidence: 0.7, profitProbability: 0.7,
@@ -2013,6 +2040,7 @@ test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () =
     openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
     submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; },
     requestDecision: async (_provider, context) => ({
@@ -2061,6 +2089,7 @@ test(`实盘${autoDecisionEnabled ? "自动" : "手动"}入场，持仓变化后
     openMarketBrowser: async () => ({ ok: true, url: "https://demo.exchange.local", mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => observed,
+    observeExecutionMarket: async () => ({ ...observed, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
     requestDecision: async (_provider, context) => ({ action: observed === flat ? "BUY" : "HOLD", confidence: 0.6, profitProbability: 0.6, bullishProfitProbability: 0.6, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300 }),
   };
@@ -2094,6 +2123,7 @@ test(`手动入场无需软件确认，成交后自动${exitType}并开启下一
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     continueManualEntry: async () => ({ ok: true, continued: false }),
     observeMarket: async () => observed,
+    observeExecutionMarket: async () => ({ ...observed, observedAt: new Date().toISOString() }),
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
     submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true }; },
     requestDecision: async (_provider, context) => ({
@@ -2192,6 +2222,7 @@ test("手动入场模式的止盈离场不等待人工确认，也不受规则�
     openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
     browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => market,
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     submitSuggestionForm: async (input) => { submitted += 1; assert.equal(input.exitType, "TAKE_PROFIT"); return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; },
     requestDecision: async (_provider, context) => ({
       action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P-profit"], targetSymbol: "BTC/USDT",
@@ -2410,7 +2441,7 @@ for (const autoDecisionEnabled of [false, true]) {
         Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
         const market = testMarketSnapshot(taskId, 105);
         market.observedAt = new Date(Date.now() - 90000).toISOString();
-        market.orderBook = { bids: [{ price: 105, volume: 100 }], asks: [{ price: 106, volume: 100 }] };
+        market.orderBook = { bids: [{ price: side === "LONG" ? 105 : 94, volume: 100 }], asks: [{ price: side === "LONG" ? 106 : 95, volume: 100 }] };
         const position = { positionOrderId: "P-slow", symbol: "BTC/USDT", side: side === "LONG" ? "买入" : "卖出", quantity: 1, orderPrice: 100, frozenQuantity: 0 };
         market.account = { ...market.account, positionsVerified: true, openOrdersVerified: true, positions: [position], openOrders: [] };
         const action = side === "LONG" ? "SELL" : "BUY";

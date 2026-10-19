@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isProfitableExit, parseSessionClose, profitFallbackExit, profitExitGuardAllowsPosition, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
+import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isProfitableExit, parseSessionClose, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
 
 const observed = Date.parse("2026-10-13T10:00:00+08:00");
 const position = { positionOrderId: "P-1", symbol: "DGKZ", side: "买入", quantity: 2, orderPrice: 102 };
@@ -146,37 +146,10 @@ test("持仓成本改变后旧计划失效，防止同号持仓被按旧盈利�
   assert.equal(evaluateExitPlan(plan, changed, observed).status, "POSITION_CHANGED");
 });
 
-for (const side of ["买入", "卖出"]) {
-  test(`${side}: profit fallback uses executable side, quantity and known costs; final confirmation rechecks the same holding`, () => {
-    const isLong = side === "买入";
-    const p = { ...position, side, orderPrice: 100, quantity: 2, roundTripFee: 1 };
-    const snapshot = { ...market, account: { positionsVerified: true, positions: [p], realtimeValueChange: -20 },
-      orderBook: { bids: [{ price: isLong ? 101.5 : 98, volume: 20 }], asks: [{ price: isLong ? 102 : 98.5, volume: 20 }] } };
-    const result = profitFallbackExit(p, snapshot, observed);
-    assert.equal(result.netPnl, 2);
-    assert.equal(result.decision.action, isLong ? "SELL" : "BUY");
-    const guard = result.decision.exitGuard;
-    assert.equal(profitExitGuardAllowsPosition(guard, p, result.quotePrice), true);
-    assert.equal(profitExitGuardAllowsPosition(guard, p, isLong ? 101.49 : 98.51), false);
-    for (const change of [{ quantity: 3 }, { orderPrice: 110 }, { side: "unknown" }, { frozenQuantity: 1 }, { positionOrderId: "other" }]) {
-      assert.equal(profitExitGuardAllowsPosition(guard, { ...p, ...change }, result.quotePrice), false);
-    }
-    assert.equal(profitFallbackExit(p, snapshot, observed + 6000), null);
-    assert.equal(profitFallbackExit(p, { ...snapshot, account: { ...snapshot.account, positionsVerified: false } }, observed), null);
-    assert.equal(profitFallbackExit({ ...p, roundTripFee: 4 }, snapshot, observed), null, "gross profit cannot override a known net loss");
-    const unknown = profitFallbackExit({ ...p, roundTripFee: null }, snapshot, observed);
-    assert.equal(unknown.netPnl, null, "unknown fees are not reported as zero-cost net profit");
-    assert.equal(unknown.grossPnl, 3);
-  });
-}
-
-test("account fallback uses only the current exact realtime field and an inclusive boundary", () => {
+test("账户实时货值变化不单独生成离场动作", () => {
   const p = { ...position, orderPrice: 100, quantity: 1, roundTripFee: 0.5 };
-  const snapshot = { ...market, orderBook: { bids: [{ price: 101, volume: 20 }], asks: [{ price: 102, volume: 20 }] } };
-  for (const value of [undefined, null, "", false, "unknown", -2, 0, 1.99]) {
-    assert.equal(profitFallbackExit(p, { ...snapshot, account: { positionsVerified: true, realtimeValueChange: value, dayPnl: 99, valueChange: 99 } }, observed), null);
-  }
-  for (const value of [2, "2", 2.01]) {
-    assert.equal(profitFallbackExit(p, { ...snapshot, account: { positionsVerified: true, realtimeValueChange: value } }, observed).decision.exitType, "TAKE_PROFIT");
-  }
+  const snapshot = { ...market, account: { positionsVerified: true, realtimeValueChange: 2, positions: [p] },
+    orderBook: { bids: [{ price: 102, volume: 20 }], asks: [{ price: 103, volume: 20 }] } };
+  const noPlans = validateExitPlans({ exitPlans: [] }, snapshot, {}, observed);
+  assert.deepEqual(noPlans.plans, []);
 });

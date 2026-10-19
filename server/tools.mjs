@@ -9,7 +9,7 @@ import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
-import { executableExitQuote, exitGuardAllowsPrice, profitExitGuardAllowsPosition, realtimeValueAbove, realtimeValueAtLeast } from "./exit-policy.mjs";
+import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isProfitableExit, positionEntryPrice, realtimeValueAbove } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -643,18 +643,21 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   const target = { action, symbol, symbolName, instrumentId, targetPositionIds };
   const results = [];
   const entryGuard = exitType ? undefined : entryConfirmationGuard(entryDeadlineAt);
+  let currentExitGuard = exitGuard;
   const verifyExitGuard = async (dialogPrice = null) => {
     const snapshot = await readVisiblePage(sessionId, { quick: true });
     if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED" };
     const market = parseHaohanPageSnapshot(snapshot, { symbol });
-    const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: exitGuard?.heldSide }, Date.now());
-    const position = market.account?.positions?.find(p => p.positionOrderId === exitGuard?.positionId);
-    const allowed = quote && exitGuardAllowsPrice(exitGuard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(exitGuard, dialogPrice))
-      && (exitGuard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, exitGuard.realtimeValueAbove))
-      && (exitGuard?.realtimeValueAtLeast === undefined || realtimeValueAtLeast(market.account, exitGuard.realtimeValueAtLeast))
-      && (!exitGuard?.profitFallback || (market.account?.positionsVerified === true
-        && profitExitGuardAllowsPosition(exitGuard, position, quote.price)
-        && (dialogPrice === null || profitExitGuardAllowsPosition(exitGuard, position, dialogPrice))));
+    const guard = currentExitGuard;
+    const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: guard?.heldSide }, Date.now());
+    const position = market.account?.positions?.find(p => p.positionOrderId === guard?.positionId);
+    const positionValid = guard?.entryPrice === undefined || (market.account?.positionsVerified === true && position
+      && positionEntryPrice(position) === guard.entryPrice && heldDirection(position) === guard.heldSide
+      && Number(position.quantity) === guard.quantity && Number(position.frozenQuantity || 0) === 0);
+    const allowed = positionValid && quote && exitGuardAllowsPrice(guard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(guard, dialogPrice))
+      && (guard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, guard.realtimeValueAbove))
+      && (guard?.exitType !== "TAKE_PROFIT" || (isProfitableExit(position, quote.price) && (dialogPrice === null || isProfitableExit(position, dialogPrice))))
+      && !guard?.profitFallback;
     return { ok: Boolean(allowed), code: "EXIT_CONDITION_CHANGED" };
   };
   const withCompleted = (result) => {
@@ -668,13 +671,20 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       if (exitGuard && !await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "EXIT_INSTRUMENT_UNVERIFIED", submitted: false };
       const rows = await preparePositionRows(page, target);
       if (!rows.length) return { ok: false, code: "EXIT_POSITION_NOT_FOUND", message: "持仓明细未显示目标持仓，未操作其他持仓", filled: false, submitted: false };
-      if (exitGuard && (rows.length !== 1 || rows[0].id !== exitGuard.positionId || rows[0].quantity !== exitGuard.quantity || !await verifyExitGuard().then(r => r.ok))) return { ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false };
+      if (exitGuard && (rows.length !== (exitGuard.positions?.length || 1) || rows.some(row => {
+        const guard = exitGuard.positions?.find(item => item.positionId === row.id) || exitGuard;
+        return row.id !== guard.positionId || row.quantity !== guard.quantity;
+      }))) return { ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false };
       targets = rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index }));
     } else {
       const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId });
       if (!filled.ok) return { ...filled, submitted: false };
     }
     for (const positionTarget of targets) {
+      if (exitGuard) {
+        currentExitGuard = exitGuard.positions?.find(item => item.positionId === positionTarget.targetPositionIds[0]) || exitGuard;
+        if (!(await verifyExitGuard()).ok) return withCompleted({ ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false });
+      }
       const baselineToken = await markTradePageHints(page);
       const writeResponse = watchTradeResponse(page);
       try {

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { markObservedMarketCandles } from "./candle-confirmation.mjs";
 import NodeWebSocket from "ws";
 import { orderBookFingerprint, summarizeOrderBook } from "./order-book.mjs";
 import { listPageBoardInstruments, openBrowserPage, readVisiblePage, selectPageBoardInstrument } from "./browser.mjs";
@@ -576,11 +577,16 @@ function safeReadOnlyPayload(value, depth = 0) {
   return String(value);
 }
 
+function candleFingerprint(candle) {
+  const { confirmation, ...fields } = candle;
+  return confirmation ? { ...fields, confirmation: confirmation.status } : fields;
+}
+
 function timeframeFingerprint(snapshot) {
   return {
     timeframe: snapshot.timeframe,
     period: snapshot.period,
-    history: snapshot.history,
+    history: snapshot.history?.map(candleFingerprint),
     ticks: snapshot.ticks || [],
     flashK: snapshot.flashK || null,
     missingFields: snapshot.missingFields,
@@ -604,6 +610,7 @@ function bookFingerprint(book) {
     historyCount: book?.historyCount || history.length,
     lastTimestamp: last?.timestamp || null,
     lastClose: last?.close || null,
+    lastConfirmation: last?.confirmation?.status || null,
   };
 }
 
@@ -888,7 +895,7 @@ export function marketDataFingerprint(market = {}) {
     instrumentId: market.instrumentId,
     quote: market.quote || market.latest,
     ticks: market.ticks || [],
-    history: market.history || [],
+    history: (market.history || []).map(candleFingerprint),
     timeframes,
     account: market.account || null,
     orderBook: orderBookFingerprint(market.orderBook || market.pageView?.orderBook),
@@ -1272,10 +1279,10 @@ export function resolveObservedHaohanSymbol(pageInstrument, taskSymbol) {
 export async function observeExecutionMarket(task, connector, { accountScope = "full", target: requestedTarget = null } = {}) {
   if (connector?.reviewStatus !== "APPROVED" || connector.adapterId !== "haohan-readonly" || !connector.capabilities?.includes("read_visible_market")) return { ok: false, code: "MARKET_ADAPTER_REVIEW_REQUIRED" };
   const sessionId = task.target.browserSessionId || `task:${task.id}`;
-  const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true, accountScope });
+  const snapshot = await readVisiblePage(sessionId, { inspectPositions: true, quick: true, inspectCandles: true, accountScope });
   if (!snapshot.ok) return snapshot;
   if (!isHaohanTarget(snapshot.url)) return { ok: false, code: "BROWSER_TARGET_MISMATCH" };
-  const primary = parseHaohanPageSnapshot(snapshot, { symbol: extractHaohanPageInstrument(snapshot).symbol });
+  const primary = parseHaohanPageSnapshot(snapshot, { symbol: extractHaohanPageInstrument(snapshot).symbol, timeframe: task.timeframe || "1m" });
   if (primary.code === "REAUTH_REQUIRED") return primary;
   // Rotate one held instrument per poll so earlier quotes cannot age out while
   // collecting other instruments. Submission rechecks the exact position/quote.
@@ -1285,14 +1292,14 @@ export async function observeExecutionMarket(task, connector, { accountScope = "
   let book = { ...primary, observedAt: new Date(snapshot.capturedAt).toISOString() };
   if (target && !samePageInstrument(book, target)) {
     if (!await selectPageBoardInstrument(sessionId, target)) return { ...primary, ok: true, books: [], orderBook: null };
-    const next = await readVisiblePage(sessionId, { quick: true });
+    const next = await readVisiblePage(sessionId, { quick: true, inspectCandles: true });
     if (!next.ok) return next;
-    const parsed = parseHaohanPageSnapshot(next, { symbol: extractHaohanPageInstrument(next).symbol });
+    const parsed = parseHaohanPageSnapshot(next, { symbol: extractHaohanPageInstrument(next).symbol, timeframe: task.timeframe || "1m" });
     if (parsed.code === "REAUTH_REQUIRED") return parsed;
     if (!samePageInstrument(parsed, target)) return { ok: false, code: "PAGE_INSTRUMENT_MISMATCH" };
     book = { ...parsed, observedAt: new Date(next.capturedAt).toISOString() };
   }
-  return { ...book, ok: true, account: primary.account, books: [book] };
+  return markObservedMarketCandles({ ...book, ok: true, account: primary.account, books: [book] }, sessionId);
 }
 
 export async function observeMarket(task, connector, { withBrowser = async (operation) => operation() } = {}) {
@@ -1370,6 +1377,7 @@ export async function observeMarket(task, connector, { withBrowser = async (oper
     }
     if (!parsedPage.ok) return null;
     if (intended && !samePageInstrument(parsedPage, intended) && !samePageInstrument(actual, intended) && !samePageInstrument(parsedPage.instrument, intended)) return null;
+    markObservedMarketCandles(parsedPage, sessionId);
     pageBooks.push(parsedPage);
     return parsedPage;
   };
@@ -1453,6 +1461,10 @@ export async function observeMarket(task, connector, { withBrowser = async (oper
     enriched.missingFields = [...new Set([...(enriched.missingFields || []), "SYMBOL_PAGE_MISMATCH"])];
     enriched.dataQuality = "LIMITED";
   }
+  // API history can be cached. Only actual DOM chart reads accrue stability;
+  // merged history may use that evidence but cannot manufacture observations.
+  markObservedMarketCandles(enriched, sessionId, { observe: false });
+  enriched.fingerprint = marketDataFingerprint(enriched);
   return enriched;
 }
 

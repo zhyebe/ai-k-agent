@@ -41,9 +41,10 @@ for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
     const submissions = [], forms = [];
     const market = () => ({ ok: true, symbol: "DGKZ", timeframe: "1m", observedAt: new Date(now).toISOString(), fingerprint: String(now), source: "test",
       history: [], historyCount: 0, latest: { price: 100 }, quote: { price: 100 }, books: [], indicators: {}, evidenceId: "market:test",
+      orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] },
       account: { positionsVerified: true, positions, openOrdersVerified: true, openOrders: [], availableFunds: 10000 } });
     const runtime = {
-      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market(),
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market(), observeExecutionMarket: async () => market(),
       continueManualEntry: async () => ({ continued: false }),
       fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true, submitted: false }; },
       submitSuggestionForm: async input => { submissions.push(input); return { ok: true, submitted: true }; },
@@ -107,7 +108,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /下一 K 或新的价格\/趋势机会必须重新判断并可再次下单/);
       assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
-      assert.match(prompt, /realtimeValueChange.*大于等于2/);
+      assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
+      assert.match(prompt, /盈利与亏损离场均由AI/);
+      assert.doesNotMatch(prompt, /程序止盈兜底/);
       const value = JSON.stringify({ action: "BUY", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
         analysis_summary: "主判断：偏涨；预测回踩98后向103，采用限价入场" });

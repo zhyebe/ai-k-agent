@@ -25,8 +25,93 @@ function setup(id, positions, extras = {}) {
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
 
+for (const heldSide of ["LONG", "SHORT"]) for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
+  test(`${heldSide} ${exitType}: a changed quote after AI returns invalidates the action`, async () => {
+    const f = setup(`late-price-${heldSide}-${exitType}`, [{ ...long("P1"), side: heldSide === "LONG" ? "买入" : "卖出" }]);
+    const result = await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => structuredClone(f.market),
+      requestDecision: async () => {
+        f.market.orderBook = { bids: [{ price: 99, volume: 100 }], asks: [{ price: 100, volume: 100 }] };
+        return { action: heldSide === "LONG" ? "SELL" : "BUY", exitType, targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [] };
+      },
+    } });
+    assert.equal(result.reason, "MARKET_CHANGED_DURING_ANALYSIS");
+    assert.equal(f.submitted.length, 0);
+    assert.equal(f.task.lastAnalysisSucceeded, false);
+  });
+}
+
+test("slow AI is cancelled on live quote changes, while its previously authorized exit still executes", async () => {
+  const f = setup("cancel-stale-ai", [long("P1")]);
+  f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1,
+    validForSec: 300, takeProfitPrice: 110, stopLossPrice: 98 }] }, f.market, f.task).plans;
+  let started, signal;
+  const ready = new Promise(resolve => { started = resolve; });
+  const operation = runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => structuredClone(f.market),
+    requestDecision: async (_provider, _context, options) => {
+      signal = options.signal;
+      started();
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  } });
+  await ready;
+  f.market.orderBook = { bids: [{ price: 98, volume: 100 }], asks: [{ price: 99, volume: 100 }] };
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  const result = await operation;
+  assert.equal(signal.aborted, true);
+  assert.equal(result.reason, "MARKET_CHANGED_DURING_ANALYSIS");
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitType, "STOP_LOSS");
+});
+
+test("a stale HOLD cannot replace live exit plans; unchanged fresh snapshots keep the original expiry", async () => {
+  const f = setup("hold-plan-review", [long("P1")]);
+  const oldPlan = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 300, takeProfitPrice: 110 }] }, f.market, f.task).plans[0];
+  f.task.exitPlans = [oldPlan];
+  const result = await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => structuredClone(f.market), requestDecision: async () => {
+      f.market.account.positions[0].orderPrice = 101;
+      return { action: "HOLD", riskFlags: [], evidenceIds: [], exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 300, takeProfitPrice: 120 }] };
+    },
+  } });
+  assert.equal(result.reason, "POSITION_CHANGED_DURING_ANALYSIS");
+  assert.equal(f.task.exitPlans[0], oldPlan);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("ordinary ticks do not starve AI; its matching price condition executes at the latest quote", async () => {
+  const f = setup("live-condition-completes", [long("P1")]);
+  let started, finish, signal;
+  const ready = new Promise(resolve => { started = resolve; });
+  const originalObservedAt = f.market.observedAt;
+  const operation = runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => structuredClone(f.market),
+    requestDecision: async (_provider, _context, options) => {
+      signal = options.signal;
+      started();
+      return new Promise(resolve => { finish = resolve; });
+    },
+  } });
+  await ready;
+  f.market.orderBook = { bids: [{ price: 106, volume: 100 }], asks: [{ price: 107, volume: 100 }] };
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(signal.aborted, false);
+  finish({ action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [],
+    exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 98 }] });
+  await operation;
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.positions[0].triggerPrice, 105);
+  assert.equal(f.submitted[0].exitGuard.positions[0].comparison, "GTE");
+  assert.equal(f.task.exitPlans[0].observedAt, originalObservedAt);
+});
+
 for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) {
-  test(`${automatic ? "automatic" : "manual"} ${heldSide}: profit >= 2 closes without any AI plan, even when account total is negative`, async () => {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide}: profit >= 2 does not close without an AI plan`, async () => {
     const isLong = heldSide === "LONG";
     const f = setup(`profit-fallback-${automatic}-${heldSide}`, [
       { ...long("profit", 2), side: isLong ? "买入" : "卖出", roundTripFee: 1 },
@@ -36,26 +121,21 @@ for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"])
     const price = 100 + (isLong ? 1.5 : -1.5);
     f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.deepEqual(f.submitted.map(s => [s.targetPositionIds[0], s.action, s.exitType, s.quantity]), [
-      ["profit", isLong ? "SELL" : "BUY", "TAKE_PROFIT", 2],
-    ]);
-    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["loss"]);
+    assert.deepEqual(f.submitted, []);
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["profit", "loss"]);
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.equal(f.submitted.length, 1, "profit fallback never becomes a mechanical loss stop");
+    assert.equal(f.submitted.length, 0, "account profit never becomes a mechanical exit");
   });
 }
 
-test("account realtime value exactly 2 closes only profitable positions without waiting for a distant or expired AI target", async () => {
+test("account realtime value exactly 2 is reference only without an AI exit plan", async () => {
   const f = setup("account-profit-fallback", [long("profit"), { ...long("loss"), orderPrice: 110 }]);
   f.market.orderBook = { bids: [{ price: 101, volume: 100 }], asks: [{ price: 102, volume: 100 }] };
   f.task.exitPlans = [{ positionId: "profit", expiresAt: new Date(Date.now() - 1000).toISOString() }];
-  f.market.account.realtimeValueChange = 1.99;
-  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  assert.equal(f.submitted.length, 0);
   f.market.account.realtimeValueChange = 2;
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  assert.deepEqual(f.submitted.map(s => s.targetPositionIds), [["profit"]]);
-  assert.equal(f.submitted[0].exitGuard.realtimeValueAtLeast, 2);
+  assert.equal(f.submitted.length, 0);
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["profit", "loss"]);
 });
 
 for (const automatic of [false, true]) {

@@ -776,7 +776,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /亏损也是预测对象/);
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
-    assert.match(prompt, /目标是赚取约2–5个价格点/);
+    assert.match(prompt, /目标是由AI选择最优可兑现盈利和最小损失离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
@@ -1241,7 +1241,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
     assert.match(prompt, /收益与风险必须一起预测/);
-    assert.match(prompt, /目标是赚取约2–5个价格点/);
+    assert.match(prompt, /目标是由AI选择最优可兑现盈利和最小损失离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
