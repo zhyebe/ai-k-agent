@@ -35,6 +35,7 @@ test("OpenAI-compatible wrapped and streaming choices extract model text", () =>
   assert.equal(extractModelText({ data: { choices: [{ delta: { content: final } }] } }), final);
   assert.equal(extractModelText({ choices: [{ text: final }] }), final);
   assert.equal(extractModelText({ choices: [{ message: { content: [{ type: "output_text", content: final }] } }] }), final);
+  assert.equal(extractModelText({ response: { output: [{ type: "message", content: [{ type: "output_text", text: final }] }] } }), final);
 });
 
 test("action aliases from compatible models do not silently become HOLD", async (t) => {
@@ -96,6 +97,23 @@ test("reasoning-only live responses are re-asked for a conclusion", async (t) =>
   assert.equal(result.modelDiagnostics.attempts[0].jsonStatus, "EMPTY_TEXT");
   assert.equal(result.modelDiagnostics.attempts[1].jsonStatus, "COMPLETE_JSON");
   assert.match(bodies[1].messages.at(-1).content, /internal reasoning/);
+});
+
+test("nested gateway reasoning-only responses are diagnosed and re-asked", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    const payload = calls === 1
+      ? { data: { choices: [{ message: { content: "", reasoning_content: "private reasoning" }, finish_reason: "stop" }] } }
+      : { response: { output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ action: "BUY", bullish_profit_probability: 0.7, bearish_profit_probability: 0.2 }) }] }] } };
+    return new Response(JSON.stringify(payload));
+  });
+  const result = await requestDecision({ apiKey: "test-key", baseUrl: "https://gateway.example.test", model: "wrapped-reasoning-model" }, {}, { fastAnalysis: true });
+  assert.equal(calls, 2);
+  assert.equal(result.action, "BUY");
+  assert.deepEqual(result.modelDiagnostics.attempts[0].contentTypes, ["reasoning"]);
+  assert.equal(result.modelDiagnostics.attempts[0].jsonStatus, "EMPTY_TEXT");
+  assert.equal(result.modelDiagnostics.attempts[1].jsonStatus, "COMPLETE_JSON");
 });
 
 test("a single complete decision inside prose braces is parsed without repairing malformed JSON", async (t) => {

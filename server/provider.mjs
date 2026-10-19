@@ -293,55 +293,91 @@ function providerRequestBody(provider, messages, options = {}) {
   return chatCompletionsBody(provider, messages, options);
 }
 
+const RESPONSE_WRAPPER_KEYS = ["data", "response", "result", "body", "payload"];
+
+function responseEnvelopes(payload) {
+  const envelopes = [];
+  const queue = [{ value: payload, depth: 0 }];
+  const seen = new Set();
+  while (queue.length) {
+    const { value, depth } = queue.shift();
+    if (value === null || value === undefined) continue;
+    if (typeof value === "object") {
+      if (seen.has(value)) continue;
+      seen.add(value);
+    }
+    envelopes.push(value);
+    if (depth >= 4 || typeof value !== "object" || Array.isArray(value)) continue;
+    for (const key of RESPONSE_WRAPPER_KEYS) {
+      const nested = value[key];
+      if (nested !== null && nested !== undefined) queue.push({ value: nested, depth: depth + 1 });
+    }
+  }
+  return envelopes;
+}
+
+function isReasoningPart(part) {
+  const type = String(part?.type || "").toLowerCase();
+  return part?.thought === true || ["reasoning", "thinking", "redacted_thinking", "analysis"].includes(type);
+}
+
+function modelPartText(part) {
+  if (typeof part === "string" || !part || isReasoningPart(part)) return typeof part === "string" ? part : "";
+  if (typeof part.text === "string") return part.text;
+  if (typeof part.output_text === "string") return part.output_text;
+  if (typeof part.value === "string") return part.value;
+  if (typeof part.content === "string") return part.content;
+  if (part.content !== undefined) return modelContentText(part.content);
+  return "";
+}
+
+function modelContentText(content) {
+  return Array.isArray(content) ? content.map(modelPartText).join("") : modelPartText(content);
+}
+
+function responseEnvelopeText(payload) {
+  if (typeof payload === "string") return payload.trim();
+  if (!payload || typeof payload !== "object") return "";
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
+  if (Array.isArray(payload.output)) {
+    const text = payload.output.filter((item) => !isReasoningPart(item)).map(modelPartText).join("").trim();
+    if (text) return text;
+  } else if (payload.output !== undefined) {
+    const text = modelContentText(payload.output).trim();
+    if (text) return text;
+  }
+  if (payload.content !== undefined) {
+    const text = modelContentText(payload.content).trim();
+    if (text) return text;
+  }
+  for (const candidate of Array.isArray(payload.candidates) ? payload.candidates : []) {
+    const text = modelContentText(candidate?.content?.parts ?? candidate?.content).trim()
+      || modelPartText(candidate).trim();
+    if (text) return text;
+  }
+  for (const choice of Array.isArray(payload.choices) ? payload.choices : []) {
+    const message = choice?.message || choice?.delta || choice || {};
+    const text = modelContentText(message.content)
+      || modelContentText(message.output_text)
+      || modelContentText(message.answer)
+      || modelPartText(message)
+      || (typeof choice?.text === "string" ? choice.text : "");
+    if (text.trim()) return text.trim();
+  }
+  const messageText = modelContentText(payload.message?.content)
+    || modelContentText(payload.message?.output_text)
+    || modelContentText(payload.message?.answer);
+  if (messageText.trim()) return messageText.trim();
+  const directText = modelContentText(payload.answer) || modelContentText(payload.text);
+  return directText.trim();
+}
+
 export function extractModelText(payload) {
-  const isReasoning = (part) => part?.thought === true || ["reasoning", "thinking", "redacted_thinking", "analysis"].includes(part?.type);
-  const partText = (part) => {
-    if (typeof part === "string" || !part || isReasoning(part)) return typeof part === "string" ? part : "";
-    if (typeof part.text === "string") return part.text;
-    if (typeof part.output_text === "string") return part.output_text;
-    if (typeof part.value === "string") return part.value;
-    if (typeof part.content === "string") return part.content;
-    if (Array.isArray(part.content)) return contentText(part.content);
-    return "";
-  };
-  const contentText = (content) => Array.isArray(content)
-    ? content.map(partText).join("")
-    : partText(content);
-  const chatChoicesText = (candidate) => {
-    for (const choice of Array.isArray(candidate?.choices) ? candidate.choices : []) {
-      const message = choice?.message || choice?.delta || {};
-      const text = contentText(message.content)
-        || contentText(message.output_text)
-        || contentText(message.answer)
-        || (typeof choice?.text === "string" ? choice.text : "");
-      if (text.trim()) return text.trim();
-    }
-    return "";
-  };
-  if (typeof payload?.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
-  if (Array.isArray(payload?.output)) {
-    const texts = [];
-    for (const item of payload.output) {
-      if (isReasoning(item)) continue;
-      if (typeof item?.text === "string") texts.push(item.text);
-      for (const part of Array.isArray(item?.content) ? item.content : []) {
-        texts.push(partText(part));
-      }
-    }
-    if (texts.join("").trim()) return texts.join("").trim();
-  }
-  if (payload?.content !== undefined) {
-    const text = contentText(payload.content).trim();
+  for (const envelope of responseEnvelopes(payload)) {
+    const text = responseEnvelopeText(envelope);
     if (text) return text;
   }
-  for (const candidate of Array.isArray(payload?.candidates) ? payload.candidates : []) {
-    const text = contentText(candidate?.content?.parts ?? candidate?.content).trim();
-    if (text) return text;
-  }
-  const chatText = chatChoicesText(payload) || chatChoicesText(payload?.data)
-    || contentText(payload?.answer)
-    || contentText(payload?.text);
-  return chatText.trim();
+  return "";
 }
 
 async function readJsonPayload(response) {
@@ -651,8 +687,12 @@ function parseModelContent(content) {
 
 function modelTokenUsage(payload, wireApi) {
   const count = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-  const usage = payload.usage || {};
-  const gemini = payload.usageMetadata || {};
+  const usageSource = responseEnvelopes(payload).find((candidate) => candidate && typeof candidate === "object" && candidate.usage && Object.keys(candidate.usage).length)
+    || {};
+  const geminiSource = responseEnvelopes(payload).find((candidate) => candidate && typeof candidate === "object" && candidate.usageMetadata && Object.keys(candidate.usageMetadata).length)
+    || {};
+  const usage = usageSource.usage || {};
+  const gemini = geminiSource.usageMetadata || {};
   let inputTokens = count(usage.input_tokens ?? usage.prompt_tokens);
   let outputTokens = count(usage.output_tokens ?? usage.completion_tokens);
   let cachedInputTokens = count(usage.input_tokens_details?.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens);
@@ -676,13 +716,33 @@ function modelTokenUsage(payload, wireApi) {
 
 function modelDiagnostics(payload, content, parsed, wireApi, jsonError) {
   const knownTypes = new Set(["text", "output_text", "input_text", "thinking", "reasoning", "analysis", "redacted_thinking", "message", "tool_use", "tool_result", "refusal"]);
-  const parts = payload.content || payload.output || payload.choices?.[0]?.message?.content || payload.candidates?.[0]?.content?.parts;
-  const contentTypes = Array.isArray(parts) ? [...new Set(parts.map((part) => part?.thought ? "thinking" : knownTypes.has(part?.type) ? part.type : typeof part?.text === "string" ? "text" : "unknown"))] : typeof parts === "string" ? ["text"] : [];
-  const chatMessages = (Array.isArray(payload?.choices) ? payload.choices : []).map((choice) => choice?.message || {}).filter(Boolean);
-  if (chatMessages.some((message) => typeof message.reasoning_content === "string" || typeof message.thinking_content === "string" || message.reasoning_content || message.thinking_content)) {
-    contentTypes.push("reasoning");
+  const contentTypes = [];
+  const addType = (type) => { if (type && !contentTypes.includes(type)) contentTypes.push(type); };
+  const collectTypes = (part) => {
+    if (typeof part === "string") { if (part.trim()) addType("text"); return; }
+    if (Array.isArray(part)) { for (const item of part) collectTypes(item); return; }
+    if (!part || typeof part !== "object") return;
+    if (part.thought === true) addType("thinking");
+    const type = String(part.type || "").toLowerCase();
+    if (knownTypes.has(type)) addType(type);
+    if (part.reasoning_content || part.thinking_content) addType("reasoning");
+    if (part.text || part.output_text || part.value) addType("text");
+    if (part.content !== undefined) collectTypes(part.content);
+  };
+  for (const envelope of responseEnvelopes(payload)) {
+    collectTypes(envelope.content);
+    collectTypes(envelope.output);
+    collectTypes(envelope.answer);
+    for (const choice of Array.isArray(envelope.choices) ? envelope.choices : []) {
+      collectTypes(choice?.message || choice?.delta || choice);
+    }
+    for (const candidate of Array.isArray(envelope.candidates) ? envelope.candidates : []) {
+      collectTypes(candidate?.content?.parts ?? candidate?.content ?? candidate);
+    }
   }
-  const reason = payload.stop_reason || payload.choices?.[0]?.finish_reason || payload.candidates?.[0]?.finishReason || payload.incomplete_details?.reason || payload.status || "";
+  const reason = responseEnvelopes(payload).map((envelope) => envelope && typeof envelope === "object"
+    ? envelope.stop_reason || envelope.choices?.[0]?.finish_reason || envelope.candidates?.[0]?.finishReason || envelope.incomplete_details?.reason || envelope.status || ""
+    : "").find(Boolean) || "";
   const stopReason = ["end_turn", "stop", "max_tokens", "length", "tool_use", "stop_sequence", "content_filter", "STOP", "MAX_TOKENS", "completed", "incomplete", "max_output_tokens"].includes(reason) ? reason : reason ? "unknown" : "";
   const usage = modelTokenUsage(payload, wireApi);
   return { wireApi, jsonStatus: parsed ? "COMPLETE_JSON" : content ? "INVALID_JSON" : "EMPTY_TEXT", jsonError, contentTypes, stopReason, textLength: content.length, contentHash: createHash("sha256").update(content).digest("hex"), ...(Object.keys(usage).length ? { usage } : {}) };
