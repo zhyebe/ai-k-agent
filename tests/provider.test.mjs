@@ -19,6 +19,23 @@ test("all provider formats extract final text without treating reasoning as the 
   ]) assert.equal(extractModelText(payload), final);
 });
 
+test("GLM complete Chat Completions URLs are not suffixed twice", () => {
+  assert.equal(
+    providerRequestUrl({
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+      model: "glm-4.5",
+      apiFormat: "chat",
+    }),
+    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+  );
+});
+
+test("OpenAI-compatible wrapped and streaming choices extract model text", () => {
+  const final = '{"action":"HOLD"}';
+  assert.equal(extractModelText({ data: { choices: [{ delta: { content: final } }] } }), final);
+  assert.equal(extractModelText({ choices: [{ text: final }] }), final);
+});
+
 test("a single complete decision inside prose braces is parsed without repairing malformed JSON", async (t) => {
   const final = { action: "BUY", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3, analysis_summary: 'literal {level} and "quote"' };
   t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: `说明 {非 JSON 注释}\n${JSON.stringify(final)}\n结束` }, finish_reason: "stop" }] })));

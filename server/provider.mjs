@@ -166,10 +166,22 @@ export function providerRequestUrl(provider) {
   const base = normalizeBaseUrl(provider.baseUrl);
   let path = "";
   try { path = new URL(base).pathname.replace(/\/+$/, "") || "/"; } catch {}
+  const wireApi = resolveProviderWireApi(provider);
+  // Providers such as GLM commonly document the complete Chat Completions
+  // endpoint. Treat a known endpoint suffix as complete even when an older
+  // saved provider did not set fullUrlMode, otherwise the request becomes
+  // `/chat/completions/chat/completions` and the model never receives it.
+  const isCompleteEndpoint = wireApi === "chat"
+    ? /\/chat\/completions$/i.test(path)
+    : wireApi === "responses"
+      ? /\/responses$/i.test(path)
+      : wireApi === "anthropic"
+        ? /\/messages$/i.test(path)
+        : /:generateContent$/i.test(path);
+  if (isCompleteEndpoint) return base;
   // CC Switch treats an origin or `/v1` as a base URL even when the UI flag
   // is carried over. Only preserve full URL mode for an actual model endpoint.
   if (provider.fullUrlMode === true && path !== "/" && !path.endsWith("/v1")) return base;
-  const wireApi = resolveProviderWireApi(provider);
   if (wireApi === "responses") return appendApiPath(base, "/responses");
   if (wireApi === "anthropic") return appendApiPath(base, "/messages", "/v1/messages");
   if (wireApi === "gemini") {
@@ -266,6 +278,18 @@ function providerRequestBody(provider, messages, options = {}) {
 export function extractModelText(payload) {
   const isReasoning = (part) => part?.thought === true || ["reasoning", "thinking", "redacted_thinking", "analysis"].includes(part?.type);
   const partText = (part) => typeof part === "string" ? part : !isReasoning(part) && typeof part?.text === "string" ? part.text : "";
+  const contentText = (content) => Array.isArray(content)
+    ? content.map(partText).join("")
+    : partText(content);
+  const chatChoicesText = (candidate) => {
+    for (const choice of Array.isArray(candidate?.choices) ? candidate.choices : []) {
+      const text = contentText(choice?.message?.content)
+        || contentText(choice?.delta?.content)
+        || (typeof choice?.text === "string" ? choice.text : "");
+      if (text.trim()) return text.trim();
+    }
+    return "";
+  };
   if (typeof payload?.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
   if (Array.isArray(payload?.output)) {
     const texts = [];
@@ -286,8 +310,8 @@ export function extractModelText(payload) {
     const text = payload.candidates[0].content.parts.map(partText).join("").trim();
     if (text) return text;
   }
-  const content = payload?.choices?.[0]?.message?.content;
-  return (Array.isArray(content) ? content.map(partText).join("") : typeof content === "string" ? content : "").trim();
+  const chatText = chatChoicesText(payload) || chatChoicesText(payload?.data);
+  return chatText.trim();
 }
 
 async function readJsonPayload(response) {
