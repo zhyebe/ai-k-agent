@@ -11,7 +11,7 @@ import { positionAmountExit, positionProfitExit } from "../server/exit-policy.mj
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
-import { activateTradeControl, fillTradeFields } from "../server/trade-controls.mjs";
+import { activateTradeControl, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
 
 let browser;
 let page;
@@ -27,6 +27,94 @@ after(async () => {
   await closeAllBrowserSessions();
   setBrowserSessionFactory(null);
   await browser?.close();
+});
+
+test("a reordered holding keeps its exact identity instead of clicking the old row index", async () => {
+  await page.reload();
+  const [target] = await findPositionRows(page, { targetPositionIds: ["P-1"], action: "SELL" });
+  await page.evaluate(() => {
+    const row = [...document.querySelectorAll("#positions tbody tr")].find(row => row.cells[3].textContent === "P-1");
+    row.parentElement.prepend(row);
+    window.transfer = id => { window.openedPosition = id; };
+  });
+  await target.row.locator("span").first().click();
+  assert.equal(await page.evaluate(() => window.openedPosition), "P-1");
+});
+
+for (const action of ["BUY", "SELL"]) {
+  test(`live ${action} entry does not wait for another AI request when controls are verified`, async () => {
+    await page.reload();
+    let requests = 0;
+    const server = http.createServer((_request, response) => {
+      requests++;
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end('{"message":"browser planner unavailable"}');
+    });
+    await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+    const provider = createProvider({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: "fixture", apiKey: "key" });
+    try {
+      const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 101, quantity: 2, browserProvider: provider });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: "101", quantity: "2" }]);
+      assert.equal(requests, 0);
+    } finally { await new Promise(resolve => server.close(resolve)); }
+  });
+}
+
+test("verified row transfer completes with AI offline and retains the requested limit price", async () => {
+  await page.reload();
+  let requests = 0;
+  const server = http.createServer((_request, response) => {
+    requests++;
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end('{"message":"browser planner unavailable"}');
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const provider = createProvider({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: "fixture", apiKey: "key" });
+  try {
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", price: 21, quantity: 2,
+      exitType: "TAKE_PROFIT", orderType: "LIMIT", targetPositionIds: ["P-1"], browserProvider: provider });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
+    assert.equal(requests, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test("AI confirmation for an updated immediate dialog still fills the transfer limit", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    window.transfer = (id, quantity) => {
+      const box = document.createElement("div");
+      box.className = "el-dialog";
+      box.innerHTML = '<div>转让 测试商品</div><label>转让价格<input type="number" value="19"></label><button>确认转让</button>';
+      box.querySelector("button").onclick = () => {
+        window.exits.push({ id, price: box.querySelector("input").value, quantity: String(quantity) });
+        box.remove(); notice("转让成功");
+      };
+      document.body.append(box);
+    };
+  });
+  let requests = 0;
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const context = JSON.parse(JSON.parse(body).messages.at(-1).content).context;
+    requests++;
+    const control = context.page.controls.find(control => control.label === "确认转让");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: control ? [
+      { type: "click", field: "confirm", controlId: control.id, label: control.label },
+    ] : [] }) } }] }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const provider = createProvider({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: "fixture", apiKey: "key" });
+  try {
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", price: 21, quantity: 2,
+      exitType: "TAKE_PROFIT", orderType: "LIMIT", targetPositionIds: ["P-1"], browserProvider: provider });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
+    assert.equal(requests, 1);
+  } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
 test("delayed entry fields on a Page wait for rendering without calling Locator.page", async () => {
@@ -464,7 +552,7 @@ test("snapshot budget keeps the current dialog and exact target row before other
   assert.equal(snapshot.controls.some(control => control.rowText?.split(/\s+/).includes("P-10")), false);
 });
 
-test("AI snapshot selects custom transfer controls by exact holding after class updates", async () => {
+test("AI snapshot selects the exact custom transfer after class updates and row replacement", async () => {
   await page.reload();
   await page.evaluate(() => {
     for (const node of document.querySelectorAll(".spotS")) {
@@ -473,10 +561,11 @@ test("AI snapshot selects custom transfer controls by exact holding after class 
       node.removeAttribute("class");
       node.style.cursor = "pointer";
       node.addEventListener("click", handler);
+      if (node.textContent === "转让") node.textContent = "出让此单";
     }
   });
   const snapshot = await readTradeControls({ sessionId: "trade-fixture", targetPositionIds: ["P-1"] });
-  assert.ok(snapshot.snapshotControls.some(control => control.label === "转让" && control.rowText?.split(/\s+/).includes("P-1")));
+  assert.ok(snapshot.snapshotControls.some(control => control.label === "出让此单" && control.rowText?.split(/\s+/).includes("P-1")));
   assert.ok(snapshot.snapshotControls.some(control => control.label === "买入" && control.role === "button"));
   let wrongTarget = true;
   const server = http.createServer(async (request, response) => {
@@ -486,7 +575,14 @@ test("AI snapshot selects custom transfer controls by exact holding after class 
     const controls = context.page.controls;
     const control = context.goal === "CONFIRM_TRADE"
       ? controls.find(control => /确\s*定/.test(control.label))
-      : controls.find(control => control.label === "转让" && control.rowText?.split(/\s+/).includes(wrongTarget ? "P-10" : "P-1"));
+      : controls.find(control => control.label === "出让此单" && control.rowText?.split(/\s+/).includes(wrongTarget ? "P-10" : "P-1"));
+    if (!wrongTarget && context.goal === "EXIT_TRANSFER") await page.evaluate(() => {
+      const row = [...document.querySelectorAll("#positions tbody tr")].find(row => row.cells[3].textContent === "P-1");
+      const replacement = row.cloneNode(true);
+      replacement.querySelectorAll("[data-axiom-control]").forEach(node => node.removeAttribute("data-axiom-control"));
+      replacement.cells[4].querySelector("span").onclick = () => transfer("P-1", 2);
+      row.remove(); document.querySelector("#positions tbody").prepend(replacement);
+    });
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: control ? [
       { type: "click", field: context.goal === "CONFIRM_TRADE" ? "confirm" : "submit", controlId: control.id, label: control.label },
@@ -515,7 +611,7 @@ test("AI snapshot selects custom transfer controls by exact holding after class 
       document.body.prepend(navigation);
     });
     const crowded = await readTradeControls({ sessionId: "trade-fixture", targetPositionIds: ["P-1"] });
-    assert.ok(crowded.snapshotControls.some(control => control.label === "转让" && control.rowText?.split(/\s+/).includes("P-1")));
+    assert.ok(crowded.snapshotControls.some(control => control.label === "出让此单" && control.rowText?.split(/\s+/).includes("P-1")));
     const result = await submitSuggestionForm(input);
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.submittedQuantity, 2);

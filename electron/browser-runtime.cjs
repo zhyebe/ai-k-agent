@@ -198,3 +198,14 @@ function getCollectedMarket(marketRef, apiBaseUrl, userId) {
 }
 
 module.exports = { executeBrowserCall, closeBrowserRuntime, getCollectedMarket };
+if (process.env.AXIOM_BROWSER_SMOKE === "1") {
+  module.exports.setSmokeWindowState = async (state) => {
+    for (const host of activeSessions.values()) await host.evaluate(({ BrowserWindow }, state) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (state === "minimized") window.minimize();
+        else if (state === "hidden") { window.restore(); window.hide(); }
+        else { window.restore(); window.show(); }
+      }
+    }, state);
+  };
+}

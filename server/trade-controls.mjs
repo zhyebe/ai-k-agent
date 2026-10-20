@@ -195,7 +195,12 @@ export async function findPositionRows(page, { targetPositionIds = [], symbol = 
     }
     return matches;
   }, { targetPositionIds: targetPositionIds.map(String), symbol, symbolName, instrumentId, action });
-  return result.map((item) => ({ ...item, row: page.locator(ROWS).nth(item.index) }));
+  return result.map((item) => {
+    const cells = item.id ? page.locator("td, [role='cell']").filter({ hasText: new RegExp(`^\\s*${item.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) }) : null;
+    return { ...item, row: cells
+      ? page.locator(ROWS.split(", ").map(selector => `${selector}:visible`).join(", ")).filter({ has: cells }).first()
+      : page.locator(ROWS).nth(item.index) };
+  });
 }
 
 export async function preparePositionRows(page, input) {
@@ -227,7 +232,7 @@ export async function clickPositionTransfer(page, input) {
   const rows = await preparePositionRows(page, input);
   const target = input.targetPositionIds?.length || input.rowIndex == null ? rows[0] : rows.find((row) => row.index === input.rowIndex);
   if (!target) return { clicked: false, code: "EXIT_POSITION_NOT_FOUND" };
-  const control = await findControl(target.row, ["转让"], "button, input[type='button'], [role='button'], a, .spotS, [data-action], span");
+  const control = await findControl(target.row, ["转让"], "button, input[type='button'], [role='button'], a, .spotS, [data-action], span", false);
   if (!control) return { clicked: false, code: "EXIT_CONTROL_NOT_FOUND", targetPositionIds: input.targetPositionIds };
   try {
     await control.scrollIntoViewIfNeeded({ timeout: 2500 });
@@ -238,7 +243,7 @@ export async function clickPositionTransfer(page, input) {
   }
 }
 
-export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm } = {}) {
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
@@ -260,7 +265,8 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
         const prices = await box.locator("input").evaluateAll((inputs) => inputs.filter((node) => !node.disabled && node.type !== "checkbox").map((node) => Number(node.value)));
         if (!prices.some((value) => Number.isFinite(value) && value > 0)) continue;
       }
-      const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"]);
+      const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"], BUTTONS, false)
+        || (resolveConfirmation ? await resolveConfirmation(box) : null);
       if (!control || await control.isDisabled()) continue;
       if (canConfirm) {
         const price = await box.locator("input").evaluateAll((inputs) => inputs.filter(node => !node.disabled && node.type !== "checkbox").map(node => Number(node.value)).find(value => value > 0) ?? null);

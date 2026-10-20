@@ -780,8 +780,8 @@ export async function resolveSnapshotControl(page, controlId, { role = "", targe
   if (!id || !page) return null;
   const locator = page.locator(`[data-axiom-control="${id.replace(/"/g, "\\\"")}"]`).first();
   try {
-    if (await locator.count() !== 1 || !await locator.isVisible({ timeout: 800 }) || await locator.isDisabled().catch(() => false)) return null;
-    if (role && String(await locator.getAttribute("role") || "") !== role && !await locator.evaluate((node, expected) => {
+    if (await locator.count() !== 1 || !await locator.isVisible({ timeout: 800 }) || await locator.isDisabled({ timeout: 800 }).catch(() => true)) return null;
+    if (role && String(await locator.getAttribute("role", { timeout: 800 }) || "") !== role && !await locator.evaluate((node, expected) => {
       if (expected === "button") return node.matches("button, input[type='button'], input[type='submit'], a, [role='button'], [role='tab']")
         || (!node.matches("input, textarea, select, [contenteditable='true'], [role]")
           && (typeof node.onclick === "function" || node.tabIndex >= 0 || getComputedStyle(node).cursor === "pointer"));

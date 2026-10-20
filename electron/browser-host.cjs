@@ -3,12 +3,16 @@ const { app, BrowserWindow } = require("electron");
 if (process.env.AXIOM_BROWSER_SMOKE === "1") globalThis.axiomBrowserSmoke = require("./browser-smoke.cjs");
 app.setPath("userData", process.env.AXIOM_BROWSER_PROFILE);
 app.name = "Axiom Browser";
+// Windows occlusion/minimization must not suspend the timers and animation
+// frames Playwright waits for before filling or clicking a live trade form.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 app.whenReady().then(() => {
   const window = new BrowserWindow({
     title: "Axiom - 交易浏览器",
     width: 1440,
     height: 900,
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.loadURL("about:blank");

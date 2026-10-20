@@ -940,6 +940,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
             status: authExpired ? "UNVERIFIED" : "WAITING",
             retryAfterLogin: authExpired,
             formSubmitBlocked: false,
+            lastExecution: { code: String(error?.code || error?.message || "DESKTOP_BROWSER_CALL_FAILED").slice(0, 160), stage: "desktop_call", durationMs: Date.now() - submissionStartedAt, checkedAt: new Date().toISOString() },
             message: authExpired
               ? "登录态已失效；已自动恢复登录并继续核实本次动作，确认未成交后立即重试"
               : `确认后下单失败：${error?.message || "目标页未响应，请重试或取消"}`,
@@ -967,6 +968,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       }
       task.pendingAction.formFilled = submitted?.filled === true;
       task.pendingAction.executionDurationMs = Date.now() - submissionStartedAt;
+      task.pendingAction.lastExecution = { code: submitted?.code || "TRADE_SUBMIT_FAILED", stage: submitted?.stage || "prepare", uncertain: submitted?.uncertain === true, durationMs: task.pendingAction.executionDurationMs, checkedAt: new Date().toISOString() };
       if (task.pendingAction?.exitType && submitted?.completedPositionIds?.length) {
         const partial = { ...task.pendingAction, targetPositionIds: submitted.completedPositionIds };
         task.pendingAction = { ...partial, baselinePositionQty: pendingPositionQuantity(task.market, partial), suggestedQty: pendingPositionQuantity(task.market, partial) };
