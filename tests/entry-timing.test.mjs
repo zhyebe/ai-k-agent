@@ -55,7 +55,7 @@ for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
         return { action, targetSymbol: "DGKZ", orderType: "LIMIT", entryPrice: action === "BUY" ? 99 : 101, targetPrice: action === "BUY" ? 99 : 101,
           bullishProfitProbability: 0.62, bearishProfitProbability: 0.42, riskFlags: [], evidenceIds: [], decisionTtlSec: 300,
           holdingPlan: { decision: "HOLD_FOR_TARGET" }, exitPlans: positions.map(p => ({ positionId: p.positionOrderId, quantity: 1,
-            heldSide: p.side === "买入" ? "LONG" : "SHORT", takeProfitPrice: p.side === "买入" ? 110 : 90, validForSec: 300 })) };
+            heldSide: p.side === "买入" ? "LONG" : "SHORT", takeProfitPrice: p.orderPrice + (p.side === "买入" ? 4 : -4), validForSec: 300 })) };
       },
     };
     for (let round = 0; round < 3; round++) {

@@ -817,17 +817,17 @@ for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", 
         positionId: "P-1", heldSide: "LONG", quantity: 2, entryPrice: scenario === "break-even" ? 100 : 98, exitType: "TAKE_PROFIT",
         comparison: "EQ", triggerPrice: 100, expiresAt: new Date(Date.now() + 10000).toISOString(),
       }] } });
-    assert.equal(result.ok, ["valid", "break-even"].includes(scenario), JSON.stringify(result));
-    assert.equal((await page.evaluate(() => window.exits)).length, ["valid", "break-even"].includes(scenario) ? 1 : 0);
+    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, scenario === "valid" ? 1 : 0);
   });
 }
 
-for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [0.5, 5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
-  test(`${heldSide} position amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
+for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [2, 4, 4.5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
+  test(`${heldSide} profit points / stop amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
     const long = heldSide === "LONG";
-    const entryPrice = 100 - (long ? 1 : -1) * (threshold + 2) / 2;
-    const belowThresholdPrice = threshold === 0.5 ? 100 - (long ? 1 : -1) * threshold / 2
-      : 100 + (long ? 1 : -1) * (threshold > 0 ? -0.01 : 0.01);
+    const entryPrice = 100 - (long ? 1 : -1) * (threshold > 0 ? threshold : (threshold + 2) / 2);
+    const belowThresholdPrice = threshold > 0 ? 100 - (long ? 1 : -1) * (threshold - (threshold === 4.5 ? 4 : 2) + 0.01)
+      : 100 + (long ? 1 : -1) * 0.01;
     const dialogPrice = scenario === "dialog-changed" ? belowThresholdPrice : 100;
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div>实时货值变化 -100元</div>')
@@ -858,11 +858,11 @@ for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [0.5, 5, -3]) 
         if (scenario === "frozen") target.children[7].textContent = "1";
       };
     }, { long, entryPrice, scenario, belowThresholdPrice });
-    const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: 2 };
+    const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: threshold === 4.5 ? 11 : 2 };
     const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true, positions: [position] },
       orderBook: { bids: [{ price: 100, volume: 30 }], asks: [{ price: 100, volume: 20 }] } };
-    const candidate = threshold === 0.5 ? positionProfitExit(position, market) : positionAmountExit(position, market);
-    assert.equal(candidate.netPnl, threshold);
+    const candidate = threshold > 0 ? positionProfitExit(position, market) : positionAmountExit(position, market);
+    assert.equal(candidate.netPnl, threshold > 0 ? threshold * 2 - position.roundTripFee : threshold);
     if (scenario === "expired") candidate.decision.exitGuard.expiresAt = new Date(Date.now() - 1).toISOString();
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: 2 });
     assert.equal(result.ok, scenario === "valid", JSON.stringify(result));

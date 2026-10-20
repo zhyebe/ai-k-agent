@@ -85,7 +85,7 @@ for (const heldSide of ["LONG", "SHORT"]) {
   test(`${heldSide}: positive account total does not make a losing position eligible for profit-taking`, () => {
     const isLong = heldSide === "LONG";
     const position = (id, entry) => ({ positionOrderId: id, symbol: "DGKZ", side: isLong ? "买入" : "卖出", orderPrice: entry, quantity: 1, roundTripFee: 1 });
-    const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { realtimeValueChange: 2, positionsVerified: true, positions: [position("P-profit", isLong ? 100 : 103), position("P-loss", isLong ? 103 : 100)] }, orderBook: { bids: [{ price: 101.5, volume: 100 }], asks: [{ price: 101.5, volume: 100 }] } };
+    const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { realtimeValueChange: 2, positionsVerified: true, positions: [position("P-profit", isLong ? 99.5 : 103.5), position("P-loss", isLong ? 103 : 100)] }, orderBook: { bids: [{ price: 101.5, volume: 100 }], asks: [{ price: 101.5, volume: 100 }] } };
     const decision = { action: isLong ? "SELL" : "BUY", exitType: "TAKE_PROFIT", targetPositionIds: ["P-profit"] };
     assert.equal(attachPositionExit(decision, market).exitType, "TAKE_PROFIT");
     const mixed = attachPositionExit({ ...decision, targetPositionIds: ["P-profit", "P-loss"] }, market);

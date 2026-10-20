@@ -31,15 +31,15 @@ async function oldTradingSkill(version = "v0.3.76") {
 
 test("only exact reviewed legacy and short-term Skills receive trend restoration and loss protection", async () => {
   const bundled = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
-  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102"]) {
+  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107"]) {
     const previous = await oldTradingSkill(version);
     const revision = await tradingSkillUpgrade(previous);
-    assert.equal(revision.version, "v0.3.107");
+    assert.equal(revision.version, "v0.3.108");
     assert.equal(revision.content, bundled);
     assert.match(revision.content, /5 根只是示例，不是盈利目标或持仓上限/);
     assert.match(revision.content, /亏 1 个点先结合趋势/);
     assert.match(revision.content, /亏损时比较等待恢复盈利与及时止损/);
-    assert.match(revision.content, /执行用户 \+5\/-3 金额边界/);
+    assert.match(revision.content, /程序执行用户点差边界、-3 金额止损/);
     assert.doesNotMatch(revision.content, /realtimeValueChange >= 2/);
     assert.equal(await tradingSkillUpgrade({ ...previous, ...revision }), null);
     for (const change of [{ id: "unrelated" }, { status: "REVIEW" }, { version: "newer" }, { content: `${previous.content}\n用户新增内容` }, { version: version === "v0.3.84" ? "v0.3.76" : "v0.3.84" }]) {
@@ -50,7 +50,7 @@ test("only exact reviewed legacy and short-term Skills receive trend restoration
 
 test("MySQL upgrades the reviewed Skill once and loads the persisted revision into AI context", async t => {
   databaseMode(t, "mysql");
-  const old = await oldTradingSkill("v0.3.102");
+  const old = await oldTradingSkill("v0.3.107");
   let row = { ...old };
   let writes = 0;
   mysqlPool = {
@@ -71,12 +71,12 @@ test("MySQL upgrades the reviewed Skill once and loads the persisted revision in
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
     hydrateState({ skills: snapshot.skills });
-    assert.equal(state.skills[0].version, "v0.3.107");
+    assert.equal(state.skills[0].version, "v0.3.108");
     assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
     assert.deepEqual(state.skills[0].tags, ["优先参考"]);
     const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
     assert.ok(prompt.includes(row.content));
-    assert.match(prompt, /单笔持仓总盈亏金额 ≥ \+5 自动止盈、≤ -3 自动止损/);
+    assert.match(prompt, /多空统一按有利价格点差设定 2～4 点收益目标/);
     assert.match(prompt, /亏损时比较等待恢复盈利与及时止损/);
     assert.match(prompt, /多周期结构/);
     assert.match(prompt, /5 根只是示例，不是盈利目标或持仓上限/);
@@ -151,7 +151,7 @@ test("MongoDB upgrades the same reviewed Skill and reloads persisted content", a
   t.after(() => adapter.close());
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
-    assert.equal(snapshot.skills[0].version, "v0.3.107");
+    assert.equal(snapshot.skills[0].version, "v0.3.108");
     assert.match(snapshot.skills[0].content, /亏 1 个点先结合趋势/);
     assert.equal(snapshot.skills[0].ownerUserId, "author");
   }

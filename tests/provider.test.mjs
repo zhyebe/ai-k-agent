@@ -501,14 +501,14 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
   let calls = 0;
   let correctedPlan = true;
   const response = { action: "HOLD", bullish_profit_probability: 0.3, bearish_profit_probability: 0.2, holding_plan: { decision: "HOLD_FOR_TARGET" } };
-  const plan = { position_id: "P-1", held_side: "LONG", quantity: 2, valid_for_sec: 90, take_profit_price: 105, stop_loss_price: 99, rationale: "profit path invalidates below 99" };
+  const plan = { position_id: "P-1", held_side: "LONG", quantity: 2, valid_for_sec: 90, take_profit_price: 104, stop_loss_price: 99, rationale: "profit path invalidates below 99" };
   t.mock.method(globalThis, "fetch", async (_url, options) => {
     const body = JSON.parse(options.body);
     calls += 1;
     if (calls % 2 === 0) {
       assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
       assert.match(body.messages.at(-1).content, /Forecast trend, entry and exit together/);
-      assert.match(body.messages.at(-1).content, /金额不是每单位价差，也不是账户总盈亏/);
+      assert.match(body.messages.at(-1).content, /不乘数量，不是整仓金额、账户汇总、百分比或K线根数/);
       assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
       assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
     } else {
@@ -521,7 +521,7 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
   const context = { executionPolicy: { conditionalExits: true }, account: { positionsVerified: true, positions: [{ positionOrderId: "P-1", side: "买涨", quantity: 2, orderPrice: 100, frozenQuantity: 0 }] } };
   const corrected = await requestDecision(provider, context, { fastAnalysis: true });
   assert.equal(calls, 2);
-  assert.deepEqual(corrected.exitPlans, [{ positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 90, takeProfitPrice: 105, stopLossPrice: 99, rationale: plan.rationale }]);
+  assert.deepEqual(corrected.exitPlans, [{ positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 90, takeProfitPrice: 104, stopLossPrice: 99, rationale: plan.rationale }]);
   assert.equal(corrected.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
   correctedPlan = false;
   const incomplete = await requestDecision(provider, context, { fastAnalysis: true });
@@ -776,10 +776,10 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /亏损也是预测对象/);
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
-    assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
-    assert.match(prompt, /已核实当前可成交净收益大于0就立即EXIT_NOW\/TAKE_PROFIT/);
-    assert.match(prompt, /5是上限而非等待目标/);
-    assert.match(prompt, /小额净利自动兑现要求费用已核实/);
+    assert.match(prompt, /多空统一按每单位有利价格点差设定2～4点目标/);
+    assert.match(prompt, /达到至少2点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /4点为硬上限/);
+    assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
@@ -792,7 +792,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
-    assert.match(prompt, /TAKE_PROFIT requires nonnegative executable net profit versus real entry price/);
+    assert.match(prompt, /TAKE_PROFIT requires at least 2 favorable executable price points and nonnegative net PnL/);
     assert.match(prompt, /STOP_LOSS requires evidence-based adverse-path and recovery analysis/);
     assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(prompt, /Price response outranks static displayed depth/);
@@ -895,7 +895,7 @@ for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
       assert.equal(result.action, "SELL");
       assert.equal(result.exitType, exitType);
       assert.deepEqual(result.targetPositionIds, ["P-risk"]);
-      assert.match(requests[1].messages.at(-1).content, /compare exiting now with holding through the next relevant move/);
+      assert.match(requests[1].messages.at(-1).content, /TAKE_PROFIT requires >=2 favorable executable points/);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1245,10 +1245,10 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
     assert.match(prompt, /收益与风险必须一起预测/);
-    assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
-    assert.match(prompt, /已核实当前可成交净收益大于0就立即EXIT_NOW\/TAKE_PROFIT/);
-    assert.match(prompt, /5是上限而非等待目标/);
-    assert.match(prompt, /小额净利自动兑现要求费用已核实/);
+    assert.match(prompt, /多空统一按每单位有利价格点差设定2～4点目标/);
+    assert.match(prompt, /达到至少2点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /4点为硬上限/);
+    assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
