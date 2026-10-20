@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test, { after, before } from "node:test";
 import { chromium } from "playwright";
-import { closeAllBrowserSessions, openBrowserPage, setBrowserSessionFactory } from "../server/browser.mjs";
+import { closeAllBrowserSessions, openBrowserPage, resolveSnapshotControl, setBrowserSessionFactory } from "../server/browser.mjs";
 import { browserLoginStatus, browserLoginWithCredential, browserScanControls } from "../server/tools.mjs";
 import { parseHaohanPageSnapshot } from "../server/haohan.mjs";
 import { createProvider } from "../server/provider.mjs";
@@ -15,14 +15,34 @@ before(async () => {
   browser = await chromium.launch({ ...(process.platform === "darwin" ? { channel: "chrome" } : {}), headless: true });
   const context = await browser.newContext();
   page = await context.newPage();
-  await page.route("**/*", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: `<div id="view"></div><script>
+  await page.route("**/*", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: `<style>
+    .el-checkbox { display: inline-block; cursor: pointer; }
+    .el-checkbox__input { display: inline-block; position: relative; }
+    .el-checkbox__inner { display: inline-block; width: 14px; height: 14px; border: 1px solid; }
+    .el-checkbox__original { opacity: 0; position: absolute; width: 0; height: 0; margin: 0; }
+    .note { cursor: pointer; }
+  </style><div id="view"></div><script>
     sessionStorage.setItem('sessionStr', 'expired-fixture'); sessionStorage.setItem('userId', 'fixture');
     function render() {
       document.getElementById('view').innerHTML = location.hash === '#/login'
-        ? (sessionStorage.getItem('ai-fixture') ? '<section aria-label="账户登录"><label>账号<input name="account" type="text"></label><label>登录密码<input name="secret" type="password"></label><label><input type="checkbox">我已阅读并同意协议</label><button type="button" data-action="signin">进入系统</button></section>' : '<input placeholder="请输入手机号码"><input type="password" placeholder="请输入密码"><button id="login-submit">登录</button>')
+        ? (sessionStorage.getItem('ai-fixture') ? '<section aria-label="账户登录"><label>账号<input name="account" type="text"></label><label>登录密码<input name="secret" type="password"></label>' +
+          (sessionStorage.getItem('checkbox-style') === 'element'
+            ? '<label class="el-checkbox"><span class="el-checkbox__input"><span class="el-checkbox__inner"></span><input type="checkbox" aria-hidden="false" class="el-checkbox__original" value="1"></span><span class="el-checkbox__label">阅读并同意 <span class="note">《风险告知》</span><span class="note">《入市须知》</span><span class="note">《用户协议》</span><span class="note">《隐私政策》</span></span></label>'
+            : '<label><input type="checkbox">我已阅读并同意协议</label>') +
+          '<button type="button" data-action="signin">进入系统</button></section>' : '<input placeholder="请输入手机号码"><input type="password" placeholder="请输入密码"><button id="login-submit">登录</button>')
         : '<div id="v-content">最新价 103 持仓明细</div>';
       document.getElementById('login-submit')?.addEventListener('click', () => { location.hash = '#/transcc'; });
-      document.querySelector('[data-action="signin"]')?.addEventListener('click', () => { location.hash = '#/transcc'; });
+      const consent = document.querySelector('input[type="checkbox"]');
+      if (consent) consent.checked = sessionStorage.getItem('consent-checked') === 'true';
+      window.consentChanges = 0; window.documentOpens = 0; window.submissions = 0;
+      consent?.addEventListener('change', () => { window.consentChanges += 1; });
+      document.querySelectorAll('.note').forEach(node => node.addEventListener('click', event => {
+        event.preventDefault(); event.stopPropagation(); window.documentOpens += 1;
+      }));
+      document.querySelector('[data-action="signin"]')?.addEventListener('click', () => {
+        window.submissions += 1;
+        if (consent.checked && document.querySelector('[name="account"]').value === 'fixture' && document.querySelector('[name="secret"]').value === 'fixture-password') location.hash = '#/transcc';
+      });
     }
     addEventListener('hashchange', render); render();
   </script>` }));
@@ -62,7 +82,7 @@ test("last-login information on a valid quotation page is not an expired session
   assert.equal((await browserLoginStatus(input)).authenticated, true);
 });
 
-test("AI snapshot selects updated login controls without adapter selectors", async () => {
+for (const style of ["native", "element"]) for (const checked of [false, true]) test(`AI login accepts ${style} consent initially ${checked ? "checked" : "unchecked"}`, async () => {
   const server = http.createServer(async (request, response) => {
     let body = "";
     for await (const chunk of request) body += chunk;
@@ -87,11 +107,23 @@ test("AI snapshot selects updated login controls without adapter selectors", asy
   const provider = createProvider({ baseUrl: `http://127.0.0.1:${address.port}/v1`, model: "fixture", apiKey: "key" });
   try {
     await page.goto(target.replace("transcc", "login"));
-    await page.evaluate(() => sessionStorage.setItem("ai-fixture", "1"));
+    await page.evaluate(({ style, checked }) => {
+      sessionStorage.setItem("ai-fixture", "1");
+      sessionStorage.setItem("checkbox-style", style);
+      sessionStorage.setItem("consent-checked", String(checked));
+    }, { style, checked });
     await page.reload();
     const scanned = await browserScanControls({ sessionId });
     assert.equal(scanned.ok, true);
     assert.ok(scanned.controls.some((control) => control.type === "password"));
+    const checkboxes = scanned.controls.filter(control => control.role === "checkbox");
+    assert.equal(checkboxes.length, 1);
+    assert.match(checkboxes[0].label, /同意/);
+    assert.equal(checkboxes[0].checked, checked);
+    const filled = await browserLoginWithCredential({ ...input, submit: false, browserProvider: provider }, { username: "fixture", password: "fixture-password", target: { url: target } });
+    assert.equal(filled.code, "LOGIN_FILLED_NOT_SUBMITTED", JSON.stringify(filled));
+    assert.equal(await page.locator('input[type="checkbox"]').isChecked(), true);
+    assert.deepEqual(await page.evaluate(() => ({ changes: window.consentChanges, opens: window.documentOpens, submissions: window.submissions })), { changes: checked ? 0 : 1, opens: 0, submissions: 0 });
     const result = await browserLoginWithCredential({ ...input, browserProvider: provider }, { username: "fixture", password: "fixture-password", target: { url: target } });
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.authenticated, true);
@@ -99,4 +131,18 @@ test("AI snapshot selects updated login controls without adapter selectors", asy
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
+});
+
+test("snapshot checkbox rejects a disabled associated input or a replaced label", async () => {
+  await page.goto(target.replace("transcc", "login"));
+  await page.evaluate(() => { sessionStorage.setItem("ai-fixture", "1"); sessionStorage.setItem("checkbox-style", "element"); });
+  await page.reload();
+  const snapshot = await browserScanControls({ sessionId });
+  const consent = snapshot.controls.find(control => control.role === "checkbox");
+  assert.ok(consent);
+  await page.locator('input[type="checkbox"]').evaluate(node => { node.disabled = true; });
+  assert.equal(await resolveSnapshotControl(page, consent.id, { role: "checkbox" }), null);
+  assert.equal((await browserScanControls({ sessionId })).controls.some(control => control.role === "checkbox"), false);
+  await page.reload();
+  assert.equal(await resolveSnapshotControl(page, consent.id, { role: "checkbox" }), null);
 });

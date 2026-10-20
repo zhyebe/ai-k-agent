@@ -75,7 +75,7 @@ function planActions(plan) {
 
 async function requestLiveBrowserPlan(page, provider, context = {}) {
   if (!provider) return { ok: false, code: "BROWSER_AI_PROVIDER_REQUIRED", actions: [], snapshot: null };
-  const snapshot = await scanBrowserPage(page);
+  const snapshot = await scanBrowserPage(page, { targetPositionIds: context.targetPositionIds });
   if (!snapshot.ok) return { ...snapshot, actions: [] };
   const plan = await requestBrowserActions(provider, {
     ...context,
@@ -102,6 +102,19 @@ async function clickPlannedControl(page, action, options = {}) {
   const control = await resolvePlannedControl(page, action, options);
   if (!control) return false;
   await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+  if (options.role === "checkbox") {
+    if (await control.isChecked()) return true;
+    if (await control.evaluate(node => node instanceof HTMLLabelElement)) {
+      // Click the checkbox edge of the label. Its center may contain a link
+      // that opens an agreement document and prevents the label's activation.
+      const box = await control.boundingBox();
+      if (!box) return false;
+      await control.click({ position: { x: 1, y: box.height / 2 }, timeout: 5000 });
+    } else {
+      await control.check({ timeout: 5000 });
+    }
+    return control.isChecked();
+  }
   await control.click({ timeout: 5000 });
   return true;
 }
@@ -651,7 +664,7 @@ export async function readTradeControls({ sessionId = "default", symbol = "", sy
     const selected = await selectPageBoardInstrument(sessionId, { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") });
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", buttons: [], fields: [], rowActions: [] };
   }
-  const liveSnapshot = await scanBrowserControls(sessionId).catch(() => ({ ok: false, controls: [] }));
+  const liveSnapshot = await scanBrowserControls(sessionId, { targetPositionIds }).catch(() => ({ ok: false, controls: [] }));
   const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
   try {
     const snapshot = await page.evaluate(({ targetIds }) => {

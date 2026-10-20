@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test, { after, before } from "node:test";
 import { chromium } from "playwright";
-import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSessionFactory } from "../server/browser.mjs";
+import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, scanBrowserPage, setBrowserSessionFactory } from "../server/browser.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
 import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 import { createProvider } from "../server/provider.mjs";
@@ -446,6 +446,24 @@ test("visible input buttons and position span controls are collected", async () 
   assert.ok(controls.rowActions.some((item) => item.label === "转让"));
 });
 
+test("snapshot budget keeps the current dialog and exact target row before other controls", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const navigation = document.createElement("nav");
+    navigation.innerHTML = '<button>导航</button>'.repeat(150);
+    document.body.prepend(navigation);
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.innerHTML = '<button>确认转让</button>';
+    document.body.append(dialog);
+  });
+  const snapshot = await scanBrowserPage(page, { maxControls: 3, targetPositionIds: ["P-1"] });
+  assert.equal(snapshot.controls.length, 3);
+  assert.equal(snapshot.controls[0].label, "确认转让");
+  assert.ok(snapshot.controls.some(control => control.label === "转让" && control.rowText?.split(/\s+/).includes("P-1")));
+  assert.equal(snapshot.controls.some(control => control.rowText?.split(/\s+/).includes("P-10")), false);
+});
+
 test("AI snapshot selects custom transfer controls by exact holding after class updates", async () => {
   await page.reload();
   await page.evaluate(() => {
@@ -484,10 +502,25 @@ test("AI snapshot selects custom transfer controls by exact holding after class 
     assert.equal(rejected.code, "EXIT_CONTROL_NOT_FOUND");
     assert.deepEqual(await page.evaluate(() => window.exits), []);
     wrongTarget = false;
+    // The live trading page has more than 120 controls before the target row.
+    // Navigation must not crowd that row or its confirmation out of the plan.
+    await page.evaluate(() => {
+      const navigation = document.createElement("nav");
+      for (let index = 0; index < 150; index += 1) {
+        const button = document.createElement("button");
+        button.textContent = `导航 ${index}`;
+        button.onclick = () => { window.unexpectedNavigation = true; };
+        navigation.append(button);
+      }
+      document.body.prepend(navigation);
+    });
+    const crowded = await readTradeControls({ sessionId: "trade-fixture", targetPositionIds: ["P-1"] });
+    assert.ok(crowded.snapshotControls.some(control => control.label === "转让" && control.rowText?.split(/\s+/).includes("P-1")));
     const result = await submitSuggestionForm(input);
     assert.equal(result.ok, true, JSON.stringify(result));
     assert.equal(result.submittedQuantity, 2);
     assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
+    assert.equal(await page.evaluate(() => Boolean(window.unexpectedNavigation)), false);
   } finally {
     await new Promise(resolve => server.close(resolve));
   }

@@ -675,11 +675,11 @@ export async function scanBrowserControls(sessionId = "default", options = {}) {
   return snapshot.ok ? { ...snapshot, sessionId } : snapshot;
 }
 
-export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000 } = {}) {
+export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000, targetPositionIds = [] } = {}) {
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", controls: [] };
   const token = `axiom-snapshot-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
   try {
-    const snapshot = await page.evaluate(({ token: snapshotToken, max: limit, textLimit }) => {
+    const snapshot = await page.evaluate(({ token: snapshotToken, max: limit, textLimit, targetIds }) => {
       const visible = (node) => {
         if (!node || !(node instanceof Element)) return false;
         const style = window.getComputedStyle(node);
@@ -696,6 +696,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
         return compact(explicit?.innerText || parent?.innerText || labelledText || node.getAttribute("aria-label") || node.getAttribute("title") || "");
       };
       const roleFor = (node) => {
+        if (node instanceof HTMLLabelElement && node.control?.matches("input[type='checkbox']")) return "checkbox";
         const explicit = node.getAttribute("role");
         if (explicit) return explicit;
         if (node.matches("button, input[type='button'], input[type='submit']")) return "button";
@@ -703,26 +704,49 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
         if (node.matches("input, textarea, select")) return node.type === "checkbox" ? "checkbox" : "textbox";
         return "button";
       };
-      const selector = "button, input, textarea, select, [role='button'], [role='checkbox'], [role='tab'], a, summary, [contenteditable='true']";
+      // Styled checkboxes often hide the native input (0 x 0). Its visible
+      // associated label is the actionable control, with state from the input.
+      const checkboxLabels = new Map();
+      document.querySelectorAll("label").forEach((label) => {
+        if (label.control?.matches("input[type='checkbox']") && visible(label) && !checkboxLabels.has(label.control)) checkboxLabels.set(label.control, label);
+      });
+      const selector = "button, input, textarea, select, label, [role='button'], [role='checkbox'], [role='tab'], a, summary, [contenteditable='true']";
       const customControl = (node) => typeof node.onclick === "function" || node.tabIndex >= 0 || getComputedStyle(node).cursor === "pointer";
+      const rowSelector = "tr, [role='row'], .el-table__row, .position-row";
+      const rowKey = value => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      const wanted = targetIds.map(rowKey).filter(Boolean);
+      const targetRows = new Set(wanted.length ? [...document.querySelectorAll(rowSelector)].filter(row => {
+        const cells = [...row.querySelectorAll("td, [role='cell']")];
+        const values = cells.length ? cells.map(cell => cell.innerText) : String(row.innerText || "").split(/\s+/);
+        return values.some(value => wanted.includes(rowKey(value)));
+      }) : []);
+      // Keep the current dialog and exact requested rows inside the snapshot
+      // budget even when navigation and quotation controls fill the page.
+      const priority = node => node.closest("dialog, [role='dialog'], [aria-modal='true'], .el-dialog, .el-message-box") ? 0
+        : targetRows.has(node.closest(rowSelector)) ? 1 : 2;
+      const candidates = [...document.querySelectorAll(`${selector}, [onclick], [tabindex], div, span`)];
+      candidates.sort((left, right) => priority(left) - priority(right));
       const controls = [];
-      document.querySelectorAll(`${selector}, [onclick], [tabindex], div, span`).forEach((node) => {
+      candidates.forEach((node) => {
         if (controls.length >= limit || !visible(node)) return;
+        const checkbox = node instanceof HTMLLabelElement ? node.control : null;
+        if (node.matches("label") && checkboxLabels.get(checkbox) !== node) return;
+        if (checkboxLabels.has(node)) return;
         if (!node.matches(selector)) {
           if (!customControl(node) || node.closest(selector) || node.querySelector(selector)) return;
           // Pointer styling can be inherited by wrappers and children. Keep
           // the visible leaf instead of exposing the same action repeatedly.
           if ([...node.children].some(child => visible(child) && customControl(child) && compact(child.textContent) === compact(node.textContent))) return;
         }
-        if (node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true") return;
+        if (node.matches(":disabled") || node.getAttribute("aria-disabled") === "true" || checkbox?.matches(":disabled")) return;
         const role = roleFor(node);
-        const type = compact(node.getAttribute("type") || (node instanceof HTMLInputElement ? node.type : ""), 30);
+        const type = compact(checkbox?.type || node.getAttribute("type") || (node instanceof HTMLInputElement ? node.type : ""), 30);
         const sensitiveValue = ["password", "text", "tel", "email"].includes(type.toLowerCase());
         const label = compact((!sensitiveValue && node.value) || labelFor(node) || node.innerText || node.textContent, 120);
         const placeholder = compact(node.getAttribute("placeholder"), 120);
         const name = compact(node.getAttribute("name"), 80);
         const text = compact(node.innerText || node.textContent, 160);
-        if (!label && !placeholder && !name && role !== "textbox") return;
+        if (!label && !placeholder && !name && role !== "textbox" && role !== "checkbox") return;
         const id = `${snapshotToken}-${controls.length + 1}`;
         node.setAttribute("data-axiom-control", id);
         controls.push({
@@ -734,7 +758,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
           placeholder,
           name,
           rowText: compact(node.closest("tr, [role='row'], .el-table__row, .position-row")?.innerText, 500) || undefined,
-          checked: role === "checkbox" ? Boolean(node.checked || node.getAttribute("aria-checked") === "true") : undefined,
+          checked: role === "checkbox" ? Boolean(checkbox ? checkbox.checked : node.checked || node.getAttribute("aria-checked") === "true") : undefined,
           value: sensitiveValue ? undefined : compact(node.value, 120),
         });
       });
@@ -744,7 +768,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
         text: compact(document.body?.innerText, textLimit),
         controls,
       };
-    }, { token, max: Math.min(240, Math.max(1, Number(maxControls) || 120)), textLimit: Math.min(20000, Math.max(1000, Number(maxText) || 12000)) });
+    }, { token, max: Math.min(240, Math.max(1, Number(maxControls) || 120)), textLimit: Math.min(20000, Math.max(1000, Number(maxText) || 12000)), targetIds: Array.isArray(targetPositionIds) ? targetPositionIds.map(String) : [] });
     return { ok: true, snapshotToken: token, ...snapshot };
   } catch (error) {
     return { ok: false, code: "BROWSER_SNAPSHOT_FAILED", message: error.message, controls: [] };
@@ -762,9 +786,11 @@ export async function resolveSnapshotControl(page, controlId, { role = "", targe
         || (!node.matches("input, textarea, select, [contenteditable='true'], [role]")
           && (typeof node.onclick === "function" || node.tabIndex >= 0 || getComputedStyle(node).cursor === "pointer"));
       if (expected === "textbox") return node.matches("input:not([type='checkbox']):not([type='radio']), textarea, select, [contenteditable='true']");
-      if (expected === "checkbox") return node.matches("input[type='checkbox'], [role='checkbox']");
+      if (expected === "checkbox") return node.matches("input[type='checkbox'], [role='checkbox']")
+        || (node instanceof HTMLLabelElement && node.control?.matches("input[type='checkbox']"));
       return false;
     }, role)) return null;
+    if (role === "checkbox" && await locator.evaluate(node => node instanceof HTMLLabelElement && (!node.control || node.control.matches(":disabled")))) return null;
     if (targetPositionIds.length) {
       const wanted = targetPositionIds.map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
       const rowValues = await locator.evaluate((node) => {
