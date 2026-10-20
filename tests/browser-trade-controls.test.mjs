@@ -9,6 +9,7 @@ import { positionAmountExit } from "../server/exit-policy.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
+import { activateTradeControl, fillTradeFields } from "../server/trade-controls.mjs";
 
 let browser;
 let page;
@@ -24,6 +25,102 @@ after(async () => {
   await closeAllBrowserSessions();
   setBrowserSessionFactory(null);
   await browser?.close();
+});
+
+test("delayed entry fields on a Page wait for rendering without calling Locator.page", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const buy = document.querySelector("#buy");
+    const fields = [...buy.querySelectorAll("li")];
+    fields.forEach(field => field.remove());
+    setTimeout(() => fields.reverse().forEach(field => buy.prepend(field)), 650);
+  });
+  const result = await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 2 });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(await page.locator("#buy-price").inputValue(), "101");
+  assert.equal(await page.locator("#buy-qty").inputValue(), "2");
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+});
+
+test("nested page wrappers do not intercept side and entry tab selection", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const wrapper = document.createElement("div");
+    for (const node of [...document.body.children]) wrapper.append(node);
+    document.body.append(wrapper);
+    pane("transfer");
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", price: 100, quantity: 1 });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "SELL", price: "100", quantity: "1" }]);
+});
+
+test("missing entry fields return a field diagnostic without a page interface crash", async () => {
+  await page.reload();
+  await page.locator("#buy-qty").evaluate(node => node.remove());
+  const result = await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 2 });
+  assert.equal(result.code, "FORM_FIELDS_NOT_FOUND", JSON.stringify(result));
+  assert.equal(result.submitted, false);
+});
+
+test("missing side tab never clicks a submit button with a partially matching label", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    document.querySelectorAll(".trade_btn, .tab_btn").forEach(node => node.remove());
+    const button = document.createElement("button");
+    button.textContent = "买入订立";
+    button.onclick = () => { window.unexpectedSubmit = true; };
+    document.body.prepend(button);
+  });
+  assert.equal(await activateTradeControl(page, "买入"), false);
+  assert.equal(await page.evaluate(() => Boolean(window.unexpectedSubmit)), false);
+});
+
+test("dialog scope waits for delayed fields using its explicit Page", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const box = document.createElement("div");
+    box.id = "delayed-dialog";
+    document.body.append(box);
+    setTimeout(() => { box.innerHTML = '<label>转让价格<input type="number"></label>'; }, 650);
+  });
+  const fields = await fillTradeFields(page, [{ labels: ["转让价格"], value: 102 }], page.locator("#delayed-dialog"));
+  assert.deepEqual(fields, ["转让价格"]);
+  assert.equal(await page.locator("#delayed-dialog input").inputValue(), "102");
+  assert.equal(await page.locator("#buy-price").inputValue(), "");
+});
+
+test("shared field containers keep explicit labels bound to their own inputs", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    document.querySelector("#buy").innerHTML = '<div><label for="price">买价</label><input id="price"><label for="quantity">买量</label><input id="quantity"></div>';
+  });
+  const fields = await fillTradeFields(page, [{ labels: ["买价"], value: 101 }, { labels: ["买量"], value: 2 }]);
+  assert.deepEqual(fields, ["买价", "买量"]);
+  assert.equal(await page.locator("#price").inputValue(), "101");
+  assert.equal(await page.locator("#quantity").inputValue(), "2");
+});
+
+test("replaced fields are resolved again without filling another input by stale index", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const field = document.querySelector("#buy-price");
+    const observer = new MutationObserver(() => {
+      observer.disconnect();
+      const replacement = field.cloneNode(true);
+      delete replacement.dataset.axiomControl;
+      field.replaceWith(replacement);
+      const unrelated = document.createElement("input");
+      unrelated.id = "unrelated-field";
+      unrelated.value = "unchanged";
+      document.body.prepend(unrelated);
+    });
+    observer.observe(field, { attributes: true, attributeFilter: ["data-axiom-control"] });
+  });
+  const fields = await fillTradeFields(page, [{ labels: ["买价"], value: 102 }]);
+  assert.deepEqual(fields, ["买价"]);
+  assert.equal(await page.locator("#buy-price").inputValue(), "102");
+  assert.equal(await page.locator("#unrelated-field").inputValue(), "unchanged");
 });
 
 test("collection reads current orders and restores holdings without mixing history", async () => {

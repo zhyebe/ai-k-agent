@@ -15,7 +15,18 @@ module.exports = async function inspectBrowser({ app }, input) {
     const page = await browser.getBrowserPage(ids[0]);
     const orderBook = parseHaohanOrderBook(opened.visibleText);
     const sessionId = "task:fixture";
+    await page.evaluate(() => {
+      const wrapper = document.createElement("div");
+      for (const node of [...document.body.children]) wrapper.append(node);
+      document.body.append(wrapper);
+      pane("transfer");
+      const buy = document.querySelector("#buy");
+      const fields = [...buy.querySelectorAll("li")];
+      fields.forEach(field => field.remove());
+      setTimeout(() => fields.reverse().forEach(field => buy.prepend(field)), 1200);
+    });
     const manual = await call("fillSuggestionForm", { sessionId, action: "BUY", price: 20, quantity: 1 });
+    if (!manual.ok) throw new Error(JSON.stringify(manual));
     const manualBeforeClick = await page.evaluate(() => window.entries.length);
     await page.locator('input[type="button"][value="买入订立"]').click();
     await page.locator(".el-message-box").waitFor();

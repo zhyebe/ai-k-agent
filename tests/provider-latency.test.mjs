@@ -24,6 +24,10 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const messages = body.input || body.messages || body.contents.map(m => ({ role: m.role, content: m.parts[0].text }));
     const system = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
     assert.equal(system.split("每轮 analysis_summary 首句明确写").length - 1, 1);
+    assert.match(system, /短期恢复价、预计到价时间和失效条件/);
+    assert.match(system, /禁止无新证据反复延后恢复时间或放宽止损/);
+    assert.match(system, /恢复未按期发生、路径失效或没有证据支持续抱时果断STOP_LOSS/);
+    assert.match(system, /≥\+5自动止盈，≤-3自动止损/);
     const rounds = messages.filter(m => m.content.includes('"type":"prior_monitoring_round"')).map(m => JSON.parse(m.content));
     const decisions = messages.filter(m => ["assistant", "model"].includes(m.role)).map(m => JSON.parse(m.content));
     assert.equal(rounds.length, 8);

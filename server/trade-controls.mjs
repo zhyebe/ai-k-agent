@@ -3,26 +3,36 @@ import { paginationText, turnOrderPage, waitForAccountTable } from "./order-cont
 const BUTTONS = "button, input[type='button'], input[type='submit'], [role='button'], a";
 const TABS = "button, [role='tab'], .el-tabs__item, .el-radio-button__inner, .trade_btn, .tab_btn, .header_l_item, span, a, div";
 const ROWS = "tr, [role='row'], .el-table__row, .position-row";
+let controlSequence = 0;
+const controlToken = () => `control-${Date.now()}-${++controlSequence}`;
 
-async function findControl(root, labels, selector = BUTTONS) {
-  const index = await root.locator(selector).evaluateAll((nodes, wanted) => {
+async function findControl(root, labels, selector = BUTTONS, allowPartial = true) {
+  const token = controlToken();
+  const found = await root.locator(selector).evaluateAll((nodes, { wanted, token, allowPartial }) => {
     const compact = (value) => String(value || "").replace(/[\s:：|｜]/g, "");
-    return nodes.findIndex((node) => {
+    const candidates = nodes.filter((node) => {
       const rect = node.getBoundingClientRect();
       const style = getComputedStyle(node);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none"
-        && wanted.some((label) => {
-          const value = compact(node.value || node.getAttribute("aria-label") || node.textContent);
-          return value === label || value.includes(label);
-        });
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
     });
-  }, labels.map((label) => label.replace(/\s+/g, "")));
-  return index < 0 ? null : root.locator(selector).nth(index);
+    const value = (node) => compact(node.value || node.getAttribute("aria-label") || node.textContent);
+    const semantic = (node) => node.matches("button, input, [role='button'], [role='tab'], a, .el-tabs__item, .el-radio-button__inner, .trade_btn, .tab_btn, .header_l_item, .head_l_btns, .spotS, [data-action]");
+    const exact = candidates.filter(node => wanted.includes(value(node)));
+    // Generic wrappers aggregate all descendant labels. Only a leaf with an
+    // exact label or an actual control may be clicked.
+    const node = exact.find(semantic)
+      || exact.find(node => !exact.some(child => child !== node && node.contains(child)))
+      || (allowPartial && candidates.find(node => semantic(node) && wanted.some(label => value(node).includes(label))));
+    if (!node) return false;
+    node.dataset.axiomControl = token;
+    return true;
+  }, { wanted: labels.map((label) => label.replace(/[\s:：|｜]/g, "")), token, allowPartial });
+  return found ? root.locator(`[data-axiom-control="${token}"]`) : null;
 }
 
 export async function activateTradeControl(page, label) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const control = await findControl(page, [label], TABS);
+    const control = await findControl(page, [label], TABS, false);
     if (!control) {
       await page.waitForTimeout(150);
       continue;
@@ -46,45 +56,55 @@ export async function activateTradeControl(page, label) {
   return false;
 }
 
-export async function fillTradeFields(root, fields) {
+export async function fillTradeFields(page, fields, root = page) {
   const filled = [];
   for (const { labels, value } of fields) {
     if (value == null) continue;
     let match = null;
-    for (let attempt = 0; attempt < 3 && !match; attempt += 1) {
-      match = await root.locator("input").evaluateAll((inputs, wanted) => {
+    let lastError = null;
+    const deadline = Date.now() + 5000;
+    do {
+      const token = controlToken();
+      match = await root.locator("input").evaluateAll((inputs, { wanted, token }) => {
         const compact = (value) => String(value || "").replace(/[\s:：]/g, "");
         const visible = (node) => {
           const rect = node.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== "hidden";
         };
+        const editable = (input) => visible(input) && !/checkbox|radio|hidden|button|submit/.test(input.type) && !input.disabled && !input.readOnly;
         for (let index = 0; index < inputs.length; index += 1) {
           const input = inputs[index];
-          if (!visible(input) || /checkbox|radio|hidden|button|submit/.test(input.type) || input.disabled || input.readOnly) continue;
+          if (!editable(input)) continue;
           const container = input.closest(".inputWrap, .el-form-item, li, label, .form-item") || input.parentElement;
-          const labels = [...(input.labels || []), ...container.querySelectorAll("label, span, p, .el-form-item__label")];
+          const scoped = container && container !== document.body && container !== document.documentElement
+            && [...container.querySelectorAll("input")].filter(editable).length === 1;
+          const labels = input.labels?.length ? [...input.labels] : scoped ? [...container.querySelectorAll("label, span, p, .el-form-item__label")] : [];
           const label = labels.find((node) => visible(node) && wanted.some((item) => {
             const text = compact(node.textContent);
             return text === item || text.includes(item);
           }));
-          if (label) return { index, label: compact(label.textContent) };
+          if (label) {
+            input.dataset.axiomControl = token;
+            return { label: compact(label.textContent) };
+          }
         }
         return null;
-      }, labels.map((label) => label.replace(/[\s:：]/g, "")));
+      }, { wanted: labels.map((label) => label.replace(/[\s:：]/g, "")), token });
       if (!match) {
-        await root.page().waitForTimeout(150);
+        await page.waitForTimeout(100);
         continue;
       }
       try {
-        const input = root.locator("input").nth(match.index);
-        await input.scrollIntoViewIfNeeded({ timeout: 2500 });
-        await input.fill(String(value), { timeout: 5000 });
+        const input = root.locator(`input[data-axiom-control="${token}"]`);
+        await input.scrollIntoViewIfNeeded({ timeout: 750 });
+        await input.fill(String(value), { timeout: 750 });
       } catch (error) {
-        if (attempt === 2) throw error;
+        lastError = error;
         match = null;
-        await root.page().waitForTimeout(150);
+        await page.waitForTimeout(100);
       }
-    }
+    } while (!match && Date.now() < deadline);
+    if (!match && lastError) throw lastError;
     if (match) filled.push(match.label);
   }
   return filled;
@@ -234,7 +254,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
         // The production dialog initializes counterparty price after 200 ms.
         await page.waitForTimeout(300);
         if (orderType === "LIMIT") {
-          const fields = await fillTradeFields(box, [{ labels: ["转让价格"], value: price }]);
+          const fields = await fillTradeFields(page, [{ labels: ["转让价格"], value: price }], box);
           if (!fields.length) return { ok: false, code: "TRANSFER_PRICE_FIELD_NOT_FOUND" };
         }
         const prices = await box.locator("input").evaluateAll((inputs) => inputs.filter((node) => !node.disabled && node.type !== "checkbox").map((node) => Number(node.value)));

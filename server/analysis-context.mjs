@@ -167,7 +167,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null,
       timing: "买多预测阶段低位入、高位出；买空预测阶段高位入、低位出。分别评估趋势和当前可成交价，未到合适点位可HOLD或明确LIMIT挂单，MARKET不等待预测价。",
       whileHolding: "已有持仓继续逐仓监控，同时独立评估新的买多/买空机会，不等上一单离场，不设持仓单数上限。单笔entryQuantity不是总持仓上限；考虑累计敞口和保证金，同K及同一未成交意图防重复。" },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "PRIORITIZE_ZERO_TO_FIVE", positionTakeProfitAmount: 5, positionStopLossAmount: -3, preferredExitAmountRange: [0, 5], profitUnit: "POSITION_TOTAL_AMOUNT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。单笔总盈亏≥+5自动止盈、≤-3自动止损；区间内 AI 优先0～5果断离场，0明确为保本；-3～0内结合恢复机会决定等待或及时止损。不得为追求更高目标拖延盈利兑现。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "PRIORITIZE_ZERO_TO_FIVE", positionTakeProfitAmount: 5, positionStopLossAmount: -3, preferredExitAmountRange: [0, 5], profitUnit: "POSITION_TOTAL_AMOUNT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。单笔总盈亏≥+5自动止盈、≤-3自动止损；区间内 AI 优先0～5果断离场，0明确为保本；-3～0续抱须有实时证据支持的短期恢复价、预计到价时间和失效条件；逐轮核对上次预期，恢复未按期发生、路径失效或无续抱依据时由AI及时止损，禁止无新证据延后恢复时间或放宽止损。不得为追求更高目标拖延盈利兑现。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {

@@ -42,6 +42,8 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /未来目标尚未达到不能当作现在已盈利/);
   assert.match(content, /连续仍为 -1 点不是持续扩大/);
   assert.match(content, /0～5 内优先果断兑现/);
+  assert.match(content, /短期恢复价、预计到价时间和失效条件/);
+  assert.match(content, /禁止无新证据反复延后恢复时间或放宽止损/);
   assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);
   assert.match(content, /疑似闪 K 及其瞬时显示价格不纳入方向、概率/);
   assert.match(content, /不能仅凭一次剧烈波动就认定假 K/);
