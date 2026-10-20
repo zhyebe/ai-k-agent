@@ -70,7 +70,7 @@ module.exports = async function inspectBrowser({ app }, input) {
         const result = await call("submitSuggestionForm", { sessionId, confirmationId: `smoke-${state}-${side}`, ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: position.quantity, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ state, side, ...result }));
       }
-      background.push({ state, ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits })) });
+      background.push({ state, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits })) });
     }
     await runtime.setSmokeWindowState("visible");
     await page.screenshot({ path: input.screenshot });

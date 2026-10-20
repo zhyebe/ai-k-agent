@@ -18,6 +18,34 @@ function loadRuntime(file, replacements = {}, extra = "") {
   return module.exports;
 }
 
+test("browser writes restore a hidden minimized surface before acting; observations keep its state", async () => {
+  const events = [];
+  const window = {
+    minimized: true, visible: false,
+    isMinimized() { return this.minimized; },
+    isVisible() { return this.visible; },
+    restore() { events.push("restore"); this.minimized = false; },
+    showInactive() { events.push("show"); this.visible = true; },
+  };
+  const runtime = loadRuntime("browser-runtime.cjs", {}, `
+    module.exports.useModules = value => { modulesPromise = Promise.resolve(value); };
+    module.exports.useHost = (message, host) => activeSessions.set(scopedSession(message, "https://example.test"), host);
+  `);
+  const message = { userId: "owner", method: "readTradeControls", input: { sessionId: "task:one", confirmationId: "restore-once" }, deadlineAt: Date.now() + 10000 };
+  runtime.useHost(message, { evaluate: async fn => fn({ BrowserWindow: { getAllWindows: () => [window] } }) });
+  runtime.useModules({
+    tools: {
+      readTradeControls: async () => ({ ok: true }),
+      submitSuggestionForm: async () => { events.push("submit"); assert.equal(window.minimized, false); assert.equal(window.visible, true); return { ok: true, submitted: true }; },
+    },
+  });
+  await runtime.executeBrowserCall({}, message, "https://example.test", new AbortController().signal);
+  assert.deepEqual(events, []);
+  const result = await runtime.executeBrowserCall({}, { ...message, method: "submitSuggestionForm" }, "https://example.test", new AbortController().signal);
+  assert.equal(result.ok, true);
+  assert.deepEqual(events, ["restore", "show", "submit"]);
+});
+
 test("connecting the same desktop session twice keeps its socket and active browser call", async (t) => {
   const sockets = [];
   const handlers = new Map();

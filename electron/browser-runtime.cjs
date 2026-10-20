@@ -60,6 +60,21 @@ function browserOperationPriority(method) {
   return 10;
 }
 
+async function prepareBrowserActionWindow(sessionId, method) {
+  if (!["browserLogin", "fillSuggestionForm", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry"].includes(method)) return;
+  const host = activeSessions.get(sessionId);
+  if (!host) return;
+  await host.evaluate(({ BrowserWindow }) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      // A minimized Windows surface can stop producing stable frames even
+      // with timer throttling disabled. Restore it before Playwright actions;
+      // keep the usual visibility, hit-target and stability checks intact.
+      if (window.isMinimized()) window.restore();
+      if (!window.isVisible()) window.showInactive();
+    }
+  });
+}
+
 function enqueueSessionOperation(sessionId, method, signal, deadlineAt, operation) {
   let state = queues.get(sessionId);
   if (!state || typeof state !== "object" || !Array.isArray(state.pending)) {
@@ -117,6 +132,8 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     signal.throwIfAborted();
     if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
     const { browser, market, tools, analysis } = await loadModules(app);
+    signal.throwIfAborted();
+    await prepareBrowserActionWindow(sessionId, message.method);
     signal.throwIfAborted();
     const input = { ...message.input, sessionId, ...(message.provider ? { browserProvider: message.provider } : {}) };
     const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "observeExecutionMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
@@ -200,12 +217,15 @@ function getCollectedMarket(marketRef, apiBaseUrl, userId) {
 module.exports = { executeBrowserCall, closeBrowserRuntime, getCollectedMarket };
 if (process.env.AXIOM_BROWSER_SMOKE === "1") {
   module.exports.setSmokeWindowState = async (state) => {
-    for (const host of activeSessions.values()) await host.evaluate(({ BrowserWindow }, state) => {
+    const states = [];
+    for (const host of activeSessions.values()) states.push(...await host.evaluate(({ BrowserWindow }, state) => {
       for (const window of BrowserWindow.getAllWindows()) {
         if (state === "minimized") window.minimize();
         else if (state === "hidden") { window.restore(); window.hide(); }
-        else { window.restore(); window.show(); }
+        else if (state === "visible") { window.restore(); window.show(); }
       }
-    }, state);
+      return BrowserWindow.getAllWindows().map(window => ({ minimized: window.isMinimized(), visible: window.isVisible() }));
+    }, state));
+    return states;
   };
 }
