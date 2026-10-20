@@ -24,6 +24,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const messages = body.input || body.messages || body.contents.map(m => ({ role: m.role, content: m.parts[0].text }));
     const system = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
     assert.equal(system.split("每轮 analysis_summary 首句明确写").length - 1, 1);
+    assert.equal(system.split("入场决策优先级").length - 1, 1);
     assert.match(system, /短期恢复价、预计到价时间和失效条件/);
     assert.match(system, /禁止无新证据反复延后恢复时间或放宽止损/);
     assert.match(system, /恢复未按期发生、路径失效或没有证据支持续抱时果断STOP_LOSS/);

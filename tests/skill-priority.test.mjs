@@ -42,6 +42,9 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /未来目标尚未达到不能当作现在已盈利/);
   assert.match(content, /连续仍为 -1 点不是持续扩大/);
   assert.match(content, /0～5 内优先果断兑现/);
+  assert.match(content, /5 是上限，不是必须到达的目标/);
+  assert.match(content, /当前可成交净收益已核实大于 0 时，独立实时监控直接止盈/);
+  assert.doesNotMatch(content, /实际 bid 达到 AI 选定的合理目标|盈利时选择最优可兑现正净收益/);
   assert.match(content, /短期恢复价、预计到价时间和失效条件/);
   assert.match(content, /禁止无新证据反复延后恢复时间或放宽止损/);
   assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);

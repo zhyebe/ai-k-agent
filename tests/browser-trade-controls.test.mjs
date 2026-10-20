@@ -7,7 +7,7 @@ import { parseHaohanAccount } from "../server/haohan.mjs";
 import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 import { createProvider } from "../server/provider.mjs";
 
-import { positionAmountExit } from "../server/exit-policy.mjs";
+import { positionAmountExit, positionProfitExit } from "../server/exit-policy.mjs";
 
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
@@ -822,11 +822,12 @@ for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", 
   });
 }
 
-for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
+for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [0.5, 5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
   test(`${heldSide} position amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
     const long = heldSide === "LONG";
     const entryPrice = 100 - (long ? 1 : -1) * (threshold + 2) / 2;
-    const belowThresholdPrice = 100 + (long ? 1 : -1) * (threshold > 0 ? -0.01 : 0.01);
+    const belowThresholdPrice = threshold === 0.5 ? 100 - (long ? 1 : -1) * threshold / 2
+      : 100 + (long ? 1 : -1) * (threshold > 0 ? -0.01 : 0.01);
     const dialogPrice = scenario === "dialog-changed" ? belowThresholdPrice : 100;
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div>实时货值变化 -100元</div>')
@@ -860,7 +861,7 @@ for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) for (
     const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: 2 };
     const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true, positions: [position] },
       orderBook: { bids: [{ price: 100, volume: 30 }], asks: [{ price: 100, volume: 20 }] } };
-    const candidate = positionAmountExit(position, market);
+    const candidate = threshold === 0.5 ? positionProfitExit(position, market) : positionAmountExit(position, market);
     assert.equal(candidate.netPnl, threshold);
     if (scenario === "expired") candidate.decision.exitGuard.expiresAt = new Date(Date.now() - 1).toISOString();
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: 2 });

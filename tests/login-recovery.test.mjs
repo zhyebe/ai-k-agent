@@ -50,7 +50,7 @@ test("expiry during collection reauthenticates and reads fresh positions/orders 
 
 test("fast position monitor recovers login and executes the still-valid AI exit without waiting for another analysis", async t => {
   const f = setup(t);
-  f.market.account.positions[0].roundTripFee = 2; // Net profit is 1; exercise the AI plan below the amount fallback.
+  f.market.account.positions[0].roundTripFee = 2; // Net profit is 1; profit realization must also survive login recovery.
   f.task.exitPlans = [{ positionId: "P1", heldSide: "LONG", quantity: 1, entryPrice: 100, takeProfitPrice: 102,
     status: "ARMED", expiresAt: new Date(Date.now() + 60000).toISOString() }];
   let reads = 0;

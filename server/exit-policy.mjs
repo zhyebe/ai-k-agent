@@ -84,6 +84,35 @@ function positionAmountTriggerPrice(pnl, long, amount) {
   return pnl.entryPrice + (long ? 1 : -1) * (amount + (pnl.fees ?? 0)) / pnl.quantity;
 }
 
+function positionAmountCandidate(position, quote, pnl, now, exitType, threshold) {
+  const long = heldDirection(position) === "LONG";
+  const profit = exitType === "TAKE_PROFIT";
+  const strict = profit && threshold === 0;
+  return {
+    position, quotePrice: quote.price, grossPnl: pnl.grossPnl, netPnl: pnl.netPnl,
+    decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType,
+      targetPositionIds: [position.positionOrderId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
+      exitGuard: { positionId: position.positionOrderId, heldSide: long ? "LONG" : "SHORT", quantity: pnl.quantity,
+        entryPrice: pnl.entryPrice, exitType, expiresAt: new Date(now + 10000).toISOString(),
+        triggerPrice: positionAmountTriggerPrice(pnl, long, threshold),
+        comparison: strict ? (long ? "GT" : "LT") : long === profit ? "GTE" : "LTE",
+        positionAmount: { threshold, fees: pnl.fees } } },
+  };
+}
+
+// Realize a verified net gain now, even if the AI is still waiting for a
+// distant target. Unknown fees cannot authorize this stricter profit rule.
+export function positionProfitExit(position, market, now = Date.now()) {
+  if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) !== 0) return null;
+  const quote = executableExitQuote(market, position, now);
+  const pnl = quote && exitNetPnl(position, quote.price);
+  if (!pnl || pnl.fees === null) return null;
+  const long = heldDirection(position) === "LONG";
+  const breakEvenPrice = positionAmountTriggerPrice(pnl, long, 0);
+  if (!(long ? quote.price > breakEvenPrice : quote.price < breakEvenPrice)) return null;
+  return positionAmountCandidate(position, quote, pnl, now, "TAKE_PROFIT", 0);
+}
+
 export function positionAmountExit(position, market, now = Date.now()) {
   if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) !== 0) return null;
   const quote = executableExitQuote(market, position, now);
@@ -101,31 +130,26 @@ export function positionAmountExit(position, market, now = Date.now()) {
   if (!profit && !loss) return null;
   const exitType = profit ? "TAKE_PROFIT" : "STOP_LOSS";
   const threshold = profit ? POSITION_TAKE_PROFIT_AMOUNT : POSITION_STOP_LOSS_AMOUNT;
-  return {
-    position, quotePrice: quote.price, grossPnl: pnl.grossPnl, netPnl: pnl.netPnl,
-    decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType,
-      targetPositionIds: [position.positionOrderId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
-      exitGuard: { positionId: position.positionOrderId, heldSide: long ? "LONG" : "SHORT", quantity: pnl.quantity,
-        entryPrice: pnl.entryPrice, exitType, expiresAt: new Date(now + 10000).toISOString(),
-        triggerPrice: profit ? profitPrice : lossPrice, comparison: long === profit ? "GTE" : "LTE",
-        positionAmount: { threshold, fees: pnl.fees } } },
-  };
+  return positionAmountCandidate(position, quote, pnl, now, exitType, threshold);
 }
 
 export function positionAmountGuardAllowsPrice(guard, position, price) {
   if (!guard?.positionAmount) return true;
   const profit = guard.exitType === "TAKE_PROFIT";
+  const realization = profit && guard.positionAmount.threshold === 0;
   if ((!profit && guard.exitType !== "STOP_LOSS")
-    || guard.positionAmount.threshold !== (profit ? POSITION_TAKE_PROFIT_AMOUNT : POSITION_STOP_LOSS_AMOUNT)
+    || (!realization && guard.positionAmount.threshold !== (profit ? POSITION_TAKE_PROFIT_AMOUNT : POSITION_STOP_LOSS_AMOUNT))
     || !position || position.positionOrderId !== guard.positionId || heldDirection(position) !== guard.heldSide
     || Number(position.quantity) !== guard.quantity || Number(position.frozenQuantity || 0) !== 0
     || positionEntryPrice(position) !== guard.entryPrice) return false;
   // Keep already verified costs when a subsequent DOM snapshot omits them.
   const fees = numericValue(position.roundTripFee, position.totalFees, guard.positionAmount.fees);
+  if (realization && fees === null) return false;
   const pnl = exitNetPnl({ ...position, roundTripFee: fees }, price);
   if (!pnl) return false;
   const long = guard.heldSide === "LONG";
   const triggerPrice = positionAmountTriggerPrice(pnl, long, guard.positionAmount.threshold);
+  if (realization) return long ? pnl.exitPrice > triggerPrice : pnl.exitPrice < triggerPrice;
   return long === profit ? pnl.exitPrice >= triggerPrice : pnl.exitPrice <= triggerPrice;
 }
 
@@ -227,6 +251,8 @@ export function realtimeValueAbove(account, threshold) {
 
 export function exitGuardAllowsPrice(guard, price, now = Date.now()) {
   if (!guard || !Number.isFinite(Date.parse(guard.expiresAt)) || now >= Date.parse(guard.expiresAt) || !Number.isFinite(Number(price)) || Number(price) <= 0) return false;
+  if (guard.comparison === "GT") return Number(price) > guard.triggerPrice;
+  if (guard.comparison === "LT") return Number(price) < guard.triggerPrice;
   if (guard.comparison === "GTE") return Number(price) >= guard.triggerPrice;
   if (guard.comparison === "LTE") return Number(price) <= guard.triggerPrice;
   if (guard.comparison === "EQ") return Number(price) === guard.triggerPrice;

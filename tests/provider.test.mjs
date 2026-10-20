@@ -777,6 +777,10 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /亏损也是预测对象/);
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
     assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
+    assert.match(prompt, /已核实当前可成交净收益大于0就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /5是上限而非等待目标/);
+    assert.match(prompt, /小额净利自动兑现要求费用已核实/);
+    assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
@@ -1242,6 +1246,10 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
+    assert.match(prompt, /已核实当前可成交净收益大于0就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /5是上限而非等待目标/);
+    assert.match(prompt, /小额净利自动兑现要求费用已核实/);
+    assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);

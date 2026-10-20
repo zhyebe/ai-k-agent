@@ -1,11 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isNonLosingExit, parseSessionClose, positionAmountExit, positionAmountGuardAllowsPrice, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
+import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isNonLosingExit, parseSessionClose, positionAmountExit, positionProfitExit, positionAmountGuardAllowsPrice, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
 
 const observed = Date.parse("2026-10-13T10:00:00+08:00");
 const position = { positionOrderId: "P-1", symbol: "DGKZ", side: "买入", quantity: 2, orderPrice: 102 };
 const market = { symbol: "DGKZ", observedAt: new Date(observed).toISOString(), account: { positionsVerified: true, positions: [position] }, orderBook: { bids: [{ price: 104, volume: 20 }], asks: [{ price: 106, volume: 20 }] } };
 const source = { positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 };
+
+for (const heldSide of ["LONG", "SHORT"]) test(`${heldSide}: small positive net profit closes immediately with strict break-even confirmation`, () => {
+  const p = { ...position, side: heldSide, orderPrice: 100, quantity: 4, roundTripFee: 0.2 };
+  const long = heldSide === "LONG";
+  const breakEven = 100 + (long ? 1 : -1) * 0.2 / 4;
+  const price = breakEven + (long ? 0.001 : -0.001);
+  const snapshot = { ...market, account: { positionsVerified: true, positions: [p] }, orderBook: { bids: [{ price, volume: 20 }], asks: [{ price, volume: 20 }] } };
+  const result = positionProfitExit(p, snapshot, observed);
+  assert.ok(result.netPnl > 0 && result.netPnl < 5);
+  const guard = result.decision.exitGuard;
+  assert.equal(guard.positionAmount.threshold, 0);
+  for (const [quote, allowed] of [[price, true], [breakEven, false], [breakEven + (long ? -0.001 : 0.001), false]]) {
+    assert.equal(exitGuardAllowsPrice(guard, quote, observed), allowed);
+    assert.equal(positionAmountGuardAllowsPrice(guard, p, quote), allowed);
+  }
+  assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, roundTripFee: undefined }, price), true, "keep verified whole-position costs during final DOM read");
+  assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, roundTripFee: 1 }, price), false, "recheck increased costs");
+  assert.equal(positionAmountGuardAllowsPrice({ ...guard, positionAmount: { threshold: 0, fees: null } }, { ...p, roundTripFee: null }, price), false);
+  assert.equal(positionProfitExit({ ...p, roundTripFee: null }, snapshot, observed), null, "unknown fees are not zero");
+  assert.equal(positionProfitExit({ ...p, frozenQuantity: 1 }, snapshot, observed), null);
+  assert.equal(positionProfitExit(p, snapshot, observed + 5001), null);
+  assert.equal(positionProfitExit(p, { ...snapshot, account: { positionsVerified: false } }, observed), null);
+  for (const quote of [breakEven, breakEven + (long ? -0.001 : 0.001)]) {
+    assert.equal(positionProfitExit(p, { ...snapshot, orderBook: { bids: [{ price: quote, volume: 20 }], asks: [{ price: quote, volume: 20 }] } }, observed), null);
+  }
+});
 
 for (const side of ["LONG", "SHORT"]) {
   test(`${side}: whole-position +5/-3 boundaries include quantity and costs, independent of account total`, () => {

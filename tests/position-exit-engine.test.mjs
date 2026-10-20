@@ -25,6 +25,28 @@ function setup(id, positions, extras = {}) {
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
 
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) for (const planState of ["missing", "distant", "expired"]) {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide}: realize small verified net profit despite ${planState} AI target`, async () => {
+    const f = setup(`realize-profit-${automatic}-${heldSide}-${planState}`, [{ ...long("profit", 2), side: heldSide, roundTripFee: 1 },
+      { ...long("recover", 2), side: heldSide, orderPrice: heldSide === "LONG" ? 101.25 : 98.75, roundTripFee: 1 }], { autoDecisionEnabled: automatic });
+    const price = heldSide === "LONG" ? 100.75 : 99.25;
+    f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
+    f.market.account.realtimeValueChange = -100;
+    f.task.exitPlans = planState === "missing" ? [] : validateExitPlans({ exitPlans: [{ positionId: "profit", heldSide, quantity: 2,
+      validForSec: 120, takeProfitPrice: heldSide === "LONG" ? 110 : 90, stopLossPrice: null }] }, f.market, f.task).plans;
+    if (planState === "expired") f.task.exitPlans[0].expiresAt = new Date(Date.now() - 1).toISOString();
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitType, "TAKE_PROFIT");
+    assert.equal(f.submitted[0].action, heldSide === "LONG" ? "SELL" : "BUY");
+    assert.deepEqual(f.submitted[0].targetPositionIds, ["profit"]);
+    assert.equal(f.task.pendingAction.source, "position_profit_realization");
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["recover"]);
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 1, "never repeat a submitted profit exit or force out a recovery position");
+  });
+}
+
 for (const heldSide of ["LONG", "SHORT"]) for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
   test(`${heldSide} ${exitType}: a changed quote after AI returns invalidates the action`, async () => {
     const f = setup(`late-price-${heldSide}-${exitType}`, [{ ...long("P1"), side: heldSide === "LONG" ? "买入" : "卖出" }]);
@@ -143,7 +165,7 @@ for (const heldSide of ["LONG", "SHORT"]) for (const amount of [0, 0.5, -1]) {
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.submitted.length, 1);
     assert.equal(f.submitted[0].exitType, exitType);
-    assert.equal(f.task.pendingAction.source, "ai_price_trigger");
+    assert.equal(f.task.pendingAction.source, amount > 0 ? "position_profit_realization" : "ai_price_trigger");
   });
 }
 
@@ -191,7 +213,7 @@ for (const automatic of [false, true]) {
 }
 
 for (const automatic of [false, true]) {
-  test(`${automatic ? "automatic" : "manual"}: AI-authorized realtime profit exits all profitable long/short holdings before distant targets`, async () => {
+  test(`${automatic ? "automatic" : "manual"}: verified net profit exits long/short holdings before distant targets and account thresholds`, async () => {
     const f = setup(`realtime-condition-${automatic}`, [
       { ...long("profit-long"), roundTripFee: 4 },
       { ...long("profit-short"), side: "卖出", orderPrice: 111, roundTripFee: 4 },
@@ -204,7 +226,7 @@ for (const automatic of [false, true]) {
       realtime_take_profit: { value_above: 1, take_profit_price: p.side === "买入" ? p.orderPrice + 5 : p.orderPrice - 5 },
     })) }, f.market, f.task).plans;
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.equal(f.submitted.length, 0);
+    assert.equal(f.submitted.length, 2, "verified positive net profit does not wait for an account threshold");
     f.market.account.realtimeValueChange = 2.5;
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.deepEqual(f.submitted.map(s => [s.targetPositionIds[0], s.action, s.exitType]), [
@@ -402,8 +424,8 @@ test("unverified or frozen holdings cannot masquerade as successful closing", as
   assert.equal(f.submitted.length, 0);
 });
 
-test("profit threshold executes while AI is waiting without any exit plan; late entry cannot overwrite the exit", async () => {
-  const f = setup("exit-while-ai", [long("P1")]);
+test("small verified net profit executes while AI is waiting; late entry cannot overwrite the exit", async () => {
+  const f = setup("exit-while-ai", [{ ...long("P1"), roundTripFee: 4.5 }]);
   f.task.exitPlans = [];
   let releaseModel, modelStarted;
   const waiting = new Promise(resolve => { modelStarted = resolve; });
