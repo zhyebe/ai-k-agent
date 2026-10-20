@@ -1,6 +1,6 @@
 import { invokeDesktopAi } from "./desktop-ai.mjs";
 import { openMarketBrowser, observeMarket, observeExecutionMarket } from "./market.mjs";
-import { browserLogin, browserLoginStatus, cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "./tools.mjs";
+import { browserLogin, browserLoginStatus, browserScanControls, cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm } from "./tools.mjs";
 import { closeBrowserSession } from "./browser.mjs";
 import { getCredential } from "./vault.mjs";
 
@@ -8,7 +8,7 @@ export function desktopBrowserRequired() {
   return process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1";
 }
 
-const methods = { openMarketBrowser, observeMarket, observeExecutionMarket, browserLogin, browserLoginStatus, cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm, closeBrowserSession };
+const methods = { openMarketBrowser, observeMarket, observeExecutionMarket, browserLogin, browserLoginStatus, browserScanControls, cancelOpenOrders, continueManualEntry, fillSuggestionForm, readTradeControls, submitSuggestionForm, closeBrowserSession };
 
 export async function callBrowserMethod(method, userId, input = {}, options = {}) {
   if (!Object.hasOwn(methods, method)) throw new Error("BROWSER_METHOD_UNKNOWN");
@@ -25,8 +25,10 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
   }
   const observationStartedMs = Date.now();
   const observationStartedAt = new Date(observationStartedMs).toISOString();
+  const browserProvider = input.provider || input.browserProvider || null;
+  const { provider: _provider, browserProvider: _browserProvider, ...safeInput } = input;
   const browserInput = {
-    ...input,
+    ...safeInput,
     ...(method === "observeMarket" ? { serverObservedAt: observationStartedAt } : {}),
   };
   if (input.task) {
@@ -43,6 +45,7 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
     channel: "browser",
     requiredCapability: method === "observeExecutionMarket" ? "browser-exit-v1" : "",
     input: browserInput,
+    provider: browserProvider,
     credential: credential ? { username: credential.username, password: credential.password, target: credential.target } : undefined,
     signal,
     options: { timeoutMs: method === "observeMarket" || method === "browserLogin" ? 120000 : 45000, ...callOptions },

@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
 import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
-import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession, selectPageBoardInstrument } from "./browser.mjs";
+import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession, resolveSnapshotControl, scanBrowserControls, scanBrowserPage, selectPageBoardInstrument } from "./browser.mjs";
+import { requestBrowserActions } from "./provider.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
@@ -66,6 +67,71 @@ async function optionalVisibleLocator(page, selector) {
     if (browserLifecycleError(error)) throw error;
     return null;
   }
+}
+
+function planActions(plan) {
+  return Array.isArray(plan?.actions) ? plan.actions.slice(0, 12) : [];
+}
+
+async function requestLiveBrowserPlan(page, provider, context = {}) {
+  if (!provider) return { ok: false, code: "BROWSER_AI_PROVIDER_REQUIRED", actions: [], snapshot: null };
+  const snapshot = await scanBrowserPage(page);
+  if (!snapshot.ok) return { ...snapshot, actions: [] };
+  const plan = await requestBrowserActions(provider, {
+    ...context,
+    page: {
+      url: snapshot.url,
+      title: snapshot.title,
+      text: snapshot.text,
+      controls: snapshot.controls,
+      snapshotToken: snapshot.snapshotToken,
+    },
+    controls: snapshot.controls,
+  }, { timeoutMs: 20000 });
+  if (!plan?.ok || !planActions(plan).length) return { ok: false, code: plan?.code || "BROWSER_ACTION_PLAN_EMPTY", actions: [], snapshot };
+  return { ok: true, ...plan, actions: planActions(plan), snapshot };
+}
+
+async function resolvePlannedControl(page, action, options = {}) {
+  const id = String(action?.controlId || action?.id || "").trim();
+  if (!id) return null;
+  return resolveSnapshotControl(page, id, options);
+}
+
+async function clickPlannedControl(page, action, options = {}) {
+  const control = await resolvePlannedControl(page, action, options);
+  if (!control) return false;
+  await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+  await control.click({ timeout: 5000 });
+  return true;
+}
+
+async function fillPlannedControl(page, action, value, options = {}) {
+  const control = await resolvePlannedControl(page, action, options);
+  if (!control) return false;
+  await control.scrollIntoViewIfNeeded({ timeout: 2500 });
+  await control.fill(String(value ?? ""), { timeout: 5000 });
+  return true;
+}
+
+function planActionForField(actions, field) {
+  return actions.find((action) => String(action?.field || "").toLowerCase() === field)
+    || actions.find((action) => String(action?.label || "").includes(field === "username" ? "手机" : field === "password" ? "密码" : field));
+}
+
+async function completeAgentTradeDialog(page, provider, context = {}) {
+  if (!provider) return false;
+  await page.waitForTimeout(250);
+  const plan = await requestLiveBrowserPlan(page, provider, {
+    goal: "CONFIRM_TRADE",
+    mode: "confirm",
+    ...context,
+    instructions: "只点击当前交易确认弹窗中的确定/确认/同意按钮；禁止点击取消、止盈止损、全撤或其他页面按钮。",
+  });
+  const confirm = plan.actions.find((item) => String(item?.field || "").toLowerCase() === "confirm")
+    || plan.actions.find((item) => String(item?.type || "").toLowerCase() === "click" && /确定|确认|同意|继续|提交/.test(String(item?.label || "")));
+  if (!plan.ok || !confirm) return false;
+  return clickPlannedControl(page, confirm, { role: "button" });
 }
 
 async function pageHasLoginSuccess(page, adapter) {
@@ -218,16 +284,20 @@ export async function browserExtract({ sessionId = "default", selector = "body" 
   }
 }
 
-export async function browserLogin({ sessionId = "default", credentialRef, adapterId, targetUrl = "", ownerUserId = "", ownerUserIds = [], automationAuthorized = true, submit = true }) {
+export async function browserScanControls({ sessionId = "default", maxControls = 120, maxText = 12000 } = {}) {
+  return scanBrowserControls(sessionId, { maxControls, maxText });
+}
+
+export async function browserLogin({ sessionId = "default", credentialRef, adapterId, targetUrl = "", ownerUserId = "", ownerUserIds = [], automationAuthorized = true, submit = true, browserProvider = null, provider = null }) {
   if (!credentialRef) return { ok: false, code: "CREDENTIAL_REF_REQUIRED", message: "登录必须引用托管凭据，不能传入明文密码" };
   await initVault();
   const credential = getCredential(credentialRef, { ownerUserId, ownerUserIds });
   if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND", message: "托管凭据不存在或无法解密" };
-  return browserLoginWithCredential({ sessionId, credentialRef, adapterId, targetUrl, submit }, credential);
+  return browserLoginWithCredential({ sessionId, credentialRef, adapterId, targetUrl, submit, browserProvider, provider }, credential);
 }
 
 // Desktop receives an owner-checked credential for this call only; never persist it locally.
-export async function browserLoginWithCredential({ sessionId = "default", credentialRef, adapterId, targetUrl = "", submit = true }, credential) {
+export async function browserLoginWithCredential({ sessionId = "default", credentialRef, adapterId, targetUrl = "", submit = true, browserProvider = null, provider = null }, credential) {
   if (!credential) return { ok: false, code: "CREDENTIAL_REF_NOT_FOUND" };
   const resolvedAdapterId = adapterId || credential?.target?.adapterId;
   const adapter = getConnectorAdapter(resolvedAdapterId);
@@ -245,23 +315,63 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
           if (new URL(currentUrl).hostname !== new URL(credential.target.url).hostname) return { ok: false, code: "CREDENTIAL_TARGET_MISMATCH", message: "凭据目标与当前浏览器页面不一致" };
         } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
       }
-      // A session-expiry notice may overlay the trading page without navigating.
-      // Open only the reviewed same-origin login route when its form is absent.
-      const loginFormVisible = Boolean(await optionalVisibleLocator(page, adapter.login.passwordSelector)
-        && await optionalVisibleLocator(page, adapter.login.submitSelector));
-      if (adapter.login.entryUrl && !loginFormVisible) {
-        const loginUrl = new URL(adapter.login.entryUrl);
-        if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
-        await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+      const aiProvider = browserProvider || provider;
+      let aiPlan = null;
+      if (aiProvider) {
+        aiPlan = await requestLiveBrowserPlan(page, aiProvider, {
+          goal: "LOGIN",
+          mode: "login",
+          instructions: "选择当前页面登录账号字段、密码字段、协议复选框（若存在）和登录提交按钮。只返回当前快照 controlId；不要输入密码值。",
+        });
+        const hasPassword = aiPlan.ok && aiPlan.actions.some((action) => String(action?.field || "").toLowerCase() === "password");
+        const hasSubmit = aiPlan.ok && aiPlan.actions.some((action) => String(action?.field || "").toLowerCase() === "submit" || String(action?.type || "").toLowerCase() === "submit");
+        if ((!hasPassword || !hasSubmit) && adapter.login.entryUrl) {
+          const loginUrl = new URL(adapter.login.entryUrl);
+          if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
+          await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+          aiPlan = await requestLiveBrowserPlan(page, aiProvider, {
+            goal: "LOGIN",
+            mode: "login",
+            instructions: "选择当前页面登录账号字段、密码字段、协议复选框（若存在）和登录提交按钮。只返回当前快照 controlId；不要输入密码值。",
+          });
+        }
+        if (!aiPlan.ok) return { ok: false, code: aiPlan.code || "BROWSER_ACTION_PLAN_INVALID", message: "AI 未能从当前页面选择登录控件", credentialRef, adapterId: adapter.id };
+        const actions = aiPlan.actions;
+        const usernameAction = planActionForField(actions, "username");
+        const passwordAction = planActionForField(actions, "password");
+        const submitAction = actions.find((action) => String(action?.field || "").toLowerCase() === "submit" || String(action?.type || "").toLowerCase() === "submit")
+          || actions.find((action) => String(action?.type || "").toLowerCase() === "click" && /登录|sign\s*in|log\s*in/i.test(String(action?.label || "")));
+        if (!usernameAction || !passwordAction || !submitAction
+          || !await fillPlannedControl(page, usernameAction, String(credential.username || ""), { role: "textbox" })
+          || !await fillPlannedControl(page, passwordAction, String(credential.password || ""), { role: "textbox" })) {
+          return { ok: false, code: "LOGIN_CONTROLS_NOT_FOUND", message: "AI 选择的登录控件已变化或不可见", credentialRef, adapterId: adapter.id };
+        }
+        const consentAction = actions.find((action) => String(action?.field || "").toLowerCase() === "consent" || String(action?.type || "").toLowerCase() === "accept_agreement")
+          || actions.find((action) => String(action?.type || "").toLowerCase() === "click" && /同意|协议|agreement|consent/i.test(String(action?.label || "")));
+        if (consentAction && !await clickPlannedControl(page, consentAction, { role: "checkbox" })) {
+          return { ok: false, code: "LOGIN_CONSENT_NOT_FOUND", message: "AI 选择的协议控件已变化或不可见", credentialRef, adapterId: adapter.id };
+        }
+        if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: page.url() };
+        if (!await clickPlannedControl(page, submitAction, { role: "button" })) return { ok: false, code: "LOGIN_SUBMIT_NOT_FOUND", message: "AI 选择的登录按钮已变化或不可见", credentialRef, adapterId: adapter.id };
+      } else {
+        // Compatibility path for local fixtures and older callers that do not
+        // provide a configured browser AI provider.
+        const loginFormVisible = Boolean(await optionalVisibleLocator(page, adapter.login.passwordSelector)
+          && await optionalVisibleLocator(page, adapter.login.submitSelector));
+        if (adapter.login.entryUrl && !loginFormVisible) {
+          const loginUrl = new URL(adapter.login.entryUrl);
+          if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
+          await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+        }
+        const username = await firstVisibleLocator(page, adapter.login.usernameSelector, { timeout: 12000, label: "LOGIN_USERNAME" });
+        const password = await firstVisibleLocator(page, adapter.login.passwordSelector, { timeout: 12000, label: "LOGIN_PASSWORD" });
+        const submitButton = await firstVisibleLocator(page, adapter.login.submitSelector, { timeout: 12000, label: "LOGIN_SUBMIT" });
+        await username.fill(String(credential.username || ""), { timeout: 12000 });
+        await password.fill(String(credential.password || ""), { timeout: 12000 });
+        await prepareLoginForm(page, adapter);
+        if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
+        await submitButton.click({ timeout: 12000 });
       }
-      const username = await firstVisibleLocator(page, adapter.login.usernameSelector, { timeout: 12000, label: "LOGIN_USERNAME" });
-      const password = await firstVisibleLocator(page, adapter.login.passwordSelector, { timeout: 12000, label: "LOGIN_PASSWORD" });
-      const submitButton = await firstVisibleLocator(page, adapter.login.submitSelector, { timeout: 12000, label: "LOGIN_SUBMIT" });
-      await username.fill(String(credential.username || ""), { timeout: 12000 });
-      await password.fill(String(credential.password || ""), { timeout: 12000 });
-      await prepareLoginForm(page, adapter);
-      if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
-      await submitButton.click({ timeout: 12000 });
       const deadline = Date.now() + Math.max(5000, Number(adapter.login.successTimeoutMs) || 20000);
       let authenticated = false;
       while (Date.now() < deadline) {
@@ -541,6 +651,7 @@ export async function readTradeControls({ sessionId = "default", symbol = "", sy
     const selected = await selectPageBoardInstrument(sessionId, { symbol: String(symbol || ""), symbolName: String(symbolName || ""), instrumentId: String(instrumentId || "") });
     if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", buttons: [], fields: [], rowActions: [] };
   }
+  const liveSnapshot = await scanBrowserControls(sessionId).catch(() => ({ ok: false, controls: [] }));
   const ids = (Array.isArray(targetPositionIds) ? targetPositionIds : []).map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
   try {
     const snapshot = await page.evaluate(({ targetIds }) => {
@@ -579,24 +690,84 @@ export async function readTradeControls({ sessionId = "default", symbol = "", sy
       }
       return { buttons, fields, rowActions: rowActions.slice(0, 12) };
     }, { targetIds: ids });
-    return { ok: true, ...snapshot };
+    return { ok: true, ...snapshot, snapshotToken: liveSnapshot.snapshotToken || null, snapshotControls: liveSnapshot.controls || [] };
   } catch (error) {
     return { ok: false, code: "TRADE_CONTROLS_READ_FAILED", message: error.message, buttons: [], fields: [], rowActions: [] };
   }
 }
 
-export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [] } = {}) {
+export async function fillSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], browserProvider = null, provider = null } = {}) {
   if (action !== "BUY" && action !== "SELL") return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false, fields: [] };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false, fields: [] };
   try {
+    const aiProvider = browserProvider || provider;
     if (exitType) {
-      const rows = await preparePositionRows(page, { action, symbol, symbolName, instrumentId, targetPositionIds });
-      return { ok: rows.length > 0, code: rows.length ? "EXIT_POSITION_READY" : "EXIT_POSITION_NOT_FOUND", filled: rows.length > 0, submitted: false, fields: [] };
+      const rows = await preparePositionRows(page, { action, symbol, symbolName, instrumentId, targetPositionIds }).catch(() => []);
+      if (rows.length) return { ok: true, code: "EXIT_POSITION_READY", filled: true, submitted: false, fields: [] };
+      if (!aiProvider || !targetPositionIds.length) return { ok: false, code: "EXIT_POSITION_NOT_FOUND", filled: false, submitted: false, fields: [] };
+      const plan = await requestLiveBrowserPlan(page, aiProvider, {
+        goal: "EXIT_TRANSFER",
+        mode: "prepare",
+        action,
+        exitType,
+        targetPositionIds,
+        instructions: "确认当前页面存在精确目标持仓行和转让控件，不点击任何交易按钮。",
+      });
+      const transfer = plan.actions.find((item) => String(item?.field || "").toLowerCase() === "submit" || /转让/.test(String(item?.label || "")));
+      return { ok: Boolean(plan.ok && transfer), code: plan.ok && transfer ? "EXIT_POSITION_READY" : "EXIT_POSITION_NOT_FOUND", filled: Boolean(plan.ok && transfer), submitted: false, fields: [] };
     }
     if (symbol || symbolName || instrumentId) {
       const selected = await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId });
       if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", filled: false, submitted: false, fields: [] };
+    }
+    if (aiProvider) {
+      // AI receives the live page even when the reviewed adapter's old tab
+      // labels/classes no longer exist. Legacy preparation is best-effort only.
+      try { await prepareTradeEntry(page, action); } catch {}
+      const plan = await requestLiveBrowserPlan(page, aiProvider, {
+        goal: action === "BUY" ? "ENTRY_BUY_UP" : "ENTRY_BUY_DOWN",
+        mode: "prepare",
+        action,
+        price,
+        quantity,
+        instructions: "只填写价格和数量，勾选必要协议；mode=prepare 时禁止点击买入/卖出订立提交按钮。",
+      });
+      if (!plan.ok) return { ok: false, code: plan.code, message: "AI 未能从当前页面选择下单字段", filled: false, submitted: false, fields: [] };
+      for (const navigation of plan.actions.filter((item) => String(item?.type || "").toLowerCase() === "click" && !["price", "quantity", "consent", "submit"].includes(String(item?.field || "").toLowerCase()))) {
+        if (/买入|买涨|做多|建仓|订立|卖出|买跌|做空/.test(String(navigation?.label || ""))) {
+          await clickPlannedControl(page, navigation, { role: "button" }).catch(() => {});
+        }
+      }
+      let priceAction = planActionForField(plan.actions, "price");
+      let quantityAction = planActionForField(plan.actions, "quantity");
+      let fieldsFilled = Boolean(priceAction && quantityAction
+        && await fillPlannedControl(page, priceAction, price)
+        && await fillPlannedControl(page, quantityAction, quantity));
+      if (!fieldsFilled) {
+        const refreshed = await requestLiveBrowserPlan(page, aiProvider, {
+          goal: action === "BUY" ? "ENTRY_BUY_UP" : "ENTRY_BUY_DOWN",
+          mode: "prepare",
+          action,
+          price,
+          quantity,
+          instructions: "页面刚完成方向或标签切换。重新选择当前可见价格和数量字段及必要协议；禁止提交。",
+        });
+        priceAction = refreshed.ok ? planActionForField(refreshed.actions, "price") : null;
+        quantityAction = refreshed.ok ? planActionForField(refreshed.actions, "quantity") : null;
+        fieldsFilled = Boolean(priceAction && quantityAction
+          && await fillPlannedControl(page, priceAction, price)
+          && await fillPlannedControl(page, quantityAction, quantity));
+        if (refreshed.ok) plan.actions = refreshed.actions;
+      }
+      if (!fieldsFilled) {
+        return { ok: false, code: "FORM_FIELDS_NOT_FOUND", message: "AI 选择的下单字段已变化或不可见", filled: false, submitted: false, fields: [] };
+      }
+      const agreement = plan.actions.find((item) => String(item?.field || "").toLowerCase() === "consent" || String(item?.type || "").toLowerCase() === "accept_agreement");
+      if (agreement && !await clickPlannedControl(page, agreement, { role: "checkbox" })) {
+        return { ok: false, code: "FORM_CONSENT_NOT_FOUND", message: "AI 选择的协议控件已变化或不可见", filled: false, submitted: false, fields: [] };
+      }
+      return { ok: true, code: "FORM_FILLED_NOT_SUBMITTED", filled: true, submitted: false, fields: [String(priceAction.label || "price"), String(quantityAction.label || "quantity")] };
     }
     await prepareTradeEntry(page, action);
     const labels = suggestionFormLabels(action);
@@ -689,7 +860,7 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   return { ok: results.length > 0 && results.every((item) => item.cancelled), results };
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, entryDeadlineAt = null } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, entryDeadlineAt = null, browserProvider = null, provider = null } = {}) {
   if (action !== "BUY" && action !== "SELL") return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
@@ -697,6 +868,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false };
   const target = { action, symbol, symbolName, instrumentId, targetPositionIds };
+  const aiProvider = browserProvider || provider;
   const results = [];
   const entryGuard = exitType ? undefined : entryConfirmationGuard(entryDeadlineAt);
   let currentExitGuard = exitGuard;
@@ -727,15 +899,17 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     let targets = [target];
     if (exitType) {
       if (exitGuard && !await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "EXIT_INSTRUMENT_UNVERIFIED", submitted: false };
-      const rows = await preparePositionRows(page, target);
-      if (!rows.length) return { ok: false, code: "EXIT_POSITION_NOT_FOUND", message: "持仓明细未显示目标持仓，未操作其他持仓", filled: false, submitted: false };
+      const rows = await preparePositionRows(page, target).catch(() => []);
+      if (!rows.length && (!aiProvider || !targetPositionIds.length)) return { ok: false, code: "EXIT_POSITION_NOT_FOUND", message: "持仓明细未显示目标持仓，未操作其他持仓", filled: false, submitted: false };
       if (exitGuard && (rows.length !== (exitGuard.positions?.length || 1) || rows.some(row => {
         const guard = exitGuard.positions?.find(item => item.positionId === row.id) || exitGuard;
         return row.id !== guard.positionId || row.quantity !== guard.quantity;
       }))) return { ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false };
-      targets = rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index }));
+      targets = rows.length
+        ? rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index }))
+        : targetPositionIds.map((positionId) => ({ ...target, targetPositionIds: [String(positionId)], quantity }));
     } else {
-      const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId });
+      const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
       if (!filled.ok) return { ...filled, submitted: false };
     }
     for (const positionTarget of targets) {
@@ -747,11 +921,34 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       const writeResponse = watchTradeResponse(page);
       try {
         if (entryGuard && !(await entryGuard()).ok) return { ok: false, code: "SESSION_CLOSING_NO_ENTRY", submitted: false };
-        const clicked = exitType ? await clickPositionTransfer(page, positionTarget) : await clickTradeEntry(page, action);
+        let clicked;
+        if (aiProvider) {
+          const plan = await requestLiveBrowserPlan(page, aiProvider, {
+            goal: exitType ? "EXIT_TRANSFER" : (action === "BUY" ? "ENTRY_BUY_UP" : "ENTRY_BUY_DOWN"),
+            mode: "submit",
+            action,
+            exitType,
+            targetPositionIds: positionTarget.targetPositionIds,
+            price,
+            quantity,
+            instructions: exitType ? "只点击精确目标持仓行的转让控件，禁止点击止盈止损或全局转让。" : "点击当前页面匹配方向的订立提交按钮。",
+          });
+          const submitAction = plan.actions.find((item) => String(item?.field || "").toLowerCase() === "submit")
+            || plan.actions.find((item) => String(item?.type || "").toLowerCase() === "click" && !/止盈|止损|全撤|全部/.test(String(item?.label || "")));
+          const valid = plan.ok && submitAction && await clickPlannedControl(page, submitAction, { role: "button", targetPositionIds: positionTarget.targetPositionIds });
+          clicked = valid ? { clicked: true, label: String(submitAction.label || ""), quantity: positionTarget.quantity } : { clicked: false, code: plan.code || (exitType ? "EXIT_CONTROL_NOT_FOUND" : "SUBMIT_CONTROL_NOT_FOUND") };
+        } else {
+          clicked = exitType ? await clickPositionTransfer(page, positionTarget) : await clickTradeEntry(page, action);
+        }
         if (!clicked.clicked) {
           return withCompleted({ ok: false, code: clicked.code, message: clicked.code === "SUBMIT_BUTTON_DISABLED" ? "入场按钮存在但网页禁用，继续刷新页面并重试" : "目标交易控件未就绪，继续刷新页面并重试", filled: true, submitted: false });
         }
-        const dialog = await completeTradeDialogs(page, { exitType, orderType, price, baselineToken, finished: () => Boolean(writeResponse.peek()), canConfirm: exitGuard ? verifyExitGuard : entryGuard });
+        const aiConfirmed = aiProvider && !exitGuard && !entryGuard
+          ? await completeAgentTradeDialog(page, aiProvider, { action, exitType, targetPositionIds: positionTarget.targetPositionIds, price, quantity }).catch(() => false)
+          : false;
+        const dialog = aiConfirmed
+          ? { ok: true, confirmed: true, code: "AI_DIALOG_CONFIRMED" }
+          : await completeTradeDialogs(page, { exitType, orderType, price, baselineToken, finished: () => Boolean(writeResponse.peek()), canConfirm: exitGuard ? verifyExitGuard : entryGuard });
         if (!dialog.ok) return withCompleted({ ok: false, code: dialog.code, message: "转让弹窗尚未完成，继续监控并重试", filled: true, submitted: false });
         const { response, pageHint } = await observeTradeFeedback(page, writeResponse, baselineToken);
         const result = { ...tradeSubmissionOutcome({ responseSeen: Boolean(response), responseOk: response ? response.ok() : null, pageHint, clicked }), targetPositionIds: positionTarget.targetPositionIds, submittedQuantity: clicked.quantity };
@@ -772,6 +969,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
 export async function callTool(name, input) {
   if (name === "browser_navigate") return browserNavigate(input || {});
   if (name === "browser_extract_text") return browserExtract(input || {});
+  if (name === "browser_scan_controls") return browserScanControls(input || {});
   if (name === "browser_login") return browserLogin(input || {});
   if (name === "browser_fill_suggestion") return fillSuggestionForm(input || {});
   if (name === "desktop_open_app") return openDesktopApp(input || {});

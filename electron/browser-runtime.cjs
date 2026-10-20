@@ -54,7 +54,7 @@ function scopedSession(message, apiBaseUrl) {
 }
 
 function browserOperationPriority(method) {
-  if (["browserLogin", "browserLoginStatus", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry", "fillSuggestionForm"].includes(method)) return 100;
+  if (["browserLogin", "browserLoginStatus", "browserScanControls", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry", "fillSuggestionForm"].includes(method)) return 100;
   if (["observeExecutionMarket", "readTradeControls"].includes(method)) return 80;
   if (method === "openMarketBrowser") return 40;
   return 10;
@@ -118,7 +118,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
     const { browser, market, tools, analysis } = await loadModules(app);
     signal.throwIfAborted();
-    const input = { ...message.input, sessionId };
+    const input = { ...message.input, sessionId, ...(message.provider ? { browserProvider: message.provider } : {}) };
     const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "observeExecutionMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
       && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
     const abort = () => { if (shouldCloseOnAbort()) browser.closeBrowserSession(sessionId).catch(() => {}); };
@@ -146,6 +146,7 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
       }
       if (message.method === "browserLogin") return await tools.browserLoginWithCredential(input, message.credential);
       if (message.method === "browserLoginStatus") return await tools.browserLoginStatus(input);
+      if (message.method === "browserScanControls") return await tools.browserScanControls(input);
       if (message.method === "fillSuggestionForm") return await tools.fillSuggestionForm(input);
       if (message.method === "continueManualEntry") return await tools.continueManualEntry(input);
       if (message.method === "readTradeControls") return await tools.readTradeControls(input);

@@ -665,6 +665,109 @@ export async function getBrowserPage(sessionId = "default") {
   }
 }
 
+// Accessibility-style snapshot for agentic browser control. IDs are scoped to
+// one snapshot and attached to live DOM nodes so callers can validate a model
+// plan immediately before executing it. Never include password values.
+export async function scanBrowserControls(sessionId = "default", options = {}) {
+  const page = await getBrowserPage(sessionId);
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", controls: [] };
+  const snapshot = await scanBrowserPage(page, options);
+  return snapshot.ok ? { ...snapshot, sessionId } : snapshot;
+}
+
+export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000 } = {}) {
+  if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", controls: [] };
+  const token = `axiom-snapshot-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
+  try {
+    const snapshot = await page.evaluate(({ token: snapshotToken, max: limit, textLimit }) => {
+      const visible = (node) => {
+        if (!node || !(node instanceof Element)) return false;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 0 && rect.height > 0;
+      };
+      const compact = (value, limit = 160) => String(value || "").replace(/\s+/g, " ").trim().slice(0, limit);
+      const labelFor = (node) => {
+        const id = node.getAttribute("id");
+        const explicit = id && document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        const parent = node.closest("label");
+        const labelled = node.getAttribute("aria-labelledby");
+        const labelledText = labelled ? labelled.split(/\s+/).map((key) => document.getElementById(key)?.innerText || "").join(" ") : "";
+        return compact(explicit?.innerText || parent?.innerText || labelledText || node.getAttribute("aria-label") || node.getAttribute("title") || "");
+      };
+      const roleFor = (node) => {
+        const explicit = node.getAttribute("role");
+        if (explicit) return explicit;
+        if (node.matches("button, input[type='button'], input[type='submit']")) return "button";
+        if (node.matches("a")) return "link";
+        if (node.matches("input, textarea, select")) return node.type === "checkbox" ? "checkbox" : "textbox";
+        return "button";
+      };
+      const selector = "button, input, textarea, select, [role='button'], [role='checkbox'], [role='tab'], a, summary, [contenteditable='true']";
+      const controls = [];
+      document.querySelectorAll(selector).forEach((node) => {
+        if (controls.length >= limit || !visible(node)) return;
+        if (node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true") return;
+        const role = roleFor(node);
+        const type = compact(node.getAttribute("type") || (node instanceof HTMLInputElement ? node.type : ""), 30);
+        const sensitiveValue = ["password", "text", "tel", "email"].includes(type.toLowerCase());
+        const label = compact((!sensitiveValue && node.value) || labelFor(node) || node.innerText || node.textContent, 120);
+        const placeholder = compact(node.getAttribute("placeholder"), 120);
+        const name = compact(node.getAttribute("name"), 80);
+        const text = compact(node.innerText || node.textContent, 160);
+        if (!label && !placeholder && !name && role !== "textbox") return;
+        const id = `${snapshotToken}-${controls.length + 1}`;
+        node.setAttribute("data-axiom-control", id);
+        controls.push({
+          id,
+          role,
+          type,
+          label,
+          text,
+          placeholder,
+          name,
+          checked: role === "checkbox" ? Boolean(node.checked || node.getAttribute("aria-checked") === "true") : undefined,
+          value: sensitiveValue ? undefined : compact(node.value, 120),
+        });
+      });
+      return {
+        url: location.href,
+        title: compact(document.title, 200),
+        text: compact(document.body?.innerText, textLimit),
+        controls,
+      };
+    }, { token, max: Math.min(240, Math.max(1, Number(maxControls) || 120)), textLimit: Math.min(20000, Math.max(1000, Number(maxText) || 12000)) });
+    return { ok: true, snapshotToken: token, ...snapshot };
+  } catch (error) {
+    return { ok: false, code: "BROWSER_SNAPSHOT_FAILED", message: error.message, controls: [] };
+  }
+}
+
+export async function resolveSnapshotControl(page, controlId, { role = "", targetPositionIds = [] } = {}) {
+  const id = String(controlId || "").trim();
+  if (!id || !page) return null;
+  const locator = page.locator(`[data-axiom-control="${id.replace(/"/g, "\\\"")}"]`).first();
+  try {
+    if (await locator.count() !== 1 || !await locator.isVisible({ timeout: 800 }) || await locator.isDisabled().catch(() => false)) return null;
+    if (role && String(await locator.getAttribute("role") || "") !== role && !await locator.evaluate((node, expected) => {
+      if (expected === "button") return node.matches("button, input[type='button'], input[type='submit'], a, [role='button'], [role='tab']");
+      if (expected === "textbox") return node.matches("input:not([type='checkbox']):not([type='radio']), textarea, select, [contenteditable='true']");
+      if (expected === "checkbox") return node.matches("input[type='checkbox'], [role='checkbox']");
+      return false;
+    }, role)) return null;
+    if (targetPositionIds.length) {
+      const wanted = targetPositionIds.map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
+      const rowText = await locator.evaluate((node) => node.closest("tr, [role='row'], .el-table__row, .position-row")?.innerText || node.parentElement?.innerText || "").catch(() => "");
+      const normalized = String(rowText).replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      if (wanted.length && !wanted.some((value) => normalized.includes(value))) return null;
+    }
+    return locator;
+  } catch (error) {
+    if (browserLifecycleError(error)) throw error;
+    return null;
+  }
+}
+
 export async function recoverBrowserSession(sessionId = "default") {
   const key = String(sessionId || "default");
   if (!sessions.has(key)) return null;

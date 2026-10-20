@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import test, { after, before } from "node:test";
 import { chromium } from "playwright";
 import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSessionFactory } from "../server/browser.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
 import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
+import { createProvider } from "../server/provider.mjs";
 
 import { positionAmountExit } from "../server/exit-policy.mjs";
 
@@ -61,6 +63,42 @@ test("missing entry fields return a field diagnostic without a page interface cr
   const result = await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 2 });
   assert.equal(result.code, "FORM_FIELDS_NOT_FOUND", JSON.stringify(result));
   assert.equal(result.submitted, false);
+});
+
+test("AI snapshot fills updated trade fields after old classes and labels disappear", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    document.querySelectorAll(".trade_btn, .tab_btn").forEach((node) => node.remove());
+    document.querySelector("#buy").innerHTML = '<label>限价<input name="limit_price" placeholder="当前价格" type="number"></label><label>手数<input name="lots" placeholder="下单数量" type="number"></label><label><input type="checkbox">接受交易协议</label>';
+  });
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const payload = JSON.parse(body);
+    const context = JSON.parse(payload.messages.at(-1).content).context;
+    const controls = context.page.controls;
+    const priceControl = controls.find((control) => control.placeholder === "当前价格");
+    const quantityControl = controls.find((control) => control.placeholder === "下单数量");
+    const consent = controls.find((control) => control.role === "checkbox");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ goal: context.goal, actions: [
+      { type: "fill", field: "price", controlId: priceControl.id, label: priceControl.label },
+      { type: "fill", field: "quantity", controlId: quantityControl.id, label: quantityControl.label },
+      { type: "accept_agreement", field: "consent", controlId: consent.id, label: consent.label },
+    ] }) } }] }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const provider = createProvider({ baseUrl: `http://127.0.0.1:${address.port}/v1`, model: "fixture", apiKey: "key" });
+  try {
+    const result = await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 2, browserProvider: provider });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(await page.locator('input[name="limit_price"]').inputValue(), "101");
+    assert.equal(await page.locator('input[name="lots"]').inputValue(), "2");
+    assert.equal(await page.locator('input[name="lots"]').evaluate(() => document.querySelector('#buy input[type="checkbox"]').checked), true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test("missing side tab never clicks a submit button with a partially matching label", async () => {

@@ -127,21 +127,23 @@ function assertCycleCurrent(task, generation) {
   if (taskGeneration(task) !== generation) throw new CycleAbortError("CYCLE_INVALIDATED");
 }
 
-function resolveRuntime(overrides = {}, { userId = "" } = {}) {
+function resolveRuntime(overrides = {}, { userId = "", providerId = "" } = {}) {
   const use = (name, fallback) => typeof overrides?.[name] === "function" ? overrides[name] : fallback;
+  const browserProvider = providerId ? findProviderForUser(String(providerId), String(userId || "")) : null;
+  const withBrowserProvider = (input = {}) => browserProvider?.id ? { ...input, provider: browserProvider } : input;
   return {
     openMarketBrowser: use("openMarketBrowser", (task, connector) => callBrowserMethod("openMarketBrowser", userId, { task, connector })),
     browserLoginStatus: use("browserLoginStatus", (input) => callBrowserMethod("browserLoginStatus", userId, input)),
-    browserLogin: use("browserLogin", (input) => callBrowserMethod("browserLogin", userId, input)),
+    browserLogin: use("browserLogin", (input) => callBrowserMethod("browserLogin", userId, withBrowserProvider(input))),
     observeMarket: use("observeMarket", (task, connector) => callBrowserMethod("observeMarket", userId, { task, connector })),
     observeExecutionMarket: use("observeExecutionMarket", (task, connector, options) => callBrowserMethod("observeExecutionMarket", userId, { task, connector }, options)),
     requestDecision: use("requestDecision", (provider, context, options) => callProviderMethod("requestDecision", userId, { provider, context, options })),
     requestMarketAnalysis: use("requestMarketAnalysis", (provider, context, options) => callProviderMethod("requestMarketAnalysis", userId, { provider, context, options, channel: "browser" })),
     requestSegmentReview: use("requestSegmentReview", (provider, segment, context, options) => callProviderMethod("requestSegmentReview", userId, { provider, segment, context, options })),
     executeDecision: use("executeDecision", executeDecision),
-    fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, input)),
+    fillSuggestionForm: use("fillSuggestionForm", (input) => callBrowserMethod("fillSuggestionForm", userId, withBrowserProvider(input))),
     continueManualEntry: use("continueManualEntry", (input) => callBrowserMethod("continueManualEntry", userId, input)),
-    submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, input, options)),
+    submitSuggestionForm: use("submitSuggestionForm", (input, options) => callBrowserMethod("submitSuggestionForm", userId, withBrowserProvider(input), options)),
     cancelOpenOrders: use("cancelOpenOrders", (input, options) => callBrowserMethod("cancelOpenOrders", userId, input, options)),
   };
 }
@@ -880,7 +882,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   try {
     clearPendingActionTimer(task.id);
     const actionLabel = pendingActionLabel(task.pendingAction);
-    const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "" });
+    const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "", providerId: task.providerId || "" });
     if (isLiveTask(task) && !isAutomaticAction(task)) {
       task.pendingAction = {
         ...task.pendingAction,
@@ -950,7 +952,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         if (/REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""))) {
           try {
             const connector = getConnector(task.target.connectorId);
-            await ensureLoggedIn(task, connector, { id: task.activeRunId || null }, { code: "REAUTH_REQUIRED" }, resolveRuntime(runtime, { userId: task.ownerUserId || "" }), () => assertCycleCurrent(task, generation));
+            await ensureLoggedIn(task, connector, { id: task.activeRunId || null }, { code: "REAUTH_REQUIRED" }, resolveRuntime(runtime, { userId: task.ownerUserId || "", providerId: task.providerId || "" }), () => assertCycleCurrent(task, generation));
           } catch (recoveryError) {
             task.pendingAction = {
               ...task.pendingAction,
@@ -2068,7 +2070,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     notifyCycleIdle(taskId);
     throw new Error("TASK_NOT_FOUND");
   }
-  const runtime = resolveRuntime(runtimeOverrides, { userId: resolvedUserId });
+  const runtime = resolveRuntime(runtimeOverrides, { userId: resolvedUserId, providerId: providerId || existing.providerId || "" });
   const run = startAgentRun(taskId, { trigger });
   const generation = taskGeneration(task);
   const assertCurrent = () => assertCycleCurrent(task, generation);
@@ -2723,7 +2725,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     if (!task || !isLiveTask(task) || !monitoringIntent(task) || !task.target?.browserSessionId) return { skipped: true };
     const generation = taskGeneration(task);
     const assertCurrent = () => { exitAbort.signal.throwIfAborted(); assertCycleCurrent(task, generation); };
-    const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "" });
+    const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "", providerId: task.providerId || "" });
     const connector = getConnector(task.target.connectorId);
     const observationStartedAt = Date.now();
     const currentTime = () => now + Date.now() - observationStartedAt;
