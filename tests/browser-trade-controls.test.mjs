@@ -750,10 +750,13 @@ for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) for (
     const long = heldSide === "LONG";
     const entryPrice = 100 - (long ? 1 : -1) * (threshold + 2) / 2;
     const belowThresholdPrice = 100 + (long ? 1 : -1) * (threshold > 0 ? -0.01 : 0.01);
+    const dialogPrice = scenario === "dialog-changed" ? belowThresholdPrice : 100;
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div>实时货值变化 -100元</div>')
       .replace("<td>101</td>", "<td>100</td>")
-      .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
+      // Change both initial and delayed prices; a polling override can briefly
+      // lose to the fixture's 200 ms initialization on a busy CI runner.
+      .replace('value="19"', `value="${dialogPrice}"`).replace("value='19.5'", `value='${dialogPrice}'`) }));
     await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
     await page.reload();
     await page.evaluate(({ long, entryPrice, scenario, belowThresholdPrice }) => {
@@ -775,10 +778,6 @@ for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) for (
         if (scenario === "cost-changed") target.children[6].textContent = "100";
         if (scenario === "quantity-changed") target.children[2].textContent = "1";
         if (scenario === "frozen") target.children[7].textContent = "1";
-        if (scenario === "dialog-changed") new MutationObserver(() => {
-          const input = document.querySelector(".el-dialog input");
-          if (input) { input.value = String(belowThresholdPrice); setInterval(() => { input.value = String(belowThresholdPrice); }, 20); }
-        }).observe(document.body, { childList: true });
       };
     }, { long, entryPrice, scenario, belowThresholdPrice });
     const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: 2 };
