@@ -906,7 +906,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
         return row.id !== guard.positionId || row.quantity !== guard.quantity;
       }))) return { ok: false, code: "EXIT_CONDITION_CHANGED", submitted: false };
       targets = rows.length
-        ? rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index }))
+        ? rows.map((row) => ({ ...target, targetPositionIds: row.id ? [row.id] : [], rowIndex: row.index, quantity: row.quantity }))
         : targetPositionIds.map((positionId) => ({ ...target, targetPositionIds: [String(positionId)], quantity }));
     } else {
       const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });

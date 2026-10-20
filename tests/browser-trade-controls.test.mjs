@@ -446,6 +446,53 @@ test("visible input buttons and position span controls are collected", async () 
   assert.ok(controls.rowActions.some((item) => item.label === "转让"));
 });
 
+test("AI snapshot selects custom transfer controls by exact holding after class updates", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    for (const node of document.querySelectorAll(".spotS")) {
+      const handler = node.onclick;
+      node.removeAttribute("onclick");
+      node.removeAttribute("class");
+      node.style.cursor = "pointer";
+      node.addEventListener("click", handler);
+    }
+  });
+  const snapshot = await readTradeControls({ sessionId: "trade-fixture", targetPositionIds: ["P-1"] });
+  assert.ok(snapshot.snapshotControls.some(control => control.label === "转让" && control.rowText?.split(/\s+/).includes("P-1")));
+  assert.ok(snapshot.snapshotControls.some(control => control.label === "买入" && control.role === "button"));
+  let wrongTarget = true;
+  const server = http.createServer(async (request, response) => {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    const context = JSON.parse(JSON.parse(body).messages.at(-1).content).context;
+    const controls = context.page.controls;
+    const control = context.goal === "CONFIRM_TRADE"
+      ? controls.find(control => /确\s*定/.test(control.label))
+      : controls.find(control => control.label === "转让" && control.rowText?.split(/\s+/).includes(wrongTarget ? "P-10" : "P-1"));
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ actions: control ? [
+      { type: "click", field: context.goal === "CONFIRM_TRADE" ? "confirm" : "submit", controlId: control.id, label: control.label },
+    ] : [] }) } }] }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const provider = createProvider({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: "fixture", apiKey: "key" });
+  try {
+    const input = { sessionId: "trade-fixture", action: "SELL", price: 21, quantity: 2,
+      exitType: "TAKE_PROFIT", orderType: "LIMIT", targetPositionIds: ["P-1"], browserProvider: provider };
+    const rejected = await submitSuggestionForm(input);
+    assert.equal(rejected.ok, false, JSON.stringify(rejected));
+    assert.equal(rejected.code, "EXIT_CONTROL_NOT_FOUND");
+    assert.deepEqual(await page.evaluate(() => window.exits), []);
+    wrongTarget = false;
+    const result = await submitSuggestionForm(input);
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.submittedQuantity, 2);
+    assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test("manual entry needs exactly one user click; Agent completes website confirmation", async () => {
   await page.reload();
   await fillSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 20, quantity: 1 });
@@ -712,9 +759,10 @@ for (const scenario of ["position-exact-2", "account-exact-2", "account-reversed
 
 for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", "side-changed", "dialog-changed"]) {
   test(`explicit AI exit verifies exact holdings and final price: ${scenario}`, async () => {
+    const dialogPrice = scenario === "dialog-changed" ? 99 : 100;
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>')
-      .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
+      .replace('value="19"', `value="${dialogPrice}"`).replace("value='19.5'", `value='${dialogPrice}'`) }));
     await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
     await page.reload();
     await page.evaluate(name => {
@@ -729,10 +777,6 @@ for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", 
         if (name === "quote-changed") document.querySelector("body > table tr:nth-child(2) td:nth-child(2)").textContent = "99";
         if (name === "cost-changed") document.querySelectorAll("#positions tbody tr")[1].lastChild.textContent = "99";
         if (name === "side-changed") document.querySelectorAll("#positions tbody tr")[1].children[1].textContent = "卖出";
-        if (name === "dialog-changed") new MutationObserver(() => {
-          const input = document.querySelector(".el-dialog input");
-          if (input) { input.value = "99"; setInterval(() => { input.value = "99"; }, 20); }
-        }).observe(document.body, { childList: true });
       };
     }, scenario);
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,

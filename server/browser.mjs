@@ -704,9 +704,16 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
         return "button";
       };
       const selector = "button, input, textarea, select, [role='button'], [role='checkbox'], [role='tab'], a, summary, [contenteditable='true']";
+      const customControl = (node) => typeof node.onclick === "function" || node.tabIndex >= 0 || getComputedStyle(node).cursor === "pointer";
       const controls = [];
-      document.querySelectorAll(selector).forEach((node) => {
+      document.querySelectorAll(`${selector}, [onclick], [tabindex], div, span`).forEach((node) => {
         if (controls.length >= limit || !visible(node)) return;
+        if (!node.matches(selector)) {
+          if (!customControl(node) || node.closest(selector) || node.querySelector(selector)) return;
+          // Pointer styling can be inherited by wrappers and children. Keep
+          // the visible leaf instead of exposing the same action repeatedly.
+          if ([...node.children].some(child => visible(child) && customControl(child) && compact(child.textContent) === compact(node.textContent))) return;
+        }
         if (node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true") return;
         const role = roleFor(node);
         const type = compact(node.getAttribute("type") || (node instanceof HTMLInputElement ? node.type : ""), 30);
@@ -726,6 +733,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
           text,
           placeholder,
           name,
+          rowText: compact(node.closest("tr, [role='row'], .el-table__row, .position-row")?.innerText, 500) || undefined,
           checked: role === "checkbox" ? Boolean(node.checked || node.getAttribute("aria-checked") === "true") : undefined,
           value: sensitiveValue ? undefined : compact(node.value, 120),
         });
@@ -750,15 +758,22 @@ export async function resolveSnapshotControl(page, controlId, { role = "", targe
   try {
     if (await locator.count() !== 1 || !await locator.isVisible({ timeout: 800 }) || await locator.isDisabled().catch(() => false)) return null;
     if (role && String(await locator.getAttribute("role") || "") !== role && !await locator.evaluate((node, expected) => {
-      if (expected === "button") return node.matches("button, input[type='button'], input[type='submit'], a, [role='button'], [role='tab']");
+      if (expected === "button") return node.matches("button, input[type='button'], input[type='submit'], a, [role='button'], [role='tab']")
+        || (!node.matches("input, textarea, select, [contenteditable='true'], [role]")
+          && (typeof node.onclick === "function" || node.tabIndex >= 0 || getComputedStyle(node).cursor === "pointer"));
       if (expected === "textbox") return node.matches("input:not([type='checkbox']):not([type='radio']), textarea, select, [contenteditable='true']");
       if (expected === "checkbox") return node.matches("input[type='checkbox'], [role='checkbox']");
       return false;
     }, role)) return null;
     if (targetPositionIds.length) {
       const wanted = targetPositionIds.map((value) => String(value || "").replace(/[\s_./\\-]+/g, "").toLocaleLowerCase()).filter(Boolean);
-      const rowText = await locator.evaluate((node) => node.closest("tr, [role='row'], .el-table__row, .position-row")?.innerText || node.parentElement?.innerText || "").catch(() => "");
-      const normalized = String(rowText).replace(/[\s_./\\-]+/g, "").toLocaleLowerCase();
+      const rowValues = await locator.evaluate((node) => {
+        const row = node.closest("tr, [role='row'], .el-table__row, .position-row");
+        if (!row) return [];
+        const cells = [...row.querySelectorAll("td, [role='cell']")];
+        return cells.length ? cells.map(cell => cell.innerText) : String(row.innerText || "").split(/\s+/);
+      }).catch(() => []);
+      const normalized = rowValues.map(value => String(value).replace(/[\s_./\\-]+/g, "").toLocaleLowerCase());
       if (wanted.length && !wanted.some((value) => normalized.includes(value))) return null;
     }
     return locator;
