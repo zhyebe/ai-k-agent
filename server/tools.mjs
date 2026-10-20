@@ -9,7 +9,7 @@ import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
-import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isProfitableExit, positionEntryPrice, realtimeValueAbove } from "./exit-policy.mjs";
+import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -712,7 +712,9 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       && Number(position.quantity) === guard.quantity && Number(position.frozenQuantity || 0) === 0);
     const allowed = positionValid && quote && exitGuardAllowsPrice(guard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(guard, dialogPrice))
       && (guard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, guard.realtimeValueAbove))
-      && (guard?.exitType !== "TAKE_PROFIT" || (isProfitableExit(position, quote.price) && (dialogPrice === null || isProfitableExit(position, dialogPrice))))
+      && (guard?.exitType !== "TAKE_PROFIT" || (isNonLosingExit(position, quote.price) && (dialogPrice === null || isNonLosingExit(position, dialogPrice))))
+      && positionAmountGuardAllowsPrice(guard, position, quote.price)
+      && (dialogPrice === null || positionAmountGuardAllowsPrice(guard, position, dialogPrice))
       && !guard?.profitFallback;
     return { ok: Boolean(allowed), code: "EXIT_CONDITION_CHANGED" };
   };

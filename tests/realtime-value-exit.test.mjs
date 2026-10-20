@@ -34,7 +34,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
       assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
       assert.match(prompt, /不得单独触发离场/);
-      assert.match(prompt, /盈利与亏损离场均由AI/);
+      assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
       assert.match(prompt, /逐仓可成交盈亏/);
       assert.match(prompt, /实时盘面优先/);
       assert.match(prompt, /分析完成后.*再次核对/);

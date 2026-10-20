@@ -400,7 +400,7 @@ for (const autoDecisionEnabled of [false, true]) {
         requestDecision: async (_provider, context) => {
           analyzed += 1;
           assert.equal(context.account.positions[0].positionOrderId, "P-hold");
-          assert.equal(context.strategy.loop.exit.profitGoal, "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT");
+          assert.equal(context.strategy.loop.exit.profitGoal, "PRIORITIZE_ZERO_TO_FIVE");
           assert.equal(context.strategy.loop.exit.lossGoal, "MINIMIZE_PREDICTED_LOSS");
           return { action: "HOLD", bullishProfitProbability: 0.3, bearishProfitProbability: 0.2, evidenceIds: [context.evidenceIds[0]], analysisSummary: "继续持仓的预期净结果更好", riskFlags: [] };
         },

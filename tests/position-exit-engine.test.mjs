@@ -84,7 +84,7 @@ test("a stale HOLD cannot replace live exit plans; unchanged fresh snapshots kee
 });
 
 test("ordinary ticks do not starve AI; its matching price condition executes at the latest quote", async () => {
-  const f = setup("live-condition-completes", [long("P1")]);
+  const f = setup("live-condition-completes", [{ ...long("P1"), orderPrice: 104.5 }]);
   let started, finish, signal;
   const ready = new Promise(resolve => { started = resolve; });
   const originalObservedAt = f.market.observedAt;
@@ -110,26 +110,45 @@ test("ordinary ticks do not starve AI; its matching price condition executes at 
   assert.equal(f.task.exitPlans[0].observedAt, originalObservedAt);
 });
 
-for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) {
-  test(`${automatic ? "automatic" : "manual"} ${heldSide}: profit >= 2 does not close without an AI plan`, async () => {
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide}: amount ${threshold} exits without an AI plan and ignores account totals`, async () => {
     const isLong = heldSide === "LONG";
-    const f = setup(`profit-fallback-${automatic}-${heldSide}`, [
-      { ...long("profit", 2), side: isLong ? "买入" : "卖出", roundTripFee: 1 },
-      { ...long("loss"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 110 : 90 },
+    const price = 100 + (isLong ? 1 : -1) * (threshold + 1) / 2;
+    const f = setup(`amount-boundary-${automatic}-${heldSide}-${threshold}`, [
+      { ...long("boundary", 2), side: isLong ? "买入" : "卖出", roundTripFee: 1 },
+      { ...long("recover"), side: isLong ? "买入" : "卖出", orderPrice: price + (isLong ? 1 : -1) },
     ], { autoDecisionEnabled: automatic });
-    f.market.account.realtimeValueChange = -10;
-    const price = 100 + (isLong ? 1.5 : -1.5);
+    f.market.account.realtimeValueChange = threshold > 0 ? -100 : 100;
     f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.deepEqual(f.submitted, []);
-    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["profit", "loss"]);
+    assert.equal(f.submitted.length, 1);
+    assert.deepEqual(f.submitted[0].targetPositionIds, ["boundary"]);
+    assert.equal(f.submitted[0].exitType, threshold > 0 ? "TAKE_PROFIT" : "STOP_LOSS");
+    assert.equal(f.submitted[0].exitGuard.positionAmount.threshold, threshold);
+    assert.equal(f.task.pendingAction.source, "position_amount_boundary");
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["recover"]);
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.equal(f.submitted.length, 0, "account profit never becomes a mechanical exit");
+    assert.equal(f.submitted.length, 1, "no duplicate exit and no automatic exit for a recoverable loss inside -3–0");
+  });
+}
+
+for (const heldSide of ["LONG", "SHORT"]) for (const amount of [0, 0.5, -1]) {
+  test(`${heldSide}: AI can decisively exit inside the range at amount ${amount}`, async () => {
+    const f = setup(`ai-range-${heldSide}-${amount}`, [{ ...long("P1", 2), side: heldSide, roundTripFee: 1 }]);
+    const price = 100 + (heldSide === "LONG" ? 1 : -1) * (amount + 1) / 2;
+    f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
+    const exitType = amount >= 0 ? "TAKE_PROFIT" : "STOP_LOSS";
+    f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide, quantity: 2, validForSec: 120,
+      takeProfitPrice: amount >= 0 ? price : null, stopLossPrice: amount < 0 ? price : null }] }, f.market, f.task).plans;
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitType, exitType);
+    assert.equal(f.task.pendingAction.source, "ai_price_trigger");
   });
 }
 
 test("account realtime value exactly 2 is reference only without an AI exit plan", async () => {
-  const f = setup("account-profit-fallback", [long("profit"), { ...long("loss"), orderPrice: 110 }]);
+  const f = setup("account-profit-fallback", [long("profit"), { ...long("loss"), orderPrice: 103 }]);
   f.market.orderBook = { bids: [{ price: 101, volume: 100 }], asks: [{ price: 102, volume: 100 }] };
   f.task.exitPlans = [{ positionId: "profit", expiresAt: new Date(Date.now() - 1000).toISOString() }];
   f.market.account.realtimeValueChange = 2;
@@ -176,7 +195,7 @@ for (const automatic of [false, true]) {
     const f = setup(`realtime-condition-${automatic}`, [
       { ...long("profit-long"), roundTripFee: 4 },
       { ...long("profit-short"), side: "卖出", orderPrice: 111, roundTripFee: 4 },
-      { ...long("loss"), orderPrice: 108, roundTripFee: 2 },
+      { ...long("loss"), orderPrice: 105, roundTripFee: 2 },
     ], { autoDecisionEnabled: automatic });
     f.market.account.realtimeValueChange = 0;
     f.task.exitPlans = validateExitPlans({ exitPlans: f.market.account.positions.map(p => ({
@@ -251,11 +270,11 @@ for (const autoDecisionEnabled of [false, true]) {
         f.market.orderBook = { bids: [{ price: isLong ? price : price - 1, volume: 100 }], asks: [{ price: isLong ? price + 1 : price, volume: 100 }] };
       };
       for (const [points, exitType] of [[3, "TAKE_PROFIT"], [-3, "STOP_LOSS"]]) {
-        const f = setup(`forecast-points-${autoDecisionEnabled}-${heldSide}-${exitType}`, [{ ...long("P1"), side: isLong ? "买入" : "卖出", roundTripFee: 2 }], { autoDecisionEnabled });
+        const f = setup(`forecast-points-${autoDecisionEnabled}-${heldSide}-${exitType}`, [{ ...long("P1"), side: isLong ? "买入" : "卖出", roundTripFee: 1 }], { autoDecisionEnabled });
         quote(f, -1);
         f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide, quantity: 1, validForSec: 120,
           takeProfitPrice: isLong ? 103 : 97, stopLossPrice: isLong ? 97 : 103,
-          rationale: "AI预测正常回撤可恢复，目标毛利3点扣费2后净利1，持续恶化至保护边界则止损" }] }, f.market, f.task).plans;
+          rationale: "AI预测正常回撤可恢复，目标毛利3点扣费1后净利2，持续恶化至保护边界则止损" }] }, f.market, f.task).plans;
         assert.equal(f.task.exitPlans.length, 1);
         for (let observation = 0; observation < 2; observation++) {
           await runPositionExitCycle(f.task.id, { runtime: f.runtime });
@@ -278,7 +297,7 @@ for (const autoDecisionEnabled of [false, true]) {
       const isLong = heldSide === "LONG";
       const f = setup(`realtime-profit-${autoDecisionEnabled}-${heldSide}`, [
         { ...long("P-profit"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 100 : 103, roundTripFee: 1 },
-        { ...long("P-loss"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 105 : 98, roundTripFee: 1 },
+        { ...long("P-loss"), side: isLong ? "买入" : "卖出", orderPrice: isLong ? 102 : 101, roundTripFee: 1 },
       ], { autoDecisionEnabled });
       f.market.account.realtimeValueChange = 1.01;
       f.market.orderBook = { bids: [{ price: 101.5, volume: 100 }], asks: [{ price: 101.5, volume: 100 }] };
@@ -383,9 +402,9 @@ test("unverified or frozen holdings cannot masquerade as successful closing", as
   assert.equal(f.submitted.length, 0);
 });
 
-test("AI conditions execute independently while the model is waiting; its late entry cannot overwrite the exit", async () => {
+test("profit threshold executes while AI is waiting without any exit plan; late entry cannot overwrite the exit", async () => {
   const f = setup("exit-while-ai", [long("P1")]);
-  f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 }] }, f.market, f.task).plans;
+  f.task.exitPlans = [];
   let releaseModel, modelStarted;
   const waiting = new Promise(resolve => { modelStarted = resolve; });
   const analysis = runAnalysis(f.task.id, "", { runtime: {

@@ -60,15 +60,22 @@ test("fast position monitor recovers login and executes the still-valid AI exit 
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-test("fast position monitor recovers login but does not invent an exit without an AI plan", async t => {
+for (const entryPrice of [98, 98.01, 106, 105.99]) test(`fast position monitor recovers login and rechecks the amount rule without an AI plan: entry ${entryPrice}`, async t => {
   const f = setup(t);
-  f.market.account.positions[0].orderPrice = 101;
+  f.market.account.positions[0].orderPrice = entryPrice;
   let reads = 0, submitted;
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  assert.deepEqual(f.calls, ["read", "login", "read"]);
-  assert.equal(submitted, undefined);
+  if (entryPrice === 98 || entryPrice === 106) {
+    assert.deepEqual(f.calls, ["read", "login", "read", "submit"]);
+    assert.equal(submitted.exitType, entryPrice === 98 ? "TAKE_PROFIT" : "STOP_LOSS");
+    assert.deepEqual(submitted.targetPositionIds, ["P1"]);
+    assert.equal(submitted.exitGuard.positionAmount.threshold, entryPrice === 98 ? 5 : -3);
+  } else {
+    assert.deepEqual(f.calls, ["read", "login", "read"]);
+    assert.equal(submitted, undefined);
+  }
 });
 
 test("simultaneous collection and exit expiry share one automatic login", async t => {

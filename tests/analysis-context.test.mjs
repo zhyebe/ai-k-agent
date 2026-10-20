@@ -9,7 +9,11 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.equal(exit.profitGoal, "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT");
+  assert.equal(exit.profitGoal, "PRIORITIZE_ZERO_TO_FIVE");
+  assert.equal(exit.positionTakeProfitAmount, 5);
+  assert.equal(exit.positionStopLossAmount, -3);
+  assert.deepEqual(exit.preferredExitAmountRange, [0, 5]);
+  assert.equal(exit.profitUnit, "POSITION_TOTAL_AMOUNT");
   assert.match(exit.realtimeValueRule, /仅作为 AI.*参考/);
   assert.match(exit.realtimeValueRule, /不是程序硬性离场条件/);
   assert.equal("profitFallback" in exit, false);
@@ -22,7 +26,7 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["转让"]);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /2–5是价格差，不是K线根数或百分比/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /-3、0、5是整笔金额，不是每单位价格差、K线根数或百分比/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /当前与上一轮/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /亏1点不自动离场/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /持续扩亏且继续持有更可能恶化/);

@@ -160,14 +160,14 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；盈利和亏损离场均由AI选择最优净结果；约2–5个价格点仅为示例，2–5是价格差，不是K线根数或百分比，扣除已知费用滑点后再判断净收益。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
+    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；单笔持仓总盈亏金额≥+5自动止盈、≤-3自动止损；区间内优先0～5果断离场，-3～0内结合恢复机会决定等待或止损；按可成交价差乘数量并扣已知整仓费用，费用未知保留毛利/净利未知。-3、0、5是整笔金额，不是每单位价格差、K线根数或百分比。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
-    hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_VISIBLE_CLICKS"],
+    hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_POSITION_AMOUNT_BOUNDARIES", "EXECUTE_VISIBLE_CLICKS"],
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null,
       timing: "买多预测阶段低位入、高位出；买空预测阶段高位入、低位出。分别评估趋势和当前可成交价，未到合适点位可HOLD或明确LIMIT挂单，MARKET不等待预测价。",
       whileHolding: "已有持仓继续逐仓监控，同时独立评估新的买多/买空机会，不等上一单离场，不设持仓单数上限。单笔entryQuantity不是总持仓上限；考虑累计敞口和保证金，同K及同一未成交意图防重复。" },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "AI_SELECT_OPTIMAL_REALIZABLE_PROFIT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。AI 必须逐仓比较立即兑现与继续持有的未来路径，选择最优盈利离场时机；亏损同样由 AI 判断持续扩亏、恢复路径和最小损失离场时机。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "PRIORITIZE_ZERO_TO_FIVE", positionTakeProfitAmount: 5, positionStopLossAmount: -3, preferredExitAmountRange: [0, 5], profitUnit: "POSITION_TOTAL_AMOUNT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。单笔总盈亏≥+5自动止盈、≤-3自动止损；区间内 AI 优先0～5果断离场，0明确为保本；-3～0内结合恢复机会决定等待或及时止损。不得为追求更高目标拖延盈利兑现。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {

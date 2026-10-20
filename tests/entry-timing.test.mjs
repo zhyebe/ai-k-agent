@@ -109,7 +109,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
       assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
-      assert.match(prompt, /盈利与亏损离场均由AI/);
+      assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);
       const value = JSON.stringify({ action: "BUY", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,

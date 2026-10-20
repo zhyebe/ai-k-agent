@@ -483,7 +483,7 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
     const body = JSON.parse(options.body);
     const prompt = body.messages[0].content;
     assert.match(prompt, /Every round inspect every account.openOrders/);
-    assert.match(prompt, /Do not label a flat or negative net result TAKE_PROFIT/);
+    assert.match(prompt, /Do not label a negative net result TAKE_PROFIT/);
     assert.match(prompt, /User-configured entry quantity: 3/);
     assert.equal(JSON.parse(body.messages.at(-1).content).account.openOrders[0].orderId, "O-1");
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.39, bearish_profit_probability: 0.38,
@@ -508,7 +508,7 @@ test("missing conditional exits are returned to AI and preserve corrected plans 
     if (calls % 2 === 0) {
       assert.match(body.messages.at(-1).content, /every verified unfrozen position requires an exit_plans item/);
       assert.match(body.messages.at(-1).content, /Forecast trend, entry and exit together/);
-      assert.match(body.messages.at(-1).content, /2–5指价格差，不是K线根数/);
+      assert.match(body.messages.at(-1).content, /金额不是每单位价差，也不是账户总盈亏/);
       assert.match(body.messages.at(-1).content, /AI-operated counterparties as a hypothesis supported by price\/order-book evidence/);
       assert.deepEqual(JSON.parse(body.messages.at(-2).content), response);
     } else {
@@ -776,7 +776,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /亏损也是预测对象/);
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
-    assert.match(prompt, /目标是由AI选择最优可兑现盈利和最小损失离场时机/);
+    assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);
@@ -788,7 +788,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
-    assert.match(prompt, /TAKE_PROFIT requires positive executable net profit versus real entry price/);
+    assert.match(prompt, /TAKE_PROFIT requires nonnegative executable net profit versus real entry price/);
     assert.match(prompt, /STOP_LOSS requires evidence-based adverse-path and recovery analysis/);
     assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(prompt, /Price response outranks static displayed depth/);
@@ -1241,7 +1241,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
     assert.match(prompt, /收益与风险必须一起预测/);
-    assert.match(prompt, /目标是由AI选择最优可兑现盈利和最小损失离场时机/);
+    assert.match(prompt, /≥\+5自动止盈，≤-3自动止损/);
     assert.match(prompt, /预期未来盈利不等于当前已盈利/);
     assert.match(prompt, /连续多轮仍为-1点不是继续扩大/);
     assert.doesNotMatch(prompt, /只要 AI 预测未来约 2–5 根 K|TAKE_PROFIT only when exiting now is forecast to maximize|or further loss expansion is forecast/);

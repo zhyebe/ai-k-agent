@@ -11,7 +11,7 @@ import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } 
 import { normalizeUnitProbability } from "./provider.mjs";
 import { hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
-import { evaluateExitPlan, executableExitQuote, heldDirection, isProfitableExit, positionEntryPrice, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
+import { evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -371,7 +371,7 @@ export function attachPositionExit(decision, market = {}) {
   if (decision.exitType === "TAKE_PROFIT" && market.account?.positionsVerified === true) {
     const unverifiedProfit = matched.some((position) => {
       const quote = executableExitQuote(market, position, Date.now());
-      return !quote || !isProfitableExit(position, quote.price);
+      return !quote || !isNonLosingExit(position, quote.price);
     });
     if (unverifiedProfit) return fail("EXIT_PROFIT_NOT_VERIFIED");
   }
@@ -2810,13 +2810,20 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
       task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: market.account.positions.length || market.account.openOrders.length ? (closing.overdue ? "OVERDUE" : "CLOSING") : "FLAT_VERIFIED", remainingPositions: market.account.positions.length, remainingOrders: market.account.openOrders.length, checkedAt: market.observedAt };
     } else {
-      // AI owns both profit-taking and loss protection. The host validates
-      // fresh quotes, exact holdings and the AI-authored plan, then executes it.
+      // User amount boundaries (+5 / -3) execute independently of AI latency.
+      // Inside the range, the AI chooses when to realize profit or cut loss.
+      const boundaryIds = new Set();
+      for (const position of market.account.positions) {
+        const result = positionAmountExit(position, market, Date.now());
+        if (!result) continue;
+        boundaryIds.add(position.positionOrderId);
+        candidates.push(result);
+      }
       for (const plan of task.exitPlans || []) {
         const result = evaluateExitPlan(plan, market, Date.now());
         plan.status = result.status;
         plan.lastQuotePrice = result.quotePrice ?? null;
-        if (result.status === "TRIGGERED") candidates.push({ ...result, plan });
+        if (result.status === "TRIGGERED" && !boundaryIds.has(plan.positionId)) candidates.push({ ...result, plan });
       }
     }
     const submitted = [];
@@ -2841,7 +2848,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : "ai_price_trigger", runtime }); }
+      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.decision.exitGuard?.positionAmount ? "position_amount_boundary" : "ai_price_trigger", runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: candidate.position.positionOrderId, code: error.message });
@@ -2858,7 +2865,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
     }
     const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
-    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，AI 尚缺有效条件计划，继续请求分析` : `已核实 ${market.account.positions.length} 笔持仓，按 AI 触发条件监控` };
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，逐笔监控+5止盈/-3止损；AI 尚缺保护计划，继续分析` : `已核实 ${market.account.positions.length} 笔持仓，逐笔监控+5止盈/-3止损及 AI 条件` };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔离场未完成；${task.exitMonitor.message}` };
     if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
     persistTask(task);

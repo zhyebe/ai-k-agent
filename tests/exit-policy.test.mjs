@@ -1,11 +1,82 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isProfitableExit, parseSessionClose, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
+import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isNonLosingExit, parseSessionClose, positionAmountExit, positionAmountGuardAllowsPrice, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
 
 const observed = Date.parse("2026-10-13T10:00:00+08:00");
 const position = { positionOrderId: "P-1", symbol: "DGKZ", side: "买入", quantity: 2, orderPrice: 102 };
 const market = { symbol: "DGKZ", observedAt: new Date(observed).toISOString(), account: { positionsVerified: true, positions: [position] }, orderBook: { bids: [{ price: 104, volume: 20 }], asks: [{ price: 106, volume: 20 }] } };
 const source = { positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 };
+
+for (const side of ["LONG", "SHORT"]) {
+  test(`${side}: whole-position +5/-3 boundaries include quantity and costs, independent of account total`, () => {
+    const p = { ...position, side, orderPrice: 100, roundTripFee: 1 };
+    const snapshot = amount => {
+      const price = 100 + (side === "LONG" ? 1 : -1) * (amount + 1) / 2;
+      return { ...market, account: { positionsVerified: true, positions: [p], realtimeValueChange: amount > 0 ? -100 : 100 },
+        orderBook: { bids: [{ price: side === "LONG" ? price : price - 1, volume: 20 }],
+          asks: [{ price: side === "LONG" ? price + 1 : price, volume: 20 }] } };
+    };
+    for (const amount of [-2.99, -1, 0, 2, 4.99]) assert.equal(positionAmountExit(p, snapshot(amount), observed), null);
+    for (const amount of [-10, -3, 5, 10]) {
+      const result = positionAmountExit(p, snapshot(amount), observed);
+      const profit = amount > 0;
+      assert.equal(result.decision.exitType, profit ? "TAKE_PROFIT" : "STOP_LOSS");
+      assert.equal(result.decision.action, side === "LONG" ? "SELL" : "BUY");
+      assert.equal(result.netPnl, amount);
+      const guard = result.decision.exitGuard;
+      assert.equal(guard.positionAmount.threshold, profit ? 5 : -3);
+      assert.equal(positionAmountGuardAllowsPrice(guard, p, result.quotePrice), true);
+      assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, orderPrice: 101 }, result.quotePrice), false);
+      assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, quantity: 1 }, result.quotePrice), false);
+      assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, frozenQuantity: 1 }, result.quotePrice), false);
+      assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, side: side === "LONG" ? "SHORT" : "LONG" }, result.quotePrice), false);
+      if (amount === 5 || amount === -3) {
+        assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, roundTripFee: profit ? 2 : 0 }, result.quotePrice), false);
+        const inside = result.quotePrice + (side === "LONG" ? 1 : -1) * (profit ? -0.01 : 0.01);
+        assert.equal(positionAmountGuardAllowsPrice(guard, p, inside), false);
+      }
+    }
+    assert.equal(positionAmountExit(p, snapshot(5), observed + 5001), null);
+    const unknown = snapshot(5); unknown.account.positionsVerified = false;
+    assert.equal(positionAmountExit(p, unknown, observed), null);
+    assert.equal(positionAmountExit({ ...p, frozenQuantity: 1 }, snapshot(-3), observed), null);
+  });
+}
+
+test("unknown fees stay unknown; gross boundary cannot be described as verified net profit", () => {
+  const result = positionAmountExit({ ...position, quantity: 3 }, market, observed);
+  assert.equal(result.grossPnl, 6);
+  assert.equal(result.netPnl, null);
+  assert.equal(result.decision.exitGuard.positionAmount.fees, null);
+});
+
+for (const side of ["LONG", "SHORT"]) for (const amount of [5, -3]) {
+  test(`${side}: decimal boundary ${amount} triggers exactly without rounding an interior amount`, () => {
+    const p = { ...position, side, orderPrice: 100, quantity: 4, roundTripFee: 0.2 };
+    const price = 100 + (side === "LONG" ? 1 : -1) * (amount + 0.2) / 4;
+    const snapshot = { ...market, orderBook: { bids: [{ price, volume: 20 }], asks: [{ price, volume: 20 }] } };
+    const candidate = positionAmountExit(p, snapshot, observed);
+    assert.ok(candidate);
+    assert.equal(positionAmountGuardAllowsPrice(candidate.decision.exitGuard, p, price), true);
+    const inside = price + (side === "LONG" ? 1 : -1) * (amount > 0 ? -0.00001 : 0.00001);
+    assert.equal(positionAmountGuardAllowsPrice(candidate.decision.exitGuard, p, inside), false);
+    snapshot.orderBook = { bids: [{ price: inside, volume: 20 }], asks: [{ price: inside, volume: 20 }] };
+    assert.equal(positionAmountExit(p, snapshot, observed), null);
+  });
+}
+
+for (const heldSide of ["LONG", "SHORT"]) test(`${heldSide}: AI may exit at verified zero or small profit inside 0–5`, () => {
+  const p = { ...position, side: heldSide, orderPrice: 100, quantity: 2, roundTripFee: 1 };
+  for (const amount of [0, 0.5, 4.99]) {
+    const price = 100 + (heldSide === "LONG" ? 1 : -1) * (amount + 1) / 2;
+    const snapshot = { ...market, account: { positionsVerified: true, positions: [p] },
+      orderBook: { bids: [{ price, volume: 20 }], asks: [{ price, volume: 20 }] } };
+    const result = validateExitPlans({ exitPlans: [{ ...source, heldSide, takeProfitPrice: price, stopLossPrice: null }] }, snapshot, {}, observed);
+    assert.equal(result.plans.length, 1);
+    assert.equal(evaluateExitPlan(result.plans[0], snapshot, observed).decision.exitType, "TAKE_PROFIT");
+    assert.equal(positionAmountExit(p, snapshot, observed), null, "inside range needs AI; no automatic exit at 0 or 2");
+  }
+});
 
 test("closing uses the saved stop time, with the lead counted back from that instant", () => {
   const saved = { tradingSession: { opensAt: "2026-10-13T09:00", closesAt: "2026-10-13T16:00" }, sessionClose: { leadMinutes: 5 } };
@@ -132,12 +203,12 @@ test("费用已知时拒绝毛利净亏，未知费用不伪报净收益", () =>
   const p = { ...position, roundTripFee: 4 };
   assert.equal(exitNetPnl(p, 103).grossPnl, 2);
   assert.equal(exitNetPnl(p, 103).netPnl, -2);
-  assert.equal(isProfitableExit(p, 103), false);
-  assert.equal(isProfitableExit(p, 104), false);
-  assert.equal(isProfitableExit(p, 105), true);
+  assert.equal(isNonLosingExit(p, 103), false);
+  assert.equal(isNonLosingExit(p, 104), true);
+  assert.equal(isNonLosingExit(p, 105), true);
   assert.equal(exitNetPnl(position, 105).netPnl, null);
   assert.equal(exitNetPnl({ ...position, roundTripFee: null, totalFees: 8 }, 105).netPnl, -2);
-  assert.equal(isProfitableExit({ ...position, orderPrice: null }, 105), false);
+  assert.equal(isNonLosingExit({ ...position, orderPrice: null }, 105), false);
 });
 
 test("持仓成本改变后旧计划失效，防止同号持仓被按旧盈利目标平掉", () => {

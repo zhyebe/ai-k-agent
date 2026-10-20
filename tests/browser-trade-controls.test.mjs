@@ -5,6 +5,8 @@ import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, setBrowserSe
 import { parseHaohanAccount } from "../server/haohan.mjs";
 import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 
+import { positionAmountExit } from "../server/exit-policy.mjs";
+
 import { tradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
 
@@ -573,7 +575,7 @@ for (const scenario of ["position-exact-2", "account-exact-2", "account-reversed
   });
 }
 
-for (const scenario of ["valid", "quote-changed", "cost-changed", "side-changed", "dialog-changed"]) {
+for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", "side-changed", "dialog-changed"]) {
   test(`explicit AI exit verifies exact holdings and final price: ${scenario}`, async () => {
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>')
@@ -584,7 +586,7 @@ for (const scenario of ["valid", "quote-changed", "cost-changed", "side-changed"
       const head = document.createElement("th"); head.textContent = "订单价格";
       document.querySelector("#positions thead tr").append(head);
       for (const row of document.querySelectorAll("#positions tbody tr")) {
-        const cell = document.createElement("td"); cell.textContent = "98"; row.append(cell);
+        const cell = document.createElement("td"); cell.textContent = name === "break-even" ? "100" : "98"; row.append(cell);
       }
       const original = window.transfer;
       window.transfer = (...args) => {
@@ -600,11 +602,62 @@ for (const scenario of ["valid", "quote-changed", "cost-changed", "side-changed"
     }, scenario);
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
       exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], exitGuard: { positions: [{
-        positionId: "P-1", heldSide: "LONG", quantity: 2, entryPrice: 98, exitType: "TAKE_PROFIT",
+        positionId: "P-1", heldSide: "LONG", quantity: 2, entryPrice: scenario === "break-even" ? 100 : 98, exitType: "TAKE_PROFIT",
         comparison: "EQ", triggerPrice: 100, expiresAt: new Date(Date.now() + 10000).toISOString(),
       }] } });
+    assert.equal(result.ok, ["valid", "break-even"].includes(scenario), JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.exits)).length, ["valid", "break-even"].includes(scenario) ? 1 : 0);
+  });
+}
+
+for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
+  test(`${heldSide} position amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
+    const long = heldSide === "LONG";
+    const entryPrice = 100 - (long ? 1 : -1) * (threshold + 2) / 2;
+    const belowThresholdPrice = 100 + (long ? 1 : -1) * (threshold > 0 ? -0.01 : 0.01);
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+      .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div>实时货值变化 -100元</div>')
+      .replace("<td>101</td>", "<td>100</td>")
+      .replace('value="19"', 'value="100"').replace("value='19.5'", "value='100'") }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    await page.reload();
+    await page.evaluate(({ long, entryPrice, scenario, belowThresholdPrice }) => {
+      for (const title of ["订单价格", "冻结数量"]) {
+        const head = document.createElement("th"); head.textContent = title;
+        document.querySelector("#positions thead tr").append(head);
+      }
+      for (const row of document.querySelectorAll("#positions tbody tr")) {
+        for (const value of [entryPrice, 0]) {
+          const cell = document.createElement("td"); cell.textContent = String(value); row.append(cell);
+        }
+      }
+      const target = document.querySelectorAll("#positions tbody tr")[1];
+      target.children[1].textContent = long ? "买入" : "卖出";
+      const original = window.transfer;
+      window.transfer = (...args) => {
+        original(...args);
+        if (scenario === "quote-changed") document.querySelector(`body > table tr:nth-child(${long ? 2 : 1}) td:nth-child(2)`).textContent = String(belowThresholdPrice);
+        if (scenario === "cost-changed") target.children[6].textContent = "100";
+        if (scenario === "quantity-changed") target.children[2].textContent = "1";
+        if (scenario === "frozen") target.children[7].textContent = "1";
+        if (scenario === "dialog-changed") new MutationObserver(() => {
+          const input = document.querySelector(".el-dialog input");
+          if (input) { input.value = String(belowThresholdPrice); setInterval(() => { input.value = String(belowThresholdPrice); }, 20); }
+        }).observe(document.body, { childList: true });
+      };
+    }, { long, entryPrice, scenario, belowThresholdPrice });
+    const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: 2 };
+    const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true, positions: [position] },
+      orderBook: { bids: [{ price: 100, volume: 30 }], asks: [{ price: 100, volume: 20 }] } };
+    const candidate = positionAmountExit(position, market);
+    assert.equal(candidate.netPnl, threshold);
+    if (scenario === "expired") candidate.decision.exitGuard.expiresAt = new Date(Date.now() - 1).toISOString();
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: 2 });
     assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
-    assert.equal((await page.evaluate(() => window.exits)).length, scenario === "valid" ? 1 : 0);
+    const exits = await page.evaluate(() => window.exits);
+    assert.equal(exits.length, scenario === "valid" ? 1 : 0);
+    if (scenario === "valid") assert.deepEqual(exits[0], { id: "P-1", price: "100", quantity: "2" });
+    else assert.equal(result.code, "EXIT_CONDITION_CHANGED");
   });
 }
 
