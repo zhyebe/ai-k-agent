@@ -8,6 +8,30 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
+test("camelCase model decisions retain summary, per-board regimes and forecast while HOLD", async t => {
+  const output = { action: "HOLD", marketRegime: "RANGE", analysisSummary: "主判断：震荡，1322–1331区间往返，暂不入场",
+    bullishProfitProbability: 0.42, bearishProfitProbability: 0.42,
+    boardAssessments: [{ symbol: "A", action: "HOLD", marketRegime: "RANGE", analysisSummary: "区间未破" }],
+    forecastHorizon: { nextK: { direction: "RANGE", path: "先试1331再回1328", invalidation: "1322" },
+      next10K: { direction: "DOWN", path: "偏弱，失守1322后预计10分钟内试1318", invalidation: "1331" } },
+    watchConditions: ["重估1331上方的持续买盘"], riskFlags: ["RANGE_MARKET_NO_ENTRY"], reasonCodes: ["RANGE"],
+    evidenceIds: ["E1"], targetPositionPct: 0, maxOrderValuePct: 0, decisionTtlSec: 90 };
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }));
+  });
+  const result = await requestDecision({ apiKey: "fixture", baseUrl: "https://fixture.invalid", model: "fixture" }, {}, { fastAnalysis: true });
+  assert.equal(calls, 1);
+  assert.equal(result.action, "HOLD");
+  assert.equal(result.analysisSummary, output.analysisSummary);
+  assert.equal(result.boardAssessments[0].marketRegime, "RANGE");
+  assert.equal(result.boardAssessments[0].summary, "区间未破");
+  assert.equal(result.forecastHorizon.next10K.path, output.forecastHorizon.next10K.path);
+  for (const field of ["watchConditions", "riskFlags", "reasonCodes", "evidenceIds", "decisionTtlSec"])
+    assert.deepEqual(result[field], output[field]);
+});
+
 test("all provider formats extract final text without treating reasoning as the decision", () => {
   const final = '{"action":"SELL","bullish_profit_probability":0.3,"bearish_profit_probability":0.6}';
   const reasoning = '{"action":"BUY"}';

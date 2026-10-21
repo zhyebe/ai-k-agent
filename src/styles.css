@@ -337,6 +337,12 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .decision-panel .decision-safe svg { flex-shrink: 0; margin-top: 4px; }
 .decision-panel .decision-stopped { color: var(--muted); }
 .decision-details { margin-top: 14px; border-top: 1px solid var(--border-soft); }
+.decision-forecast { margin: 14px 22px 0; color: var(--muted-strong); font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.decision-forecast p { margin: 0; }
+.decision-forecast strong { display: block; color: var(--text); font-weight: 600; }
+.decision-forecast .forecast-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+.decision-forecast .forecast-row > span { color: var(--muted); font-size: 12px; }
+.decision-forecast .entry-block { margin-bottom: 10px; color: var(--amber); }
 .decision-details > summary { padding: 12px 22px 0; color: var(--muted-strong); font-size: 14px; cursor: pointer; }
 .decision-details > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 .decision-panel .decision-actions, .decision-panel .pending-action-card { margin-right: 26px; margin-left: 26px; }

@@ -449,6 +449,7 @@ export function meetsOrderBoundary(decision) {
 
 export function applyEntryBoundary(decision, market = {}) {
   const next = { ...decision };
+  delete next.entryBlock;
   if (["TAKE_PROFIT", "STOP_LOSS", "SCHEDULED_CLOSE"].includes(next.exitType)) return next;
   if (["BUY", "SELL"].includes(next.action)) {
     const target = decisionTargetBook(next, market);
@@ -458,13 +459,15 @@ export function applyEntryBoundary(decision, market = {}) {
     const topRegime = normalizeMarketRegime(next.marketRegime);
     const boardRegime = normalizeMarketRegime(assessment?.marketRegime);
     next.marketRegime = topRegime === "RANGE" || boardRegime === "RANGE" ? "RANGE"
-      : assessment ? boardRegime : topRegime;
+      : boardRegime !== "UNKNOWN" ? boardRegime : topRegime;
     if (!["UP", "DOWN"].includes(next.marketRegime)) {
       next.action = "HOLD";
       next.targetPositionPct = 0;
       next.maxOrderValuePct = 0;
       const range = next.marketRegime === "RANGE";
-      next.riskFlags = [...new Set([...(next.riskFlags || []), range ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN"])];
+      const reason = range ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN";
+      next.entryBlock = { requestedAction: decision.action, reason };
+      next.riskFlags = [...new Set([...(next.riskFlags || []), reason])];
     }
   }
   // AI owns direction and timing. Host only evaluates the AI-selected side
@@ -2537,8 +2540,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       stage: "analyze",
       kind: "decision",
       level: providerSucceeded ? "info" : "error",
-      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.action}，置信度 ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`,
-      data: { action: decision.action, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], modelDiagnostics: decision.modelDiagnostics, observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
+      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.entryBlock?.requestedAction || decision.action}${decision.entryBlock ? `；入场拦截 ${decision.entryBlock.reason}，执行 HOLD` : ""}，置信度 ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`,
+      data: { action: decision.action, marketRegime: decision.marketRegime, entryBlock: decision.entryBlock, analysisSummary: decision.analysisSummary, forecastHorizon: decision.forecastHorizon, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], modelDiagnostics: decision.modelDiagnostics, observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
     });
 
     logStage(task, run, "rules", "执行确定性规则与红线检查");

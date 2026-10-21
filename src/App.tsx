@@ -170,6 +170,8 @@ const riskLabels: Record<string, string> = {
   BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
   LOW_PROFIT_PROBABILITY: "历史概率提示",
   INCOMPLETE_DIRECTIONAL_PROBABILITIES: "AI 方向预测字段不完整",
+  RANGE_MARKET_NO_ENTRY: "目标盘横盘震荡，禁止新开仓",
+  ENTRY_MARKET_REGIME_UNKNOWN: "目标盘当前趋势字段不足，无法核实入场条件",
   EXIT_PROFIT_NOT_VERIFIED: "入场成本或可成交盈利未核实",
 };
 const reasonLabels: Record<string, string> = {
@@ -1307,6 +1309,11 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       ? bearishProbability
       : Number(decision.profitProbability ?? 0);
   const target = decisionTargetLabel(decision);
+  const entryBlockReason = decision.entryBlock?.reason || decision.riskFlags.find(flag => ["RANGE_MARKET_NO_ENTRY", "ENTRY_MARKET_REGIME_UNKNOWN"].includes(flag));
+  const forecasts = [
+    { label: "下一 K", value: decision.forecastHorizon?.nextK },
+    { label: "未来约 10 K", value: decision.forecastHorizon?.next10K },
+  ];
   const latestPending = task.pendingAction?.status === "TAKEN_OVER" ? null : task.pendingAction;
   const isCurrentPending = latestPending && (latestPending.status === "WAITING" || (latestPending.decisionRunId && decision.runId
     ? latestPending.decisionRunId === decision.runId
@@ -1328,6 +1335,17 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
+      {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
+        {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
+        <p><strong>{decision.action === "HOLD" ? "观望依据" : "主判断"}</strong>{decision.analysisSummary || "本轮未提供判断说明"}</p>
+        {forecasts.map(({ label, value }) => <div className="forecast-row" key={label}>
+          <strong>{label} · {displayLabel(value?.direction || "UNKNOWN", { UP: "偏涨", DOWN: "偏跌", RANGE: "震荡", UNKNOWN: "未知" }, value?.direction || "未知")}</strong>
+          <p>{value?.path || "本轮未提供预测路径"}</p>
+          {value?.invalidation ? <span>预测失效位：{value.invalidation}</span> : null}
+        </div>)}
+        {decision.watchConditions?.length ? <div className="forecast-row"><strong>候选价位与时机</strong>{decision.watchConditions.map((item, index) => <p key={index}>{typeof item === "string" ? item : JSON.stringify(item)}</p>)}</div> : null}
+        {decision.holdingPlan?.rationale ? <div className="forecast-row"><strong>持仓计划</strong><p>{decision.holdingPlan.rationale}</p></div> : null}
+      </div> : null}
       {decision.invalidation ? <div className="invalidation"><AlertTriangle size={18} /><span>趋势失效位：{decision.invalidation}</span></div> : null}
       {task.stopLocked ? <div className="decision-safe decision-stopped"><Square size={14} /><span>任务已停止，自动交易未运行</span></div> : task.mode === "LIVE" ? <div className="decision-safe" role={pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? "alert" : "status"}><Activity size={16} /><span>{pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? (pending.formFilled ? `AI 已填表，请在目标页点击${pending.action === "SELL" ? "卖出订立" : "买入订立"}入场按钮；之后自动确认、监控并离场` : pending.message) : pending?.message || (task.autoDecisionEnabled ? "AI 自动入场与离场，持续监控持仓" : "手动入场；AI 自动监控持仓并离场")}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? "全自动确认建议，观察模式不会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
       {historicalRequests.length ? <div className="decision-safe" role="status"><Activity size={14} /><span>后台核实 {historicalRequests.length} 笔历史请求</span></div> : null}

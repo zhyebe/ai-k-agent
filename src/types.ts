@@ -117,6 +117,14 @@ export interface PendingAction {
   message: string;
 }
 
+export interface Forecast {
+  direction: string;
+  probability?: number;
+  expectedMovePct?: number | null;
+  path?: string;
+  invalidation?: string;
+}
+
 export interface Decision {
   runId?: string;
   observedAt?: string | null;
@@ -148,6 +156,9 @@ export interface Decision {
   createdAt: string;
   ttlSec: number;
   marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
+  entryBlock?: { requestedAction: "BUY" | "SELL"; reason: string } | null;
+  forecastHorizon?: { nextK?: Forecast | null; next10K?: Forecast | null } | null;
+  holdingPlan?: { rationale?: string } | null;
   analysisSummary?: string;
   timeframeConsistency?: string;
   keyLevels?: unknown[];

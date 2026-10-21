@@ -50,6 +50,22 @@ test("missing/invalid current regime cannot authorize entry or be inferred from 
   }
 });
 
+test("an incomplete board assessment does not erase an explicit target regime", () => {
+  for (const [action, marketRegime] of [["BUY", "UP"], ["SELL", "DOWN"]]) {
+    for (const boardRegime of [undefined, "UNKNOWN"]) {
+      const result = bind({ action, targetSymbol: "A", marketRegime,
+        boardAssessments: [{ symbol: "A", action, marketRegime: boardRegime }] });
+      assert.equal(result.action, action);
+      assert.equal(result.marketRegime, marketRegime);
+    }
+  }
+  const blocked = bind({ action: "BUY", targetSymbol: "A", marketRegime: "RANGE",
+    boardAssessments: [{ symbol: "A", marketRegime: "UP" }] });
+  assert.equal(blocked.action, "HOLD", "explicit RANGE at either target level still blocks entry");
+  assert.equal(blocked.entryBlock.requestedAction, "BUY");
+  assert.equal(blocked.entryBlock.reason, "RANGE_MARKET_NO_ENTRY");
+});
+
 test("sideways does not block explicit profit, protective or scheduled exits", () => {
   const positions = [{ positionOrderId: "P1", symbol: "A", side: "LONG", quantity: 2 }];
   for (const exitType of ["TAKE_PROFIT", "STOP_LOSS", "SCHEDULED_CLOSE"]) {

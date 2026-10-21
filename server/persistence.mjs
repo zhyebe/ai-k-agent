@@ -97,6 +97,8 @@ function compactPersistedDecision(decision) {
   if (!decision || typeof decision !== "object") return decision;
   return {
     action: decision.action || "HOLD",
+    marketRegime: decision.marketRegime || "UNKNOWN",
+    entryBlock: decision.entryBlock || null,
     runId: decision.runId || null,
     modelDiagnostics: compactModelDiagnostics(decision.modelDiagnostics),
     orderAssessments: decision.orderAssessments || [],
@@ -142,12 +144,14 @@ function compactPersistedDecision(decision) {
     collectionDurationMs: decision.collectionDurationMs ?? null,
     ttlSec: Number(decision.ttlSec || decision.decisionTtlSec || 300),
     analysisSummary: String(decision.analysisSummary || "").slice(0, 400),
+    watchConditions: Array.isArray(decision.watchConditions) ? decision.watchConditions.slice(0, 20) : [],
     boardAssessments: Array.isArray(decision.boardAssessments)
       ? decision.boardAssessments.slice(0, 8).map((item) => ({
         symbol: item.symbol || "",
         symbolName: item.symbolName || "",
         instrumentId: item.instrumentId || "",
         action: item.action || "HOLD",
+        marketRegime: item.marketRegime || "UNKNOWN",
         confidence: Number(item.confidence || 0),
         profitProbability: Number(item.profitProbability || 0),
         bullishProfitProbability: Number(item.bullishProfitProbability || 0),

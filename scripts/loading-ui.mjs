@@ -62,6 +62,33 @@ async function capture(page, name) {
   await page.screenshot({ path: join(process.env.AXIOM_LOADING_SCREENSHOTS, `${name}.png`), fullPage: true });
 }
 
+test("HOLD displays future paths and distinguishes AI observation from an entry block", async t => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  sample.tasks = [{ ...sample.tasks[0], stopLocked: true, monitoringEnabled: false,
+    decision: { ...sample.tasks[0].decision, action: "HOLD", riskFlags: [], marketRegime: "RANGE",
+      analysisSummary: "主判断：震荡，区间1322至1331，暂无方向优势",
+      forecastHorizon: { nextK: { direction: "RANGE", path: "先试1331再回1328", invalidation: "1322" },
+        next10K: { direction: "DOWN", path: "预计10分钟内试1318", invalidation: "1331" } },
+      watchConditions: ["候选买入1323，目标1325，预计5分钟"] } }];
+  await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+  await navigate();
+  const panel = page.getByLabel("判断与未来预测");
+  await panel.waitFor();
+  assert.match(await panel.innerText(), /观望依据.*主判断：震荡/s);
+  assert.match(await panel.innerText(), /下一 K · 震荡/);
+  assert.match(await panel.innerText(), /未来约 10 K · 偏跌/);
+  assert.match(await panel.innerText(), /预计10分钟内试1318/);
+  assert.match(await panel.innerText(), /候选买入1323/);
+  assert.doesNotMatch(await panel.innerText(), /入场拦截/);
+  sample.tasks[0].decision.entryBlock = { requestedAction: "BUY", reason: "RANGE_MARKET_NO_ENTRY" };
+  sample.tasks[0].decision.riskFlags = ["RANGE_MARKET_NO_ENTRY"];
+  await page.reload();
+  await panel.getByText(/入场拦截/).waitFor();
+  assert.match(await panel.innerText(), /AI 建议.*入场拦截：目标盘横盘震荡/s);
+  await capture(page, "hold-forecast");
+});
+
 test("server restart automatically restores the exact locally selected model during monitoring", async (t) => {
   const { page, navigate } = await openPage(t);
   const sample = structuredClone(workspace);
