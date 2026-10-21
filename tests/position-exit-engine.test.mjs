@@ -324,8 +324,9 @@ for (const automatic of [false, true]) {
     f.market.account.realtimeValueChange = -15;
     f.market.orderBook = { bids: [{ price: 96, volume: 100 }], asks: [{ price: 97, volume: 100 }] };
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.equal(f.submitted.at(-1).targetPositionIds[0], "loss");
-    assert.equal(f.submitted.at(-1).exitType, "STOP_LOSS");
+    assert.deepEqual(f.task.pendingAction.rescuePositionIds, ["loss"]);
+    assert.equal(f.submitted.at(-1).exitType, null);
+    assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["loss"]);
   });
 }
 
@@ -393,9 +394,10 @@ for (const autoDecisionEnabled of [false, true]) {
         quote(f, points);
         await runPositionExitCycle(f.task.id, { runtime: f.runtime });
         assert.equal(f.submitted.length, 1);
-        assert.equal(f.submitted[0].exitType, exitType);
+        assert.equal(f.submitted[0].exitType, points <= -3 ? null : exitType);
         assert.equal(f.submitted[0].action, isLong ? "SELL" : "BUY");
-        assert.deepEqual(f.submitted[0].targetPositionIds, ["P1"]);
+        assert.deepEqual(f.submitted[0].targetPositionIds, points <= -3 ? [] : ["P1"]);
+        if (points <= -3) assert.deepEqual(f.task.pendingAction.rescuePositionIds, ["P1"]);
       }
     });
   }
@@ -423,9 +425,9 @@ for (const autoDecisionEnabled of [false, true]) {
       f.market.orderBook = { bids: [{ price: protectionPrice, volume: 100 }], asks: [{ price: protectionPrice, volume: 100 }] };
       await runPositionExitCycle(f.task.id, { runtime: f.runtime });
       assert.equal(f.submitted.length, 2);
-      assert.equal(f.submitted[1].exitType, "STOP_LOSS");
-      assert.deepEqual(f.submitted[1].targetPositionIds, ["P-loss"]);
-      assert.deepEqual(f.market.account.positions, []);
+      assert.equal(f.submitted[1].exitType, null);
+      assert.deepEqual(f.task.pendingAction.rescuePositionIds, ["P-loss"]);
+      assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["P-loss"]);
     });
   }
 }
@@ -695,9 +697,10 @@ for (const side of ["LONG", "SHORT"]) {
       setPrice(ending === "TAKE_PROFIT" ? (side === "LONG" ? 105 : 95) : (side === "LONG" ? 96 : 104));
       await runPositionExitCycle(f.task.id, { runtime: f.runtime });
       assert.equal(f.submitted.length, 1);
-      assert.equal(f.submitted[0].exitType, ending);
+      assert.equal(f.submitted[0].exitType, ending === "STOP_LOSS" ? null : ending);
       assert.equal(f.submitted[0].action, side === "LONG" ? "SELL" : "BUY");
-      assert.deepEqual(f.submitted[0].targetPositionIds, [p.positionOrderId]);
+      assert.deepEqual(f.submitted[0].targetPositionIds, ending === "STOP_LOSS" ? [] : [p.positionOrderId]);
+      if (ending === "STOP_LOSS") assert.deepEqual(f.task.pendingAction.rescuePositionIds, [p.positionOrderId]);
       await runPositionExitCycle(f.task.id, { runtime: f.runtime });
       assert.equal(f.submitted.length, 1);
     });
@@ -770,16 +773,17 @@ for (const path of ["analysis", "monitor"]) test(`${path}: new orders wait 120 s
   assert.deepEqual(f.cancelled, ["fresh"]);
 });
 
-for (const side of ["LONG", "SHORT"]) test(`${side}: loss beyond -3 waits for AI protection, not a fixed amount stop`, async () => {
+for (const side of ["LONG", "SHORT"]) test(`${side}: loss beyond 3 points rescues and preserves the original despite an AI stop`, async () => {
   const f = setup(`no-fixed-loss-${side}`, [{ ...long("loss", 2), side, orderPrice: side === "LONG" ? 110 : 101 }]);
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  assert.equal(f.submitted.length, 0);
+  assert.equal(f.submitted.length, 1);
   f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "loss", heldSide: side, quantity: 2, validForSec: 300,
     stopLossPrice: side === "LONG" ? 105 : 106, rationale: "真实反向持续且恢复路径失效" }] }, f.market, f.task).plans;
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.equal(f.submitted.length, 1);
-  assert.equal(f.submitted[0].exitType, "STOP_LOSS");
-  assert.equal(f.task.pendingAction.source, "ai_price_trigger");
+  assert.equal(f.submitted[0].exitType, null);
+  assert.equal(f.task.pendingAction.source, "rescue_loss_points");
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["loss"]);
 });
 
 test("legacy persisted fixed-amount stops cannot be confirmed after upgrade", async () => {
@@ -905,4 +909,139 @@ test("rescue submission uses the fresh rechecked book after a slow analysis", as
   assert.equal(f.submitted.length, 1);
   assert.equal(f.task.pendingAction.entryPurpose, "RESCUE");
   assert.ok(Date.parse(f.task.pendingAction.rescueLossReferences.original.observedAt) > Date.parse(f.market.observedAt));
+});
+
+for (const side of ["LONG", "SHORT"]) for (const loss of [2.99, 3, 10]) test(`${side} host rescue at ${loss} points ignores AI HOLD, regime and manual entry mode`, async () => {
+  const original = { ...long("original", 2), side, orderPrice: side === "LONG" ? 105 + loss : 106 - loss };
+  const f = setup(`host-rescue-${side}-${loss}`, [original], { entryQuantity: 2, decision: { action: "HOLD", marketRegime: "UNKNOWN" } });
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, loss >= 3 ? 1 : 0);
+  assert.deepEqual(f.market.account.positions, [original]);
+  if (loss < 3) return;
+  assert.equal(f.submitted[0].action, side === "LONG" ? "SELL" : "BUY");
+  assert.equal(f.submitted[0].price, side === "LONG" ? 105 : 106);
+  assert.equal(f.submitted[0].quantity, 2);
+  assert.equal(f.submitted[0].exitType, null);
+  assert.deepEqual(f.task.pendingAction.rescuePositionIds, ["original"]);
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 1, "unknown submission must not be duplicated");
+});
+
+test("automatic rescue retries a definite click failure and survives persistence", async () => {
+  const f = setup("rescue-retry", [{ ...long("original"), orderPrice: 115 }]);
+  let calls = 0;
+  const runtime = { ...f.runtime, submitSuggestionForm: async input => {
+    calls++;
+    if (calls === 1) return { ok: false, submitted: false, code: "SUBMIT_BUTTON_NOT_FOUND" };
+    return f.runtime.submitSuggestionForm(input);
+  } };
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.task.pendingAction.status, "WAITING");
+  f.task.pendingAction = compactTaskRuntime(f.task).pendingAction;
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(calls, 2);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.task.pendingAction.status, "AWAITING_FILL");
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original"]);
+});
+
+test("automatic rescue repeats after a confirmed fill and further loss, never rescues a rescue leg", async () => {
+  const f = setup("rescue-repeat-host", [{ ...long("original"), orderPrice: 108 }]);
+  const runtime = { ...f.runtime, submitSuggestionForm: async input => {
+    f.submitted.push(input);
+    f.market.account.positions.push({ ...long(`hedge-${f.submitted.length}`), side: "SHORT", orderPrice: input.price });
+    return { ok: true, submitted: true };
+  } };
+  await runPositionExitCycle(f.task.id, { runtime });
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.task.rescueSession.status, "ACTIVE");
+  f.market.orderBook.bids[0].price = 104.9;
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.length, 2);
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.length, 2);
+  f.market.orderBook = { bids: [{ price: 108, volume: 100 }], asks: [{ price: 109, volume: 100 }] };
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.filter(s => !s.exitType).length, 2);
+});
+
+test("AI HOLD cannot cancel an automatic rescue while its browser submission is in flight", async () => {
+  const f = setup("rescue-model-overlap", [{ ...long("original"), orderPrice: 108 }]);
+  let releaseModel, modelStarted, releaseWrite, writeStarted;
+  const modelReady = new Promise(resolve => { modelStarted = resolve; });
+  const writeReady = new Promise(resolve => { writeStarted = resolve; });
+  const analysis = runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => structuredClone(f.market),
+    requestDecision: async () => { modelStarted(); return new Promise(resolve => { releaseModel = resolve; }); },
+  } });
+  await modelReady;
+  const rescue = runPositionExitCycle(f.task.id, { runtime: { ...f.runtime, submitSuggestionForm: async input => {
+    f.submitted.push(input); writeStarted(); return new Promise(resolve => { releaseWrite = resolve; });
+  } } });
+  await writeReady;
+  const pendingId = f.task.pendingAction.id;
+  f.task.pendingAction.createdAt = new Date(Date.now() - 120000).toISOString();
+  releaseModel({ action: "HOLD", riskFlags: [], evidenceIds: [] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.task.pendingAction.id, pendingId);
+  assert.equal(f.task.pendingAction.status, "SUBMITTING");
+  releaseWrite({ ok: true, submitted: true });
+  await Promise.all([rescue, analysis]);
+  assert.equal(f.task.pendingAction.status, "AWAITING_FILL");
+  assert.equal(f.submitted.length, 1);
+});
+
+test("rescue transport interruption remains unverified instead of creating duplicate orders", async () => {
+  const f = setup("rescue-transport", [{ ...long("original"), orderPrice: 108 }]);
+  let calls = 0;
+  const runtime = { ...f.runtime, submitSuggestionForm: async () => { calls++; throw new Error("DESKTOP_DISCONNECTED_AFTER_DISPATCH"); } };
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.task.pendingAction.status, "UNVERIFIED");
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(calls, 1);
+});
+
+for (const side of ["LONG", "SHORT"]) test(`${side} rescue profit at one point per unit stays with its losing original until account recovery`, async () => {
+  const original = { ...long("original", 2), side, orderPrice: side === "LONG" ? 104 : 100, roundTripFee: 0 };
+  const hedge = { ...long("rescue", 2), side: side === "LONG" ? "SHORT" : "LONG", orderPrice: 102, roundTripFee: 0 };
+  const f = setup(`rescue-profit-per-unit-${side}`, [original, hedge], { rescueSession: { status: "ACTIVE", originalPositionIds: ["original"], rescuePositionIds: ["rescue"],
+    lastRescueByPosition: { original: { lossPoints: 4, entryPrice: original.orderPrice, heldSide: side } } } });
+  f.market.orderBook = { bids: [{ price: side === "LONG" ? 100 : 103, volume: 100 }], asks: [{ price: side === "LONG" ? 101 : 104, volume: 100 }] };
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.ok(f.task.rescueSession.netPnl < 0);
+  assert.equal(f.submitted.length, 0);
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original", "rescue"]);
+  f.market.account.positions.push({ ...long("ordinary"), orderPrice: side === "LONG" ? 99 : 102, roundTripFee: 0 });
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitType, "TAKE_PROFIT");
+  assert.deepEqual(f.submitted[0].targetPositionIds, ["ordinary"]);
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original", "rescue"]);
+});
+
+test("an earlier queued individual profit exit cannot close a newly confirmed rescue group leg", async () => {
+  const f = setup("queued-rescue-profit", [{ ...long("rescue"), roundTripFee: 0 }]);
+  f.task.pendingAction = buildPendingAction(f.task, { action: "SELL", exitType: "TAKE_PROFIT", targetSymbol: "DGKZ", targetPositionIds: ["rescue"] });
+  f.task.rescueSession = { status: "ACTIVE", originalPositionIds: ["original"], rescuePositionIds: ["rescue"], netPnl: -2 };
+  await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /RESCUE_GROUP_EXIT_HELD/);
+  assert.equal(f.submitted.length, 0);
+});
+
+test("AI batch profit exits retain only ordinary holdings and matching browser guards during rescue", async () => {
+  const positions = [
+    { ...long("original"), side: "SHORT", orderPrice: 90, roundTripFee: 0 },
+    { ...long("rescue"), roundTripFee: 0 }, { ...long("ordinary"), roundTripFee: 0 },
+  ];
+  const f = setup("rescue-mixed-profit", positions, { autoDecisionEnabled: true, rescueSession: { status: "ACTIVE",
+    originalPositionIds: ["original"], rescuePositionIds: ["rescue"], lastRescueByPosition: { original: { lossPoints: 16, entryPrice: 90, heldSide: "SHORT" } } } });
+  await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+    openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => f.market,
+    requestDecision: async () => ({ action: "SELL", exitType: "TAKE_PROFIT", targetSymbol: "DGKZ", targetPositionIds: ["rescue", "ordinary"], riskFlags: [], evidenceIds: [],
+      exitPlans: ["rescue", "ordinary"].map(positionId => ({ positionId, heldSide: "LONG", quantity: 1, validForSec: 300, takeProfitPrice: 101 })) }),
+  } });
+  assert.equal(f.submitted.length, 1);
+  assert.deepEqual(f.submitted[0].targetPositionIds, ["ordinary"]);
+  assert.deepEqual(f.submitted[0].exitGuard.positions.map(p => p.positionId), ["ordinary"]);
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original", "rescue"]);
 });

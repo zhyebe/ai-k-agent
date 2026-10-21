@@ -21,7 +21,5 @@ export function hasDirectionalProbabilities(decision) {
 
 export function entryRegimeAllows(decision) {
   const regime = normalizeMarketRegime(decision?.marketRegime);
-  return ["UP", "DOWN"].includes(regime) || (regime === "RANGE"
-    && decision?.entryPurpose === "RESCUE"
-    && Array.isArray(decision.rescuePositionIds) && decision.rescuePositionIds.length > 0);
+  return ["UP", "DOWN", "RANGE"].includes(regime);
 }

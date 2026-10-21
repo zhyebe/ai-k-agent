@@ -29,8 +29,8 @@ test("priority knowledge stays first for every user even after a newer skill is 
 
 test("DGKZ/DGJJ priority skill reaches the model in full before other experience", async (t) => {
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
-  assert.match(content, /先从实际提供的分钟、小时、日、月等周期判断/);
-  assert.match(content, /5 根只是示例，不是盈利目标或持仓上限/);
+  assert.match(content, /以当前交易周期的下一根 K 和随后 1～3 根 K 为主要期限/);
+  assert.match(content, /1～3 根是预测窗口，不是强制持仓时间/);
   assert.doesNotMatch(content, /realtimeValueChange >= 2/);
   assert.match(content, /亏损时比较等待恢复盈利与及时止损/);
   assert.match(content, /多周期结构/);
@@ -50,7 +50,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);
   assert.match(content, /不能一律判假、删除或忽略/);
-  assert.match(content, /分别评估大趋势与当前入场点/);
+  assert.match(content, /分别评估短线未来路径与当前入场点/);
   assert.match(content, /已有早期可执行优势可以入场/);
   assert.doesNotMatch(content, /具体阻断证据|下次可行动条件/);
   const evidence = approvedKnowledgeForAnalysis([

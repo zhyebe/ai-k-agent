@@ -95,7 +95,7 @@ test("compactTaskRuntime preserves AI forecast horizons and holding plan", () =>
   const runtime = compactTaskRuntime({
     decision: {
       action: "HOLD",
-      forecastHorizon: { nextK: { direction: "DOWN" }, next10K: { direction: "UP" } },
+      forecastHorizon: { next3K: { direction: "DOWN", path: "未来3分钟回撤" }, nextK: { direction: "DOWN" }, next10K: { direction: "UP" } },
       holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", maxHoldK: 10, maxHoldMinutes: 10, rationale: "recover" },
     },
   });
@@ -108,7 +108,7 @@ test("saving and restoring a blocked entry preserves its actual cause and future
     entryBlock: { requestedAction: "BUY", reason: "RANGE_MARKET_NO_ENTRY" },
     boardAssessments: [{ symbol: "A", action: "BUY", marketRegime: "RANGE" }],
     analysisSummary: "主判断：震荡", watchConditions: ["预计10分钟内试1331"],
-    forecastHorizon: { nextK: { direction: "RANGE", path: "区间往返" }, next10K: { direction: "UP", path: "试1331" } } };
+    forecastHorizon: { next3K: { direction: "DOWN", path: "未来3分钟回撤" }, nextK: { direction: "RANGE", path: "区间往返" }, next10K: { direction: "UP", path: "试1331" } } };
   const restored = compactTaskRuntime(JSON.parse(JSON.stringify(compactTaskRuntime({ decision })))).decision;
   for (const field of ["marketRegime", "entryBlock", "analysisSummary", "watchConditions", "forecastHorizon"])
     assert.deepEqual(restored[field], decision[field]);

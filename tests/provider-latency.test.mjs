@@ -25,8 +25,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const system = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
     assert.equal(system.split("每轮 analysis_summary 首句明确写").length - 1, 1);
     assert.equal(system.split("入场决策优先级").length - 1, 1);
-    assert.match(system, /HOLD 也必须填写 analysis_summary/);
-    assert.match(system, /实时证据支持早期有方向优势即可选 UP\/DOWN/);
+    assert.match(system, /HOLD 仍填写下一K及随后1～3根K/);
+    assert.match(system, /不等走势已经发生才预测/);
     assert.doesNotMatch(system, /实时结构支持已进入趋势才重新考虑/);
     assert.match(system, /短期恢复价、预计到价时间和失效条件/);
     assert.match(system, /禁止无新证据反复延后恢复时间或放宽止损/);

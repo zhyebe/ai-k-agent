@@ -38,7 +38,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /逐仓可成交盈亏/);
       assert.match(prompt, /实时盘面优先/);
       assert.match(prompt, /分析完成后.*再次核对/);
-      assert.match(prompt, /持续扩亏且继续持有更可能恶化/);
+      assert.match(prompt, /损失在持续扩大、继续持有更可能恶化/);
       const context = JSON.parse(messages.at(-1).content);
       assert.equal(context.account.realtimeValueChange, amount);
       assert.equal(context.account.dayPnl, 99);

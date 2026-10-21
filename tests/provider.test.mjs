@@ -13,6 +13,7 @@ test("camelCase model decisions retain summary, per-board regimes and forecast w
     bullishProfitProbability: 0.42, bearishProfitProbability: 0.42,
     boardAssessments: [{ symbol: "A", action: "HOLD", marketRegime: "RANGE", analysisSummary: "区间未破" }],
     forecastHorizon: { nextK: { direction: "RANGE", path: "先试1331再回1328", invalidation: "1322" },
+      next3K: { direction: "DOWN", path: "未来3分钟回落1322", invalidation: "1331" },
       next10K: { direction: "DOWN", path: "偏弱，失守1322后预计10分钟内试1318", invalidation: "1331" } },
     watchConditions: ["重估1331上方的持续买盘"], riskFlags: ["RANGE_MARKET_NO_ENTRY"], reasonCodes: ["RANGE"],
     evidenceIds: ["E1"], targetPositionPct: 0, maxOrderValuePct: 0, decisionTtlSec: 90 };
@@ -27,6 +28,7 @@ test("camelCase model decisions retain summary, per-board regimes and forecast w
   assert.equal(result.analysisSummary, output.analysisSummary);
   assert.equal(result.boardAssessments[0].marketRegime, "RANGE");
   assert.equal(result.boardAssessments[0].summary, "区间未破");
+  assert.equal(result.forecastHorizon.next3K.path, output.forecastHorizon.next3K.path);
   assert.equal(result.forecastHorizon.next10K.path, output.forecastHorizon.next10K.path);
   for (const field of ["watchConditions", "riskFlags", "reasonCodes", "evidenceIds", "decisionTtlSec"])
     assert.deepEqual(result[field], output[field]);
@@ -862,19 +864,19 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     const prompt = seen[0].body.system;
     assert.match(prompt, /40% 不再是入场硬门、上限或 HOLD 触发器/);
     assert.doesNotMatch(prompt, /selected probability must be >=|hard entry requirement|BUY requires bullish_profit_probability >=/);
-    assert.match(prompt, /横盘震荡不新开仓/);
+    assert.match(prompt, /不设横盘禁止开仓策略/);
     assert.match(prompt, /不能被吓到而因一次跳价亏损离场/);
     assert.match(prompt, /新增止损不能只引用闪K/);
     assert.match(prompt, /market_regime/);
     assert.match(prompt, /数量2、每单位有利点差1时整仓毛利为2，不是1/);
     assert.doesNotMatch(prompt, /低于2点不称盈利/);
-    assert.match(prompt, /AI recognizes the broad market trend first/);
-    assert.match(prompt, /历史 trend 字段、已完成 K 线和片段 trend 只是过去的证据，不是下单条件/);
-    assert.match(prompt, /入场依据是从当前可成交价出发对未来路径的预测/);
-    assert.match(prompt, /确认持续扩亏或恢复路径失效，比较保留原单反向补救与保护退出/);
+    assert.match(prompt, /AI predicts the current trading timeframe next candle/);
+    assert.match(prompt, /已完成K和历史trend是输入，不是未来结论/);
+    assert.match(prompt, /从当前可成交bid\/ask出发/);
+    assert.match(prompt, /每单位亏损>=3个价格点自动反向救单/);
     assert.match(prompt, /BUY means long\/up: profit when price rises; SELL means short\/down: profit when price falls/);
-    assert.match(prompt, /趋势内回撤/);
-    assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
+    assert.match(prompt, /normal pullback range/);
+    assert.match(prompt, /Next K and next 1–3 K are forecast checkpoints, not holding limits/);
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);
     assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
     assert.match(prompt, /收益与风险必须一起预测/);
@@ -897,7 +899,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
     assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
     assert.match(prompt, /-1点变-3点是扩大，-3点变-1点是收窄/);
-    assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
+    assert.match(prompt, /Next K and next 1–3 K are forecast checkpoints/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
     assert.match(prompt, /TAKE_PROFIT requires at least 1 favorable executable price point and nonnegative net PnL/);
@@ -907,7 +909,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /correct persistent directional bias/);
     assert.match(prompt, /Report UNKNOWN if evidence is insufficient/);
     assert.match(prompt, /invalidation field is one structural price/);
-    assert.match(prompt, /趋势方向与当前入场时机分别判断/);
+    assert.match(prompt, /高低位是可执行区域/);
     assert.doesNotMatch(prompt, /下次可行动条件/);
     assert.doesNotMatch(prompt, /数据过期或风险超限时失效/);
     assert.equal(seen[1].headers["x-goog-api-key"], "gemini-key");
@@ -1106,7 +1108,7 @@ for (const [bullish, bearish, selectedAction, management] of [
     assert.equal(bodies.length, 1);
     const messages = bodies[0].messages;
     assert.match(messages[0].content, /40% 不再是入场硬门/);
-    assert.match(messages[0].content, /AI recognizes the broad market trend first/);
+    assert.match(messages[0].content, /AI predicts the current trading timeframe next candle/);
     assert.equal(result.action, "HOLD");
     assert.equal(result.exitType, null);
     assert.equal(result.bullishProfitProbability, bullish);
@@ -1286,6 +1288,7 @@ test("provider decision preserves next-K, ten-K and AI holding-duration forecast
       bearish_profit_probability: 0.31,
       forecast_horizon: {
         next_k: { direction: "DOWN", probability: "42%", expected_move_pct: "-0.8", path: "先回撤", invalidation: "跌破支撑" },
+        next_3k: { direction: "DOWN", probability: 0.58, path: "未来3分钟先下探", invalidation: "反弹越过100" },
         next_10k: { direction: "UP", probability: 0.67, expected_move_pct: 2.1, path: "回撤后反弹", invalidation: "失守长期支撑" },
       },
       holding_plan: { decision: "HOLD_THROUGH_PULLBACK", max_hold_k: 10, max_hold_minutes: 10, rationale: "多K恢复路径更优", invalidation: "多周期转弱" },
@@ -1299,6 +1302,8 @@ test("provider decision preserves next-K, ten-K and AI holding-duration forecast
     assert.equal(result.forecastHorizon.nextK.probability, 0.42);
     assert.equal(result.forecastHorizon.next10K.direction, "UP");
     assert.equal(result.forecastHorizon.next10K.probability, 0.67);
+    assert.equal(result.forecastHorizon.next3K.direction, "DOWN");
+    assert.equal(result.forecastHorizon.next3K.probability, 0.58);
     assert.equal(result.holdingPlan.decision, "HOLD_THROUGH_PULLBACK");
     assert.equal(result.holdingPlan.maxHoldK, 10);
     assert.equal(result.holdingPlan.maxHoldMinutes, 10);
@@ -1323,7 +1328,7 @@ test("monitoring history preserves each position's trend exit plan and closing d
 });
 
 for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
-  test(`${apiFormat} fast decisions receive broad-trend guidance, transient-price evidence and prior exit plans`, async t => {
+  test(`${apiFormat} fast decisions receive short-term guidance, transient-price evidence and prior exit plans`, async t => {
     const bodies = [];
     const plan = { positionId: "P-long", heldSide: "LONG", quantity: 1, validForSec: 1800, takeProfitPrice: 112, stopLossPrice: 94, rationale: "大趋势向上，96-99 回撤不失效" };
     const previousPosition = { positionId: "P-long", side: "LONG", quantity: 1, entryPrice: 100, exitQuotePrice: 97, exitQuotePnlPoints: -3, lastObservedAt: "2026-10-15T06:00:00Z" };
@@ -1348,14 +1353,14 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const body = bodies[0];
     const messages = body.input || body.messages || body.contents.map(item => ({ ...item, content: item.parts[0].text }));
     const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
-    assert.match(prompt, /横盘震荡不新开仓/);
+    assert.match(prompt, /不设横盘禁止开仓策略/);
     assert.match(prompt, /不能被吓到而因一次跳价亏损离场/);
     assert.match(prompt, /新增止损不能只引用闪K/);
     assert.match(prompt, /market_regime/);
     assert.match(prompt, /数量2、每单位有利点差1时整仓毛利为2，不是1/);
     assert.doesNotMatch(prompt, /低于2点不称盈利/);
-    assert.match(prompt, /AI recognizes the broad market trend first/);
-    assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
+    assert.match(prompt, /AI predicts the current trading timeframe next candle/);
+    assert.match(prompt, /Next K and next 1–3 K are forecast checkpoints, not holding limits/);
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);
     assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
@@ -1378,7 +1383,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /亏1个点不是自动止损信号/);
     assert.match(prompt, /previousAnalysis\.decision\.positionAudit\.positions/);
     assert.match(prompt, /LONG: bid minus entry; SHORT: entry minus ask/);
-    assert.match(prompt, /Lead with broad trend/);
+    assert.match(prompt, /Lead with the short-term next-K and next-3-K forecast/);
     assert.doesNotMatch(prompt, /target 1-5 K when trend remains valid|favorable exit over the next 1-5 K/);
     const context = JSON.parse(messages.at(-1).content);
     assert.equal(context.previousAnalysis.exitPlans[0].rationale, plan.rationale);
@@ -1449,7 +1454,7 @@ test("provider reviews a complete market segment and binds the returned review t
     assert.equal(result.contentHash, segment.contentHash);
     assert.equal(result.rowCount, segment.rowCount);
     assert.equal(received.messages[0].role, "system");
-    assert.match(received.messages[0].content, /First assess broad multi-bar trend/);
+    assert.match(received.messages[0].content, /background for a short-term next-K\/next-3-K decision/);
     assert.match(received.messages[0].content, /Preserve its direction, magnitude and timing/);
     assert.equal(JSON.parse(received.messages[1].content).segment.segmentId, segment.segmentId);
   } finally {

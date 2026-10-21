@@ -2541,7 +2541,7 @@ for (const autoDecisionEnabled of [false, true]) {
 
 for (const autoDecisionEnabled of [false, true]) {
   for (const orderType of ["MARKET", "LIMIT"]) {
-    test(`${autoDecisionEnabled ? "自动" : "手动"} ${orderType}: 横盘阻止新单，当前委托撤销不看当前价`, async () => {
+    test(`${autoDecisionEnabled ? "自动" : "手动"} ${orderType}: 横盘允许AI选定新单，当前委托撤销不看当前价`, async () => {
       const task = insertNorthstarTask(`range-cancel-${autoDecisionEnabled}-${orderType}`);
       Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
       const market = testMarketSnapshot("range-cancel", 100);
@@ -2557,6 +2557,7 @@ for (const autoDecisionEnabled of [false, true]) {
         await runAnalysis(task.id, "", { runtime: {
           openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
           observeMarket: async () => structuredClone(market),
+          observeExecutionMarket: async () => structuredClone(market),
           cancelOpenOrders: async ({ orderIds }) => {
             assert.deepEqual(orderIds, ["equal", "above", "below", "no-price"]);
             events.push("cancel");
@@ -2568,13 +2569,13 @@ for (const autoDecisionEnabled of [false, true]) {
             return { action: "BUY", marketRegime: "RANGE", orderType, targetSymbol: market.symbol,
               bullishProfitProbability: 0.9, bearishProfitProbability: 0.1, targetPrice: 95, riskFlags: [] };
           },
-          fillSuggestionForm: async () => assert.fail("range cannot fill a new order"),
-          submitSuggestionForm: async () => assert.fail("range cannot submit a new order"),
+          fillSuggestionForm: async () => { events.push("fill"); return { ok: true, filled: true }; },
+          submitSuggestionForm: async () => { events.push("submit"); return { ok: true, submitted: true }; },
         } });
-        assert.deepEqual(events, ["cancel", "model"]);
-        assert.equal(task.decision.action, "HOLD");
-        assert.ok(task.decision.riskFlags.includes("RANGE_MARKET_NO_ENTRY"));
-        assert.equal(task.pendingAction?.status === "WAITING", false);
+        assert.deepEqual(events, ["cancel", "model", autoDecisionEnabled ? "submit" : "fill"], JSON.stringify({ trigger: task.nextTrigger, decision: task.decision, pending: task.pendingAction }));
+        assert.equal(task.decision.action, "BUY");
+        assert.equal(task.decision.entryBlock, undefined);
+        assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
       } finally {
         stopController(task.id);
         state.tasks = state.tasks.filter(item => item.id !== task.id);
@@ -2583,15 +2584,15 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
-test("确认入场前再次拒绝横盘和主情景缺失的待执行动作", async () => {
+test("确认入场前拒绝主情景缺失的普通待执行动作", async () => {
   const task = insertNorthstarTask("regime-final-check");
   Object.assign(task, { mode: "LIVE", autoDecisionEnabled: true });
   try {
-    for (const marketRegime of ["RANGE", "UNKNOWN", undefined]) {
+    for (const marketRegime of ["UNKNOWN", undefined]) {
       task.pendingAction = { status: "WAITING", action: "BUY", marketRegime };
       await assert.rejects(confirmPendingAction(task.id, { runtime: {
         submitSuggestionForm: async () => assert.fail("invalid regime cannot submit"),
-      } }), new RegExp(marketRegime === "RANGE" ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN"));
+      } }), /ENTRY_MARKET_REGIME_UNKNOWN/);
     }
   } finally { state.tasks = state.tasks.filter(item => item.id !== task.id); }
 });

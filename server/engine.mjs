@@ -5,7 +5,7 @@ import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedEx
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, isAutomaticAction, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { CURRENT_ORDER_WAIT_MS, currentOrderCancellationPlan } from "./order-cancellation-policy.mjs";
-import { observeRescueFill, rescueEntryIntent, rescueExitCandidates, validateRescueEntry } from "./rescue-policy.mjs";
+import { activeRescuePositionIds, automaticRescueCandidates, isAutomaticRescue, rescueProtectedPositionIds, observeRescueFill, rescueEntryIntent, rescueExitCandidates, validateRescueEntry } from "./rescue-policy.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
@@ -327,12 +327,17 @@ function archivePendingSubmission(task) {
   if (pending && !pending.exitType && pending.entryKWindow && !["CANCELLED", "REJECTED"].includes(pending.status)) task.lastEntryKWindow = pending.entryKWindow;
 }
 
-function executableExitDecision(task, decision) {
+function executableExitDecision(task, decision, market = task.market) {
   if (!decision.exitType) return decision;
   // Only the same position's submitted transfer is deduplicated, never all trading.
   const exitingIds = new Set(unsettledActions(task).filter((item) => item.exitType).flatMap((item) => item.targetPositionIds || []));
-  const targetPositionIds = (decision.targetPositionIds || []).filter((id) => !exitingIds.has(id));
-  return { ...decision, targetPositionIds };
+  const protectedIds = decision.exitType === "STOP_LOSS" && !decision.exitGuard?.rescueRecovery && !decision.exitGuard?.positionPoints
+    ? rescueProtectedPositionIds(task, market) : new Set();
+  const groupedIds = decision.exitType !== "SCHEDULED_CLOSE" && !decision.exitGuard?.rescueRecovery
+    ? activeRescuePositionIds(task) : new Set();
+  const targetPositionIds = (decision.targetPositionIds || []).filter((id) => !exitingIds.has(id) && !protectedIds.has(id) && !groupedIds.has(id));
+  const exitGuard = decision.exitGuard?.positions ? { ...decision.exitGuard, positions: decision.exitGuard.positions.filter(p => targetPositionIds.includes(p.positionId)) } : decision.exitGuard;
+  return { ...decision, targetPositionIds, exitGuard };
 }
 
 function openPositionCount(market) {
@@ -466,14 +471,13 @@ export function applyEntryBoundary(decision, market = {}) {
       next.action = "HOLD";
       next.targetPositionPct = 0;
       next.maxOrderValuePct = 0;
-      const range = next.marketRegime === "RANGE";
-      const reason = range ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN";
+      const reason = "ENTRY_MARKET_REGIME_UNKNOWN";
       next.entryBlock = { requestedAction: decision.action, reason };
       next.riskFlags = [...new Set([...(next.riskFlags || []), reason])];
     }
   }
-  // AI owns direction and timing. Host only evaluates the AI-selected side
-  // against the execution boundary; it must never turn HOLD into an order.
+  // Normal entries follow AI direction; the independent rescue monitor applies
+  // the user-mandated opposite entry at three adverse price points.
   next.signalTier = signalTierForDecision(next);
   return next;
 }
@@ -495,9 +499,9 @@ export function enforceProfitProbability(decision) {
   return next;
 }
 
-export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
+export function buildPendingAction(task, decision, { now = Date.now(), replacePendingId } = {}) {
   const intent = rescueEntryIntent(decision, task.market, now);
-  if (!decision.exitType) validateRescueEntry(task, intent);
+  if (!decision.exitType) validateRescueEntry(task, intent, replacePendingId);
   const auto = isAutoTakeover(task, decision);
   const preview = suggestOrderPreview(task, decision, { enforceQuantityLimit: isLiveTask(task) });
   const action = decision.action === "SELL" ? "SELL" : "BUY";
@@ -510,6 +514,7 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     decisionRunId: decision.runId || null,
     ...intent,
+    rescueTrigger: isAutomaticRescue(decision) ? decision.rescueTrigger : null,
     action,
     orderType: decision.orderType || "MARKET",
     marketRegime: normalizeMarketRegime(decision.marketRegime),
@@ -542,11 +547,11 @@ export function buildPendingAction(task, decision, { now = Date.now() } = {}) {
     formFilled: false,
     formSubmitBlocked: true,
     createdAt: new Date(now).toISOString(),
-    entryKWindow: decision.exitType ? null : nextCandleTarget({}, now).closeTime,
+    entryKWindow: decision.exitType || isAutomaticRescue(decision) ? null : nextCandleTarget({}, now).closeTime,
     deadlineAt: null,
     countdownSec: 0,
     resolvedAt: null,
-    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${!decision.exitType && isLiveTask(task) ? ` 单笔入场数量 ${entryQuantityForTask(task)}` : ""}`,
+    message: isAutomaticRescue(decision) ? `${targetLabel}：原仓每单位亏损 ${decision.rescueTrigger.lossPoints} 点，保留原仓，自动反向${action === "SELL" ? "买空" : "买多"} ${preview.suggestedQty}，报价 ${preview.suggestedPrice}` : `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${!decision.exitType && isLiveTask(task) ? ` 单笔入场数量 ${entryQuantityForTask(task)}` : ""}`,
   };
 }
 
@@ -909,6 +914,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (!task.pendingAction.exitType && task.rescueSession?.status === "EXITING") throw new Error("RESCUE_EXIT_IN_PROGRESS");
   const exitGuard = task.pendingAction.exitGuard;
+  if (task.pendingAction.exitType && task.pendingAction.exitType !== "SCHEDULED_CLOSE" && !exitGuard?.rescueRecovery
+    && task.pendingAction.targetPositionIds?.some(id => activeRescuePositionIds(task).has(id))) {
+    task.pendingAction.status = "CANCELLED";
+    task.pendingAction.message = "救单组不单独平盈利腿，等待全账户净利>=0整体离场";
+    persistTask(task);
+    throw new Error("RESCUE_GROUP_EXIT_HELD");
+  }
   if (exitGuard?.positionAmount || exitGuard?.positions?.some(guard => guard.positionAmount)) {
     task.pendingAction.status = "REJECTED";
     task.pendingAction.message = "固定金额止损已取消，等待 AI 按趋势和恢复路径重新判断";
@@ -916,8 +928,8 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     throw new Error("FIXED_AMOUNT_STOP_RETIRED");
   }
   if (isLiveTask(task) && !task.pendingAction.exitType && sessionCloseWindow(task).active) throw new Error("SESSION_CLOSING_NO_ENTRY");
-  if (isLiveTask(task) && !task.pendingAction.exitType && !entryRegimeAllows(task.pendingAction)) throw new Error(task.pendingAction.marketRegime === "RANGE" ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN");
-  if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("INCOMPLETE_DIRECTIONAL_PROBABILITIES");
+  if (isLiveTask(task) && !task.pendingAction.exitType && !isAutomaticRescue(task.pendingAction) && !entryRegimeAllows(task.pendingAction)) throw new Error("ENTRY_MARKET_REGIME_UNKNOWN");
+  if (isLiveTask(task) && !isAutomaticRescue(task.pendingAction) && !meetsOrderBoundary(task.pendingAction)) throw new Error("INCOMPLETE_DIRECTIONAL_PROBABILITIES");
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
   if (pendingConfirmLocks.has(taskId)) throw new Error("CONFIRM_IN_PROGRESS");
@@ -972,6 +984,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           targetPositionIds: task.pendingAction.targetPositionIds,
           targetPrice: task.pendingAction.targetPrice,
           exitGuard: task.pendingAction.exitGuard,
+          rescueTrigger: task.pendingAction.rescueTrigger,
           entryDeadlineAt: task.pendingAction.exitType ? null : sessionCloseWindow(task).startsAt,
         }, { signal: submissionAbort.signal });
         submissionAbort.signal.throwIfAborted();
@@ -984,14 +997,17 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       } catch (error) {
         if (getTask(taskId) === task && taskGeneration(task) === generation && !task.stopLocked && task.pendingAction?.id === pendingId && task.pendingAction?.status === "SUBMITTING") {
           const authExpired = /REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""));
+          const rescueCallUnverified = isAutomaticRescue(task.pendingAction);
           task.pendingAction = {
             ...task.pendingAction,
-            status: authExpired ? "UNVERIFIED" : "WAITING",
+            source: rescueCallUnverified ? source : task.pendingAction.source,
+            status: authExpired || rescueCallUnverified ? "UNVERIFIED" : "WAITING",
             retryAfterLogin: authExpired,
             formSubmitBlocked: false,
             lastExecution: { code: String(error?.code || error?.message || "DESKTOP_BROWSER_CALL_FAILED").slice(0, 160), stage: "desktop_call", durationMs: Date.now() - submissionStartedAt, checkedAt: new Date().toISOString() },
             message: authExpired
               ? "登录态已失效；已自动恢复登录并继续核实本次动作，确认未成交后立即重试"
+              : rescueCallUnverified ? `救单调用中断，先核实当前委托与持仓，禁止重复提交：${error?.message}`
               : `确认后下单失败：${error?.message || "目标页未响应，请重试或取消"}`,
           };
           if (authExpired) task.target.loginStatus = "REAUTH_REQUIRED";
@@ -1866,7 +1882,7 @@ function decisionExecutionPolicy(task) {
     exitsAutomatic: true, cancellationsAutomatic: true,
     lossExit: "ai_trend_and_recovery", fixedLossAmountStop: false,
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
-    rangeMarketEntry: "ordinary_entries_blocked_rescue_evaluated_separately", entryMarketRegimeRequired: true,
+    rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true }, entryMarketRegimeRequired: true,
     conditionalExits: true, profitPointExit: { minPoints: POSITION_MIN_PROFIT_POINTS, maxPoints: POSITION_MAX_PROFIT_POINTS, unit: "directional_price_difference", unknownFees: "net_unknown", knownNegativeNetAtCeiling: "STOP_LOSS" }, sessionClose: sessionCloseWindow(task),
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2614,7 +2630,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           : automaticRuleFailures.length
             ? `${targetedActionLabel}建议已保留；自动规则标记已记录，继续按 AI 决策执行`
             : task.decision.action === "HOLD"
-              ? decisionFlags.has("RANGE_MARKET_NO_ENTRY") ? "目标盘口横盘震荡，不开普通新单；救单单独评估，继续管理持仓和当前委托"
+              ? decisionFlags.has("RANGE_MARKET_NO_ENTRY") ? "旧版横盘限制已取消，重新评估短线机会"
                 : decisionFlags.has("ENTRY_MARKET_REGIME_UNKNOWN") ? "目标盘口主情景未明确，不新开仓；继续监控并重新分析"
                   : "模型建议观望，当前轮次无需动作"
               : riskLimitExceeded
@@ -2635,7 +2651,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
       : (isLiveTask(task) ? "准备入场表单，等待用户点击入场按钮" : "路由最终建议，等待确认后决定是否下单"));
     assertCurrent();
-    task.decision = executableExitDecision(task, task.decision);
+    task.decision = executableExitDecision(task, task.decision, exitMarket);
+    const browserActionInProgress = pendingConfirmLocks.has(taskId);
     const duplicateExit = Boolean(task.decision.exitType) && task.decision.targetPositionIds.length === 0;
     const previousEntryKWindow = task.pendingAction && !task.pendingAction.exitType
       ? (["CANCELLED", "REJECTED"].includes(task.pendingAction.status) ? (task.pendingAction.entrustedOrderIds?.length ? task.lastEntryKWindow : null) : task.pendingAction.entryKWindow || (task.pendingAction.createdAt ? nextCandleTarget({}, new Date(task.pendingAction.createdAt).getTime()).closeTime : null))
@@ -2659,7 +2676,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     // A complete AI exit is executable immediately in both entry modes. Exit
     // plans remain a fallback trigger for later monitoring, never a gate that
     // can swallow an explicit TAKE_PROFIT/STOP_LOSS action.
-    const canPromptOrder = providerSucceeded && !rescueEntryBlock && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
+    const canPromptOrder = !browserActionInProgress && providerSucceeded && !rescueEntryBlock && !duplicateExit && !sameKEntry && !task.stopLocked && !executionBlocked && !closingEntryBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
@@ -2671,9 +2688,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
-    if (canPromptOrder) {
+    if (canPromptOrder && !pendingConfirmLocks.has(taskId) && Number(task.exitExecutionRevision || 0) === exitRevisionAtStart) {
       await openPendingAction(task, { runtime, run, market: exitMarket });
-    } else if (!rescueEntryBlock && !duplicateExit && !sameKEntry) {
+    } else if (!pendingConfirmLocks.has(taskId) && !rescueEntryBlock && !duplicateExit && !sameKEntry) {
       clearPendingAction(task, { persist: false });
     }
     if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
@@ -2702,7 +2719,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
       const boundaryMessage = rescueEntryBlock ? ({ INVALID_RESCUE_TARGET: "补救目标、方向或当前亏损未核实，继续分析", RESCUE_ALREADY_PENDING: "前笔补救尚未核实完成，继续管理持仓和委托", RESCUE_LOSS_NOT_EXPANDED: "原单亏损未较上次补救扩大，继续监控", RESCUE_EXIT_IN_PROGRESS: "救单正在整体离场，完成前不新开仓" })[rescueEntryBlock]
-        : sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析" : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓已执行离场，丢弃旧动作" : actionMessage;
+        : sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析" : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓动作已执行，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });
     }
@@ -2879,7 +2896,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       candidates.push(...rescueCandidates);
       // User price-point profit boundaries execute independently
       // of AI latency or a more distant model target.
-      const boundaryIds = new Set(candidates.map(item => item.position.positionOrderId));
+      const boundaryIds = new Set([...candidates.map(item => item.position.positionOrderId), ...activeRescuePositionIds(task)]);
       for (const position of market.account.positions) {
         if (boundaryIds.has(position.positionOrderId)) continue;
         const result = positionProfitExit(position, market, Date.now());
@@ -2912,7 +2929,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     for (const candidate of candidates) {
       assertCurrent();
       if (!isTradingSwitchOn()) break;
-      const decision = executableExitDecision(task, candidate.decision);
+      const decision = executableExitDecision(task, candidate.decision, market);
       if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
@@ -2932,12 +2949,40 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
         failures.push({ positionId: candidate.position.positionOrderId, code: "TRADE_REJECTED", message: task.pendingAction.message });
       }
     }
+    const rescueSubmitted = [];
+    if (!closing.active && task.rescueSession?.status !== "EXITING" && isTradingSwitchOn()) {
+      // Exit writes can change holdings and age the quote. Refresh before entry.
+      if ((submitted.length || failures.length) && automaticRescueCandidates(task, market, Date.now()).length) {
+        market = await observe("positions");
+        assertCurrent();
+        if (!market?.ok) throw new Error(market?.code || "RESCUE_OBSERVATION_FAILED");
+        reconcilePendingPosition(task, market);
+      }
+      const candidate = automaticRescueCandidates(task, market, Date.now())[0];
+      if (candidate) {
+        archivePendingSubmission(task);
+        task.pendingAction = buildPendingAction({ ...task, market }, candidate.decision, { replacePendingId: candidate.replacePendingId });
+        try { await confirmPendingAction(taskId, { source: "rescue_loss_points", runtime }); }
+        catch (error) {
+          assertCurrent();
+          failures.push({ positionId: candidate.position.positionOrderId, code: error.message });
+        }
+        assertCurrent();
+        if (["AWAITING_FILL", "UNVERIFIED"].includes(task.pendingAction?.status)) {
+          task.exitExecutionRevision = Number(task.exitExecutionRevision || 0) + 1;
+          rescueSubmitted.push(candidate.position.positionOrderId);
+        }
+        appendAgentOutput({ taskId, stage: "action", kind: "rescue_monitor",
+          level: rescueSubmitted.length ? "info" : "error",
+          message: `原仓 ${candidate.position.positionOrderId} 每单位亏损 ${candidate.decision.rescueTrigger.lossPoints} 点，保留原仓、反向 ${candidate.decision.action} ${task.pendingAction.suggestedQty}：${task.pendingAction.status}；${task.pendingAction.message}` });
+      }
+    }
     const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
-    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，逐笔监控1～4点收益目标；亏损由 AI 评估，尚缺保护计划，继续分析` : `已核实 ${market.account.positions.length} 笔持仓，逐笔监控1～4点收益目标及 AI 趋势保护条件` };
-    if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔离场未完成；${task.exitMonitor.message}` };
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length || rescueSubmitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，普通单监控1～4点，救单组等待账户净利>=0整体退出；每单位亏损3点自动反向救单` : `已核实 ${market.account.positions.length} 笔持仓，普通单监控1～4点、亏损3点反向救单；救单组按账户净利>=0整体退出` };
+    if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔持仓动作未完成；${task.exitMonitor.message}` };
     if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
     persistTask(task);
-    return { submitted, closing: closing.active };
+    return { submitted, rescueSubmitted, closing: closing.active };
   }).finally(() => {
     if (positionExitRuns.get(taskId) === operation) positionExitRuns.delete(taskId);
     if (positionExitCancels.get(taskId) === cancelExit) positionExitCancels.delete(taskId);

@@ -1,3 +1,4 @@
+import { rescueTriggerAllowsQuote } from "./rescue-policy.mjs";
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -935,7 +936,7 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   return { ok: results.length > 0 && results.every((item) => item.cancelled), results };
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, entryDeadlineAt = null, browserProvider = null, provider = null } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, rescueTrigger = null, entryDeadlineAt = null, browserProvider = null, provider = null } = {}) {
   if (action !== "BUY" && action !== "SELL") return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
@@ -948,7 +949,18 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   const startedAt = Date.now();
   let stage = "prepare";
   let actionClicked = false;
-  const entryGuard = exitType ? undefined : entryConfirmationGuard(entryDeadlineAt);
+  const deadlineGuard = exitType ? undefined : entryConfirmationGuard(entryDeadlineAt);
+  const entryGuard = exitType ? undefined : rescueTrigger ? async () => {
+    const deadline = await deadlineGuard?.();
+    if (deadline && !deadline.ok) return deadline;
+    const snapshot = await readVisiblePage(sessionId, { quick: true });
+    const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot, { symbol }) : null;
+    const quote = market && executableExitQuote(market, { symbol, symbolName, instrumentId, side: rescueTrigger.heldSide });
+    return { ok: Boolean(quote && rescueTriggerAllowsQuote(rescueTrigger, quote.price)
+      && action === (rescueTrigger.heldSide === "LONG" ? "SELL" : "BUY")
+      && (!actionClicked || (action === "SELL" ? Number(price) <= quote.price : Number(price) >= quote.price))),
+      price: quote?.price ?? null, code: "RESCUE_CONDITION_CHANGED" };
+  } : deadlineGuard;
   let currentExitGuard = exitGuard;
   const verifyExitGuard = async (dialogPrice = null) => {
     const snapshot = await readVisiblePage(sessionId, { quick: true });
@@ -1005,7 +1017,16 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       const baselineToken = await markTradePageHints(page);
       const writeResponse = watchTradeResponse(page);
       try {
-        if (entryGuard && !(await entryGuard()).ok) return { ok: false, code: "SESSION_CLOSING_NO_ENTRY", submitted: false };
+        if (entryGuard) {
+          const allowed = await entryGuard();
+          if (!allowed.ok) return { ...allowed, submitted: false };
+          if (rescueTrigger && allowed.price !== Number(price)) {
+            const labels = suggestionFormLabels(action);
+            const fields = await fillTradeFields(page, [{ labels: [labels.price, ...labels.extras.filter(item => /价/.test(item))], value: allowed.price }]);
+            if (fields.length !== 1) return { ok: false, code: "RESCUE_PRICE_FIELD_UNVERIFIED", submitted: false };
+            price = allowed.price;
+          }
+        }
         stage = "click";
         let clicked = exitType ? await clickPositionTransfer(page, positionTarget) : await clickTradeEntry(page, action);
         // A changed page needs a new AI plan. A failed or disabled click does

@@ -4,6 +4,7 @@ import { chunkDocument } from "./rag.mjs";
 
 const previousSkillId = "skill_04ef36d5-3002-40fd-b51f-3914867e29f1";
 const previousContentHashes = new Map([
+  ["v0.3.120", "714ddf685d6db05241d56c10f1db5683ce4d43a5854707be95a50a6a29144102"],
   ["v0.3.119", "58a359a3933891582d00f9674bed378ba92fe8a32c5bf86eed62252e1c374a27"],
   ["v0.3.118", "b6d83363f61d677d1d80a50711115541eb85ab5f0c130ee84acbf842f05ec5f1"],
   ["v0.3.117", "d881ff44c0a3c68be5641e3725fd42fdb428046bf43d884fe5610591bcab437a"],
@@ -36,7 +37,7 @@ export async function tradingSkillUpgrade(skill) {
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: "v0.3.120",
+    version: "v0.3.121",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),

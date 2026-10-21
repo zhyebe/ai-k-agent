@@ -1,3 +1,4 @@
+import { isAutomaticRescue } from "./rescue-policy.mjs";
 import { addEvent } from "./store.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
 
@@ -14,7 +15,7 @@ export function isLiveTask(task) {
 }
 
 export function isAutomaticAction(task, decision = task?.pendingAction || task?.decision) {
-  return task?.autoDecisionEnabled === true
+  return (isLiveTask(task) && isAutomaticRescue(decision)) || task?.autoDecisionEnabled === true
     || (isLiveTask(task) && ["TAKE_PROFIT", "STOP_LOSS", "SCHEDULED_CLOSE"].includes(decision?.exitType));
 }
 
@@ -53,7 +54,7 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
       ? decision?.stopLossPrice
       : decision?.targetPrice ?? decision?.entryPrice;
   const requestedPrice = decision?.orderType === "LIMIT" ? Number(modelPrice) : NaN;
-  const price = Number.isFinite(requestedPrice) && requestedPrice > 0
+  const price = isAutomaticRescue(decision) ? Number(decision.rescueTrigger.price) : Number.isFinite(requestedPrice) && requestedPrice > 0
     ? requestedPrice
     : Number(targetMarket?.latest?.price ?? targetMarket?.quote?.price);
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);

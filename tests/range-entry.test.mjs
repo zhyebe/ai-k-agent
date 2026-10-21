@@ -7,15 +7,15 @@ const bind = decision => applyEntryBoundary(bindDecisionToMarket(decision, marke
 
 for (const action of ["BUY", "SELL"]) {
   for (const orderType of ["MARKET", "LIMIT"]) {
-    test(`${action} ${orderType}: sideways forbids ordinary new entries, preserving exits and cancellations`, () => {
+    test(`${action} ${orderType}: sideways permits AI-selected entries, preserving exits and cancellations`, () => {
       const decision = { action, orderType, marketRegime: "RANGE", targetSymbol: "A", targetPrice: 100,
         bullishProfitProbability: 0.9, bearishProfitProbability: 0.9, targetPositionPct: 10, maxOrderValuePct: 4,
         exitPlans: [{ positionId: "old", heldSide: "LONG", quantity: 2, stopLossPrice: 98 }], cancelOrderIds: ["O1"] };
       const result = bind(decision);
-      assert.equal(result.action, "HOLD");
-      assert.equal(result.targetPositionPct, 0);
-      assert.equal(result.maxOrderValuePct, 0);
-      assert.ok(result.riskFlags.includes("RANGE_MARKET_NO_ENTRY"));
+      assert.equal(result.action, action);
+      assert.equal(result.targetPositionPct, 10);
+      assert.equal(result.maxOrderValuePct, 4);
+      assert.equal(result.entryBlock, undefined);
       assert.deepEqual(result.exitPlans, decision.exitPlans);
       assert.deepEqual(result.cancelOrderIds, ["O1"]);
       assert.equal(decision.action, action);
@@ -30,7 +30,7 @@ test("only the selected board's current AI regime controls entry; historical ran
   ] };
   assert.equal(bind(decision).action, "BUY", "historical trend=range cannot replace current AI evidence");
   const opposite = { ...decision, marketRegime: "UP", targetSymbol: "B" };
-  assert.equal(bind(opposite).action, "HOLD", "the selected board's RANGE cannot be overridden by a top-level UP");
+  assert.equal(bind(opposite).action, "BUY", "RANGE describes the selected board without blocking its action");
   const inferred = bind({ ...decision, targetSymbol: "", boardAssessments: decision.boardAssessments });
   assert.equal(inferred.targetSymbol, "A");
   assert.equal(inferred.action, "BUY");
@@ -38,7 +38,8 @@ test("only the selected board's current AI regime controls entry; historical ran
     { symbol: "A", marketRegime: "RANGE", action: "HOLD", confidence: 0.1 },
     { symbol: "A", marketRegime: "UP", action: "BUY", confidence: 0.9 },
   ] });
-  assert.equal(duplicates.action, "HOLD", "conflicting duplicate assessments cannot drop RANGE");
+  assert.equal(duplicates.action, "BUY");
+  assert.equal(duplicates.marketRegime, "RANGE");
 });
 
 test("missing/invalid current regime cannot authorize entry or be inferred from free text/history", () => {
@@ -61,9 +62,8 @@ test("an incomplete board assessment does not erase an explicit target regime", 
   }
   const blocked = bind({ action: "BUY", targetSymbol: "A", marketRegime: "RANGE",
     boardAssessments: [{ symbol: "A", marketRegime: "UP" }] });
-  assert.equal(blocked.action, "HOLD", "explicit RANGE at either target level still blocks entry");
-  assert.equal(blocked.entryBlock.requestedAction, "BUY");
-  assert.equal(blocked.entryBlock.reason, "RANGE_MARKET_NO_ENTRY");
+  assert.equal(blocked.action, "BUY");
+  assert.equal(blocked.entryBlock, undefined);
 });
 
 test("sideways does not block explicit profit, protective or scheduled exits", () => {
@@ -101,8 +101,8 @@ for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"
   test(`${action} ${orderType}: tagged rescue can be evaluated in RANGE but not UNKNOWN`, () => {
     const decision = { action, orderType, targetSymbol: "A", marketRegime: "RANGE", entryPurpose: "RESCUE", rescuePositionIds: ["original"] };
     assert.equal(bind(decision).action, action);
-    assert.equal(bind({ ...decision, rescuePositionIds: [] }).action, "HOLD");
-    assert.equal(bind({ ...decision, entryPurpose: "NORMAL" }).action, "HOLD");
+    assert.equal(bind({ ...decision, rescuePositionIds: [] }).action, action);
+    assert.equal(bind({ ...decision, entryPurpose: "NORMAL" }).action, action);
     assert.equal(bind({ ...decision, marketRegime: "UNKNOWN" }).action, "HOLD");
   });
 }

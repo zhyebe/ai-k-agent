@@ -161,7 +161,7 @@ export interface Decision {
   ttlSec: number;
   marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
   entryBlock?: { requestedAction: "BUY" | "SELL"; reason: string } | null;
-  forecastHorizon?: { nextK?: Forecast | null; next10K?: Forecast | null } | null;
+  forecastHorizon?: { nextK?: Forecast | null; next3K?: Forecast | null; next10K?: Forecast | null } | null;
   holdingPlan?: { rationale?: string } | null;
   analysisSummary?: string;
   timeframeConsistency?: string;

@@ -96,13 +96,13 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const body = JSON.parse(options.body);
       const messages = body.input || body.messages || body.contents;
       const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
-      assert.match(prompt, /买多预测阶段低位入、阶段高位出/);
-      assert.match(prompt, /买空预测阶段高位入、阶段低位出/);
-      assert.match(prompt, /不要求上一单离场或账户空仓/);
-      assert.match(prompt, /不强制顶层 action 为 HOLD/);
+      assert.match(prompt, /预测阶段低位买多 BUY\/买涨/);
+      assert.match(prompt, /预测阶段高位买空 SELL\/买跌/);
+      assert.match(prompt, /旧仓不锁新入场/);
+      assert.match(prompt, /不得把顶层 action 自动改成 HOLD/);
       assert.match(prompt, /主判断：偏涨\/偏跌\/震荡/);
-      assert.match(prompt, /不是等待精确极值/);
-      assert.match(prompt, /只要任一方向存在有证据支持、可证伪的正净收益路径/);
+      assert.match(prompt, /不要求猜中绝对顶底/);
+      assert.match(prompt, /只要方向和位置匹配且存在有证据支持、可证伪的正净收益路径/);
       assert.match(prompt, /预测入场价尚未到但限价成交后的预期净收益仍为正时，用同方向 LIMIT/);
       assert.match(prompt, /持仓和旧委托不是全局入场锁/);
       assert.match(prompt, /下一 K 或新的价格\/趋势机会必须重新判断并可再次下单/);
@@ -110,9 +110,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
       assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
       assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
-      assert.match(prompt, /整个账户全部持仓可成交、扣手续费和预计平仓成本后的合计净利润>=0，立即整体离场/);
-      assert.match(prompt, /原多单持续下跌扩亏时保留原单另开一笔 SELL/);
-      assert.match(prompt, /原空单持续上涨扩亏时保留原单另开一笔 BUY/);
+      assert.match(prompt, /全账户净利>=0立即全部离场/);
+      assert.match(prompt, /原LONG按entry-bid、原SHORT按ask-entry测算/);
+      assert.match(prompt, /保留原亏损单，另开同品种反向SELL\/BUY/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);
       const value = JSON.stringify({ action: "BUY", marketRegime: "UP", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,

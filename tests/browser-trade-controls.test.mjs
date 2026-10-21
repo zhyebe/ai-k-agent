@@ -1102,3 +1102,48 @@ test("fast observations collect chart evidence and confirm a stable K without a 
     assert.equal(market.history.at(-1).confirmation.status, second === 56 ? "CONFIRMED" : "PROVISIONAL");
   }
 });
+
+for (const side of ["LONG", "SHORT"]) for (const loss of [2.99, 3]) {
+  test(`${side} rescue entry rechecks executable quote at ${loss} points before click`, async t => {
+    t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+      .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: side === "LONG" ? "SELL" : "BUY",
+      symbol: "DGKZ", symbolName: "测试商品", quantity: 2, price: side === "LONG" ? 100 : 101,
+      rescueTrigger: { type: "LOSS_POINTS", threshold: 3, heldSide: side, entryPrice: side === "LONG" ? 100 + loss : 101 - loss,
+        positionId: "original", observedAt: new Date().toISOString() } });
+    assert.equal(result.ok, loss >= 3, JSON.stringify(result));
+    assert.equal((await page.evaluate(() => window.entries)).length, loss >= 3 ? 1 : 0);
+    assert.deepEqual(await page.evaluate(() => window.exits), []);
+    if (loss < 3) assert.equal(result.code, "RESCUE_CONDITION_CHANGED");
+  });
+}
+
+test("rescue cancels its confirmation if the loss retreats below three points after the entry click", async t => {
+  t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+  await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+    .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  await page.evaluate(() => {
+    const original = window.enter;
+    window.enter = side => { original(side); document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = "101"; };
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 1, price: 100,
+    rescueTrigger: { type: "LOSS_POINTS", threshold: 3, heldSide: "LONG", entryPrice: 103, positionId: "original", observedAt: new Date().toISOString() } });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "RESCUE_CONDITION_CHANGED");
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
+test("rescue refreshes a stale entry price to the live executable bid before submitting", async t => {
+  t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+  await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+    .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2, price: 102,
+    rescueTrigger: { type: "LOSS_POINTS", threshold: 3, heldSide: "LONG", entryPrice: 105, positionId: "original", observedAt: new Date().toISOString() } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "SELL", price: "100", quantity: "2" }]);
+});

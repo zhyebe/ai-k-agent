@@ -113,6 +113,7 @@ function compactPersistedDecision(decision) {
     bearishProfitProbability: Number(decision.bearishProfitProbability || 0),
     forecastHorizon: decision.forecastHorizon && typeof decision.forecastHorizon === "object" ? {
       nextK: decision.forecastHorizon.nextK || null,
+      next3K: decision.forecastHorizon.next3K || null,
       next10K: decision.forecastHorizon.next10K || null,
     } : null,
     exitPlans: decision.exitPlans || [],

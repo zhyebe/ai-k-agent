@@ -2,6 +2,75 @@ import { executableExitQuote, exitNetPnl, heldDirection, isNonLosingExit, positi
 
 const identity = item => [item?.symbol, item?.symbolName, item?.instrumentId].filter(Boolean).map(String);
 
+export const RESCUE_LOSS_POINTS = 3;
+
+export function isAutomaticRescue(decision) {
+  return decision?.entryPurpose === "RESCUE" && !decision.exitType
+    && decision.rescueTrigger?.type === "LOSS_POINTS" && decision.rescueTrigger.threshold === RESCUE_LOSS_POINTS;
+}
+
+export function rescueTriggerAllowsQuote(trigger, price) {
+  if (trigger?.type !== "LOSS_POINTS" || trigger.threshold !== RESCUE_LOSS_POINTS
+    || !["LONG", "SHORT"].includes(trigger.heldSide) || !(trigger.entryPrice > 0) || !(price > 0)) return false;
+  const loss = (trigger.entryPrice - price) * (trigger.heldSide === "LONG" ? 1 : -1);
+  return loss >= RESCUE_LOSS_POINTS && (trigger.previousLossPoints == null || loss > trigger.previousLossPoints);
+}
+
+export function activeRescuePositionIds(task) {
+  return new Set(["ACTIVE", "EXITING"].includes(task.rescueSession?.status)
+    ? [...(task.rescueSession.originalPositionIds || []), ...(task.rescueSession.rescuePositionIds || [])] : []);
+}
+
+export function rescueProtectedPositionIds(task, market, now = Date.now()) {
+  const ids = new Set([...(task.rescueSession?.status === "ACTIVE" ? task.rescueSession.originalPositionIds || [] : []),
+    ...[task.pendingAction, ...(task.unsettledActions || [])].filter(p => p?.entryPurpose === "RESCUE"
+      && ["WAITING", "SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status)).flatMap(p => p.rescuePositionIds || [])]);
+  for (const p of market?.account?.positions || []) {
+    if (task.rescueSession?.rescuePositionIds?.includes(p.positionOrderId)) continue;
+    const quote = executableExitQuote(market, p, now);
+    const pnl = quote && exitNetPnl(p, quote.price);
+    if (pnl && -pnl.grossPnl / pnl.quantity >= RESCUE_LOSS_POINTS) ids.add(p.positionOrderId);
+  }
+  return ids;
+}
+
+export function automaticRescueCandidates(task, market, now = Date.now()) {
+  if (market?.account?.positionsVerified !== true || task.rescueSession?.status === "EXITING") return [];
+  const outstanding = [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean);
+  const rescueLegs = new Set(task.rescueSession?.rescuePositionIds || []);
+  const candidates = [];
+  for (const position of market.account.positions || []) {
+    if (!position.positionOrderId || rescueLegs.has(position.positionOrderId) || !(Number(position.quantity) > 0)) continue;
+    // Pending opposite fills must not become new originals before reconciliation.
+    if (outstanding.some(p => p.entryPurpose === "RESCUE" && !["REJECTED", "CANCELLED"].includes(p.status)
+      && p.baselinePositionsVerified && identity(position).some(v => identity({ symbol: p.targetSymbol, instrumentId: p.targetInstrumentId, symbolName: p.targetSymbolName }).includes(v))
+      && heldDirection(position) === (p.action === "BUY" ? "LONG" : "SHORT")
+      && Number(position.quantity) > Number(p.baselinePositions?.[position.positionOrderId] || 0))) continue;
+    if (outstanding.some(p => p.exitType && ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status)
+      && p.targetPositionIds?.includes(position.positionOrderId))) continue;
+    const quote = executableExitQuote(market, position, now);
+    const pnl = quote && exitNetPnl(position, quote.price);
+    const lossPoints = pnl ? -pnl.grossPnl / pnl.quantity : null;
+    if (lossPoints === null || lossPoints < RESCUE_LOSS_POINTS) continue;
+    const decision = { action: heldDirection(position) === "LONG" ? "SELL" : "BUY", orderType: "MARKET",
+      targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
+      entryPurpose: "RESCUE", rescuePositionIds: [position.positionOrderId],
+      rescueTrigger: { type: "LOSS_POINTS", threshold: RESCUE_LOSS_POINTS, price: quote.price, lossPoints,
+        positionId: position.positionOrderId, heldSide: heldDirection(position), entryPrice: pnl.entryPrice,
+        previousLossPoints: task.rescueSession?.status === "ACTIVE" ? task.rescueSession.lastRescueByPosition?.[position.positionOrderId]?.lossPoints ?? null : null,
+        observedAt: new Date(quote.observedAt).toISOString() } };
+    const retry = outstanding.find(p => isAutomaticRescue(p) && p.status === "WAITING"
+      && p.rescuePositionIds?.length === 1 && p.rescuePositionIds[0] === position.positionOrderId);
+    try {
+      validateRescueEntry(task, rescueEntryIntent(decision, market, now), retry?.id);
+      candidates.push({ position, decision, replacePendingId: retry?.id });
+    } catch (error) {
+      if (!["RESCUE_ALREADY_PENDING", "RESCUE_LOSS_NOT_EXPANDED"].includes(error.message)) throw error;
+    }
+  }
+  return candidates.sort((a, b) => b.decision.rescueTrigger.lossPoints - a.decision.rescueTrigger.lossPoints);
+}
+
 export function rescueEntryIntent(decision, market, now = Date.now()) {
   if (decision.entryPurpose !== "RESCUE") return { entryPurpose: "NORMAL", rescuePositionIds: [] };
   const ids = [...new Set((decision.rescuePositionIds || []).map(String))];

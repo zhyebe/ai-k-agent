@@ -170,7 +170,7 @@ const riskLabels: Record<string, string> = {
   BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
   LOW_PROFIT_PROBABILITY: "历史概率提示",
   INCOMPLETE_DIRECTIONAL_PROBABILITIES: "AI 方向预测字段不完整",
-  RANGE_MARKET_NO_ENTRY: "目标盘横盘震荡，禁止普通开仓",
+  RANGE_MARKET_NO_ENTRY: "旧版横盘限制（已取消）",
   ENTRY_MARKET_REGIME_UNKNOWN: "目标盘当前趋势字段不足，无法核实入场条件",
   EXIT_PROFIT_NOT_VERIFIED: "入场成本或可成交盈利未核实",
 };
@@ -1312,7 +1312,8 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
   const entryBlockReason = decision.entryBlock?.reason || decision.riskFlags.find(flag => ["RANGE_MARKET_NO_ENTRY", "ENTRY_MARKET_REGIME_UNKNOWN"].includes(flag));
   const forecasts = [
     { label: "下一 K", value: decision.forecastHorizon?.nextK },
-    { label: "未来约 10 K", value: decision.forecastHorizon?.next10K },
+    { label: "随后 1～3 根 K", value: decision.forecastHorizon?.next3K },
+    ...(decision.forecastHorizon?.next10K ? [{ label: "旧版预测：约 10 K", value: decision.forecastHorizon.next10K }] : []),
   ];
   const latestPending = task.pendingAction?.status === "TAKEN_OVER" ? null : task.pendingAction;
   const isCurrentPending = latestPending && (latestPending.status === "WAITING" || (latestPending.decisionRunId && decision.runId
