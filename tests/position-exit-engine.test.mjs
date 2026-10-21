@@ -58,24 +58,24 @@ for (const automatic of [false, true]) {
   test(`${automatic ? "automatic" : "manual"}: AI-selected account recovery exit closes losing, small-profit and other-instrument legs`, async () => {
     const positions = [
       { ...long("original-loss"), orderPrice: 101, roundTripFee: 0.2 },
-      { ...long("rescue-short"), side: "SHORT", orderPrice: 102.5, roundTripFee: 0.2 },
+      { ...long("rescue-short"), side: "SHORT", orderPrice: 101.8, quantity: 3, roundTripFee: 0.2 },
       { ...long("other-instrument"), symbol: "DGJJ", symbolName: "另一商品", orderPrice: 200, roundTripFee: 0.2 },
     ];
     const f = setup(`rescue-account-exit-${automatic}`, positions, { autoDecisionEnabled: automatic });
     f.market.orderBook = { bids: [{ price: 100, volume: 100 }], asks: [{ price: 101, volume: 100 }] };
     f.market.books = [
       { symbol: "DGKZ", observedAt: f.market.observedAt, orderBook: f.market.orderBook },
-      { symbol: "DGJJ", observedAt: f.market.observedAt, orderBook: { bids: [{ price: 201, volume: 100 }], asks: [{ price: 202, volume: 100 }] } },
+      { symbol: "DGJJ", observedAt: f.market.observedAt, orderBook: { bids: [{ price: 200.5, volume: 100 }], asks: [{ price: 202, volume: 100 }] } },
     ];
     f.market.account.realtimeValueChange = -999;
-    const prices = [100, 101, 201];
+    const prices = [100, 101, 200.5];
     const pnls = positions.map((p, i) => exitNetPnl(p, prices[i]).netPnl);
     assert.ok(pnls[0] < 0);
     assert.ok(pnls.reduce((sum, value) => sum + value, 0) > 0);
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.submitted.length, 0, "positive account total alone must not invent an AI liquidation decision");
     const validated = validateExitPlans({ exitPlans: positions.map((p, i) => ({
-      positionId: p.positionOrderId, heldSide: p.side === "SHORT" ? "SHORT" : "LONG", quantity: 1,
+      positionId: p.positionOrderId, heldSide: p.side === "SHORT" ? "SHORT" : "LONG", quantity: p.quantity,
       validForSec: 300, takeProfitPrice: null, stopLossPrice: prices[i], rationale: "全账户补救成功，整体保护锁盈",
     })) }, f.market, f.task);
     assert.deepEqual(validated.rejected, []);
@@ -83,7 +83,7 @@ for (const automatic of [false, true]) {
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.deepEqual(f.submitted.map(input => input.targetPositionIds[0]).sort(), positions.map(p => p.positionOrderId).sort());
     assert.deepEqual(f.submitted.map(input => input.action), ["SELL", "BUY", "SELL"]);
-    assert.ok(f.submitted.every(input => input.exitType === "STOP_LOSS" && input.quantity === 1));
+    assert.ok(f.submitted.every(input => input.exitType === "STOP_LOSS" && input.quantity === positions.find(p => p.positionOrderId === input.targetPositionIds[0]).quantity));
     assert.deepEqual(f.market.account.positions, []);
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.submitted.length, 3, "completed recovery exits must not be submitted twice");
@@ -208,7 +208,7 @@ test("ordinary ticks do not starve AI; its matching price condition executes at 
   assert.equal(f.task.exitPlans[0].observedAt, originalObservedAt);
 });
 
-for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [2, 4, -3]) {
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [1, 2, 4, -3]) {
   test(`${automatic ? "automatic" : "manual"} ${heldSide}: boundary ${threshold} exits without an AI plan and ignores account totals`, async () => {
     const isLong = heldSide === "LONG";
     const price = 100 + (isLong ? 1 : -1) * (threshold > 0 ? threshold : (threshold + 1) / 2);
@@ -222,7 +222,7 @@ for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"])
     assert.equal(f.submitted.length, 1);
     assert.deepEqual(f.submitted[0].targetPositionIds, ["boundary"]);
     assert.equal(f.submitted[0].exitType, threshold > 0 ? "TAKE_PROFIT" : "STOP_LOSS");
-    assert.equal((f.submitted[0].exitGuard.positionPoints || f.submitted[0].exitGuard.positionAmount).threshold, threshold > 0 ? 2 : -3);
+    assert.equal((f.submitted[0].exitGuard.positionPoints || f.submitted[0].exitGuard.positionAmount).threshold, threshold > 0 ? 1 : -3);
     assert.equal(f.task.pendingAction.source, threshold > 0 ? "position_profit_realization" : "position_amount_boundary");
     assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["recover"]);
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
@@ -230,8 +230,8 @@ for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"])
   });
 }
 
-for (const heldSide of ["LONG", "SHORT"]) for (const amount of [0, 0.5, 1.99, 2, 4, -1]) {
-  test(`${heldSide}: below 2 points cannot take profit; eligible point boundary ${amount}`, async () => {
+for (const heldSide of ["LONG", "SHORT"]) for (const amount of [0, 0.5, 0.99, 1, 1.99, 2, 4, -1]) {
+  test(`${heldSide}: below 1 point cannot take profit; eligible point boundary ${amount}`, async () => {
     const f = setup(`ai-range-${heldSide}-${amount}`, [{ ...long("P1", 2), side: heldSide, roundTripFee: 1 }]);
     const price = 100 + (heldSide === "LONG" ? 1 : -1) * amount;
     f.market.orderBook = { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] };
@@ -239,17 +239,17 @@ for (const heldSide of ["LONG", "SHORT"]) for (const amount of [0, 0.5, 1.99, 2,
     f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide, quantity: 2, validForSec: 120,
       takeProfitPrice: amount >= 0 ? price : null, stopLossPrice: amount < 0 ? price : null }] }, f.market, f.task).plans;
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-    assert.equal(f.submitted.length, amount >= 0 && amount < 2 ? 0 : 1);
+    assert.equal(f.submitted.length, amount >= 0 && amount < 1 ? 0 : 1);
     if (f.submitted.length) {
       assert.equal(f.submitted[0].exitType, exitType);
-      assert.equal(f.task.pendingAction.source, amount >= 2 ? "position_profit_realization" : amount === -1 ? "position_amount_boundary" : "ai_price_trigger");
+      assert.equal(f.task.pendingAction.source, amount >= 1 ? "position_profit_realization" : amount === -1 ? "position_amount_boundary" : "ai_price_trigger");
     }
   });
 }
 
 test("account realtime value exactly 2 is reference only without an AI exit plan", async () => {
   const f = setup("account-profit-fallback", [long("profit"), { ...long("loss"), orderPrice: 103 }]);
-  f.market.orderBook = { bids: [{ price: 101, volume: 100 }], asks: [{ price: 102, volume: 100 }] };
+  f.market.orderBook = { bids: [{ price: 100.5, volume: 100 }], asks: [{ price: 101.5, volume: 100 }] };
   f.task.exitPlans = [{ positionId: "profit", expiresAt: new Date(Date.now() - 1000).toISOString() }];
   f.market.account.realtimeValueChange = 2;
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
@@ -568,7 +568,7 @@ test("failed cancellation keeps closing free holdings, while frozen positions an
 
 test("a cancellation transport error still refreshes the account and closes free positions", async () => {
   const f = setup("closing-cancel-error", [long("P1"), { ...long("P2"), frozenQuantity: 1 }]);
-  f.market.account.openOrders = [{ orderId: "O1", orderKind: "转让", positionOrderId: "P2" }];
+  f.market.account.openOrders = [{ orderId: "O1", orderKind: "转让", positionOrderId: "P2", remainingQuantity: 1 }];
   await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: {
     ...f.runtime, cancelOpenOrders: async () => { throw new Error("DESKTOP_CALL_TIMEOUT"); },
   } });
@@ -593,7 +593,7 @@ test("an exchange rejection is reported and retried without blocking other holdi
 
 test("stop during cancellation discards a late failure without adding output", async () => {
   const f = setup("closing-cancel-stop", [long("P1")]);
-  f.market.account.openOrders = [{ orderId: "O1", orderKind: "订立" }];
+  f.market.account.openOrders = [{ orderId: "O1", orderKind: "订立", remainingQuantity: 1 }];
   let rejectCancellation;
   const operation = runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: {
     ...f.runtime, cancelOpenOrders: async () => new Promise((_resolve, reject) => { rejectCancellation = reject; }),
@@ -693,3 +693,44 @@ for (const side of ["LONG", "SHORT"]) {
     });
   }
 }
+
+
+for (const automatic of [false, true]) test(`ordinary monitoring withdraws all current remainders without AI, automatic=${automatic}`, async () => {
+  const f = setup(`ordinary-cancel-${automatic}`, [{ ...long("partial"), orderPrice: 105 }], { autoDecisionEnabled: automatic });
+  f.market.account.openOrders = [
+    { orderId: "entry", orderKind: "订立", remainingQuantity: 2, filledQuantity: 1 },
+    { orderId: "transfer", orderKind: "转让", remainingQuantity: 1 },
+  ];
+  f.task.pendingAction = { ...buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3 }), status: "AWAITING_FILL", entrustedOrderIds: ["entry"] };
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.deepEqual(f.cancelled, ["entry", "transfer"]);
+  assert.equal(f.submitted.length, 0);
+  assert.equal(f.task.pendingAction.status, "CANCELLED");
+  assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["partial"]);
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.cancelled.length, 2, "confirmed cancellation is not replayed");
+});
+
+test("periodic full observation discovers external current orders without waiting for AI", async () => {
+  const f = setup("external-current-order", [{ ...long("held"), orderPrice: 105 }], { exitObservationIndex: 4 });
+  f.task.market = structuredClone(f.market);
+  f.market.account.openOrders = [{ orderId: "external", remainingQuantity: 1 }];
+  const scopes = [];
+  await runPositionExitCycle(f.task.id, { runtime: { ...f.runtime, observeExecutionMarket: async (...args) => {
+    scopes.push(args[2].accountScope); return f.runtime.observeExecutionMarket(...args);
+  } } });
+  assert.deepEqual(scopes, ["full", "full"]);
+  assert.deepEqual(f.cancelled, ["external"]);
+  assert.equal(f.submitted.length, 0);
+});
+
+
+test("verified current orders still cancel when holdings are unverified", async () => {
+  const f = setup("cancel-without-holdings", []);
+  f.market.account.positionsVerified = false;
+  f.market.account.openOrders = [{ orderId: "verified-order", remainingQuantity: 1 }];
+  const result = await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.deepEqual(f.cancelled, ["verified-order"]);
+  assert.equal(f.submitted.length, 0);
+  assert.equal(result.code, "CANCELLATION_UNVERIFIED");
+});

@@ -11,20 +11,20 @@ for (const side of ["LONG", "SHORT"]) {
     account: { positionsVerified: true, positions: [position], realtimeValueChange: -100 },
     orderBook: { bids: [{ price: price(points), volume: 100 }], asks: [{ price: price(points), volume: 100 }] } });
 
-  test(`${side}: 2–4 means price points, never total cash, account PnL or candle count`, () => {
-    for (const points of [0, 0.5, 1, 1.99999]) {
+  test(`${side}: 1–4 means price points, never total cash, account PnL or candle count`, () => {
+    for (const points of [0, 0.5, 0.99999]) {
       assert.equal(positionProfitExit(position, market(points), now), null);
-      assert.equal(positionAmountExit(position, market(points), now), null, "cash profit above 5 must not close below 2 points");
+      assert.equal(positionAmountExit(position, market(points), now), null, "cash profit above 5 must not close below 1 point");
       assert.equal(isNonLosingExit(position, price(points)), false);
     }
-    for (const points of [2, 3, 4, 6]) {
+    for (const points of [1, 2, 3, 4, 6]) {
       const result = positionProfitExit(position, market(points), now);
       assert.equal(result.decision.exitType, "TAKE_PROFIT");
       assert.equal(result.decision.action, side === "LONG" ? "SELL" : "BUY");
-      assert.equal(result.decision.exitGuard.positionPoints.threshold, 2);
-      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(1.99999)), false);
-      assert.equal(exitGuardAllowsPrice(result.decision.exitGuard, price(1.99999), now), false);
-      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(2)), true);
+      assert.equal(result.decision.exitGuard.positionPoints.threshold, 1);
+      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(0.99999)), false);
+      assert.equal(exitGuardAllowsPrice(result.decision.exitGuard, price(0.99999), now), false);
+      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(1)), true);
     }
   });
 
@@ -60,8 +60,8 @@ for (const side of ["LONG", "SHORT"]) {
     assert.equal(positionProfitExit(p, { ...market(3), symbol: "OTHER" }, now), null);
   });
 
-  test(`${side}: AI targets outside 2–4 points are rejected; protective stops survive`, () => {
-    for (const points of [1, 1.99, 4.01, 5, 10]) {
+  test(`${side}: AI targets outside 1–4 points are rejected; protective stops survive`, () => {
+    for (const points of [0.5, 0.99, 4.01, 5, 10]) {
       const result = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: side, quantity: 10, validForSec: 60,
         takeProfitPrice: price(points), stopLossPrice: price(-1) }] }, market(0), {}, now);
       assert.equal(result.plans[0].takeProfitPrice, null);
@@ -71,7 +71,7 @@ for (const side of ["LONG", "SHORT"]) {
         realtime_take_profit: { value_above: 1, take_profit_price: price(points) } }] }, market(0), {}, now);
       assert.equal(realtime.plans.length, 0);
     }
-    for (const points of [2, 4]) assert.equal(validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: side, quantity: 10,
+    for (const points of [1, 2, 4]) assert.equal(validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: side, quantity: 10,
       validForSec: 60, takeProfitPrice: price(points) }] }, market(0), {}, now).plans.length, 1);
   });
 }

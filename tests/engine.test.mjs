@@ -949,6 +949,34 @@ test("双用户自动分析分别使用各自启用的共享模型", async () =>
   }
 });
 
+for (const response of ["KEEP", "error"]) test(`current orders cancel before AI ${response}, independently of model output`, async () => {
+  const task = insertNorthstarTask(`cancel_before_ai_${response}_${Date.now()}`);
+  Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
+  const market = testMarketSnapshot("cancel-before-ai", 100);
+  market.account = { positionsVerified: true, positions: [], openOrdersVerified: true,
+    openOrders: [{ orderId: "O-current", remainingQuantity: 2, filledQuantity: 1 }] };
+  const events = [];
+  try {
+    await runAnalysis(task.id, "", { runtime: {
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => structuredClone(market),
+      cancelOpenOrders: async ({ orderIds }) => {
+        events.push("cancel"); assert.deepEqual(orderIds, ["O-current"]);
+        market.account.openOrders = [];
+        return { ok: true, results: [{ orderId: "O-current", cancelled: true }] };
+      },
+      requestDecision: async () => {
+        events.push("model"); assert.deepEqual(events, ["cancel", "model"]);
+        if (response === "error") throw new Error("MODEL_OFFLINE");
+        return { action: "HOLD", orderAssessments: [{ orderId: "O-current", decision: "KEEP" }], riskFlags: [] };
+      },
+      submitSuggestionForm: async () => assert.fail("cancellation cannot authorize a replacement entry"),
+    } });
+    assert.deepEqual(events, ["cancel", "model"]);
+    assert.equal(task.decision.orderCancellation.results[0].cancelled, true);
+  } finally { state.tasks = state.tasks.filter(item => item.id !== task.id); }
+});
+
 for (const autoDecisionEnabled of [false, true]) {
   test(`委托撤销独立于${autoDecisionEnabled ? "自动" : "手动"}入场、HOLD和同K限制，未变行情继续分析`, async () => {
     const task = insertNorthstarTask(`pending_orders_${autoDecisionEnabled}_${Date.now()}`);
@@ -977,7 +1005,7 @@ for (const autoDecisionEnabled of [false, true]) {
     try {
       await runMonitoringCycle(task.id, { runtime });
       assert.equal(task.pendingAction?.status === "CONFIRMED", false);
-      assert.deepEqual(cancelled, [["O-1"]]);
+      assert.deepEqual(cancelled, [["O-1", "O-2"]]);
       assert.equal(state.orders.find((order) => order.taskId === task.id)?.status, "cancelled_remainder");
       await runMonitoringCycle(task.id, { runtime });
       assert.equal(rounds, 2);
@@ -988,7 +1016,7 @@ for (const autoDecisionEnabled of [false, true]) {
 
 for (const autoDecisionEnabled of [false, true]) {
   for (const invalidResponse of [false, true]) {
-    test(`${autoDecisionEnabled ? "自动" : "手动"}模式${invalidResponse ? "无效模型响应不撤单" : "离场计划缺失不吞掉明确撤单"}`, async () => {
+    test(`${autoDecisionEnabled ? "自动" : "手动"}模式${invalidResponse ? "无效模型响应仍自动撤单" : "离场计划缺失不吞掉明确撤单"}`, async () => {
       const task = insertNorthstarTask(`independent_cancel_${autoDecisionEnabled}_${invalidResponse}_${Date.now()}`);
       Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
       const market = testMarketSnapshot("independent-cancel", 101);
@@ -1010,12 +1038,12 @@ for (const autoDecisionEnabled of [false, true]) {
           cancelOpenOrders: async ({ orderIds }) => { cancelled.push(...orderIds); return { ok: true, results: orderIds.map(orderId => ({ orderId, cancelled: true })) }; },
           submitSuggestionForm: async () => assert.fail("HOLD cannot submit an entry or exit"),
         } });
-        assert.deepEqual(cancelled, invalidResponse ? [] : ["O-1"]);
+        assert.deepEqual(cancelled, ["O-1", "O-keep"]);
         assert.equal(task.lastAnalysisSucceeded, false);
         assert.equal(market.account.positions[0].quantity, 1);
         const output = getAgentOutput(task.id);
         assert.ok(output.some(line => /当前委托已核实：2 笔/.test(line.message)));
-        if (!invalidResponse) assert.ok(output.some(line => /委托 O-keep：AI 继续保留；保留更有利/.test(line.message)));
+        assert.ok(output.some(line => /委托 O-keep 已撤销剩余未成交数量/.test(line.message)));
       } finally { state.tasks = state.tasks.filter(item => item.id !== task.id); }
     });
   }
@@ -1023,7 +1051,7 @@ for (const autoDecisionEnabled of [false, true]) {
 
 for (const autoDecisionEnabled of [false, true]) {
   for (const action of ["BUY", "SELL"]) {
-    test(`${autoDecisionEnabled ? "自动" : "手动"}模式 ${action} 入场先按 AI 撤销旧委托且保留部分成交持仓`, async () => {
+    test(`${autoDecisionEnabled ? "自动" : "手动"}模式 ${action} 入场前自动撤销全部当前委托且保留部分成交持仓`, async () => {
       const task = insertNorthstarTask(`entry_after_cancel_${autoDecisionEnabled}_${action}_${Date.now()}`);
       Object.assign(task, { mode: "LIVE", autoDecisionEnabled, entryQuantity: 1, status: "MONITORING", monitoringEnabled: true });
       const market = testMarketSnapshot(`entry-after-cancel-${autoDecisionEnabled}-${action}`, 101);
@@ -1064,8 +1092,8 @@ for (const autoDecisionEnabled of [false, true]) {
             },
             cancelOpenOrders: async ({ orderIds }) => {
               events.push(["cancel", ...orderIds]);
-              assert.deepEqual(orderIds, ["O-cancel"]);
-              return { ok: true, results: [{ orderId: "O-cancel", cancelled: true }] };
+              assert.deepEqual(orderIds, ["O-cancel", "O-keep"]);
+              return { ok: true, results: orderIds.map(orderId => ({ orderId, cancelled: true })) };
             },
             fillSuggestionForm: async (input) => {
               events.push(["fill", input.action]);
@@ -1079,7 +1107,7 @@ for (const autoDecisionEnabled of [false, true]) {
             },
           },
         });
-        assert.deepEqual(events, autoDecisionEnabled ? [["cancel", "O-cancel"], ["submit", action]] : [["cancel", "O-cancel"], ["fill", action]]);
+        assert.deepEqual(events, autoDecisionEnabled ? [["cancel", "O-cancel", "O-keep"], ["submit", action]] : [["cancel", "O-cancel", "O-keep"], ["fill", action]]);
         assert.equal(task.market.account.positions.some((position) => position.positionOrderId === "P-partial"), true);
         assert.equal(task.pendingAction.action, action);
         assert.equal(task.pendingAction.status, autoDecisionEnabled ? "AWAITING_FILL" : "WAITING");
@@ -1139,7 +1167,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
         },
         fillSuggestionForm: async (input) => { filled.push(input); return { ok: true, filled: true }; },
         submitSuggestionForm: async (input) => { submitted.push(input); return { ok: true, filled: true, submitted: true }; },
-        cancelOpenOrders: async (input) => { cancelled.push(input.orderIds); return { ok: true, results: input.orderIds.map((orderId) => ({ orderId, cancelled: true })) }; },
+        cancelOpenOrders: async (input) => { cancelled.push(input.orderIds); market.account.openOrders = []; return { ok: true, results: input.orderIds.map((orderId) => ({ orderId, cancelled: true })) }; },
       };
       try {
         const failure = await runMonitoringCycle(task.id, { runtime });
@@ -1208,19 +1236,21 @@ test("JSON格式纠正成功后只执行纠正决策一次，并记录恢复诊�
   } finally { stopController(task.id); state.tasks = state.tasks.filter(item => item.id !== task.id); }
 });
 
-test("AI KEEP does not invoke cancellation", async () => {
+test("AI KEEP cannot override the user current-order cancellation policy", async () => {
   const task = insertNorthstarTask(`keep_order_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("keep-order", 101);
+  market.account.openOrdersVerified = true;
   market.account.openOrders = [{ orderId: "O-keep", remainingQuantity: 1 }];
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
       observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "HOLD", orderAssessments: [{ orderId: "O-keep", decision: "KEEP" }], riskFlags: [] }),
-      cancelOpenOrders: async () => assert.fail("KEEP must preserve the order"),
+      cancelOpenOrders: async ({ orderIds }) => { assert.deepEqual(orderIds, ["O-keep"]); market.account.openOrders = []; return { ok: true, results: [{ orderId: "O-keep", cancelled: true }] }; },
     } });
     assert.equal(task.status, "MONITORING");
+    assert.equal(task.decision.orderCancellation.results[0].cancelled, true);
   } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
 });
 
@@ -1244,7 +1274,7 @@ test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场
   } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
 });
 
-test("AI立即离场先于无关撤单执行，慢撤单不拖延离场", async () => {
+test("当前委托在AI分析前已撤销，随后执行本轮明确离场", async () => {
   const task = insertNorthstarTask(`exit_first_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("exit-first", 99);
@@ -1256,9 +1286,9 @@ test("AI立即离场先于无关撤单执行，慢撤单不拖延离场", async 
       observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
       requestDecision: async () => ({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"], cancelOrderIds: ["O-1"], riskFlags: [] }),
       submitSuggestionForm: async () => { actions.push("exit"); return { ok: true, submitted: true }; },
-      cancelOpenOrders: async () => { actions.push("cancel"); assert.deepEqual(actions, ["exit", "cancel"]); return { ok: true, results: [{ orderId: "O-1", cancelled: true }] }; },
+      cancelOpenOrders: async () => { actions.push("cancel"); assert.deepEqual(actions, ["cancel"]); return { ok: true, results: [{ orderId: "O-1", cancelled: true }] }; },
     } });
-    assert.deepEqual(actions, ["exit", "cancel"]);
+    assert.deepEqual(actions, ["cancel", "exit"]);
     assert.equal(task.status, "MONITORING");
   } finally { state.tasks = state.tasks.filter((item) => item.id !== task.id); }
 });

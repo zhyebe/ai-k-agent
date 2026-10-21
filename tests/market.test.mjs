@@ -85,7 +85,7 @@ test("浩瀚分时行单独解析为逐笔数据", () => {
   assert.deepEqual(tick, { timestamp: 1700000000000, price: 103, volume: 25, referencePrice: 100, averagePrice: 102, flag: "1" });
 });
 
-test("闪K必须有短暂出现后消失/回归证据才从分析价格中排除", () => {
+test("闪K必须有短暂出现后消失/回归证据才标记为盘中事件，保留分析", () => {
   const base = (price, timestamp) => ({ timestamp, open: price, high: price, low: price, close: price, volume: 1 });
   const symbol = `FLASH-${Date.now()}`;
   const t0 = 1_700_000_000_000;
@@ -94,7 +94,7 @@ test("闪K必须有短暂出现后消失/回归证据才从分析价格中排除
   const reverted = detectFlashK({ symbol, timeframe: "1m", history: [base(100, t0 + 9000)], latest: { price: 100 }, now: t0 + 9000 });
   assert.equal(reverted.suspected, true);
   assert.equal(reverted.price, 105);
-  assert.equal(reverted.excludeFromAnalysis, true);
+  assert.equal(reverted.excludeFromAnalysis, false);
 });
 
 test("单次 ATR 大波动没有连续消失证据，不判定为闪K", () => {

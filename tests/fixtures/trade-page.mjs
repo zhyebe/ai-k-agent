@@ -44,3 +44,43 @@ function notice(text){document.querySelector('.el-message')?.remove();const div=
 function enter(side){const root=document.querySelector(side==='BUY'?'#buy':'#sell');if(!root.querySelector('[type=checkbox]').checked){notice('协议未勾选，提交失败');return}setTimeout(()=>{const box=document.createElement('div');box.className='el-message-box';box.innerHTML='确认下单，是否继续？<button>确 定</button><button>取消</button>';box.querySelector('button').onclick=()=>{window.entries.push({side,price:root.querySelector('input[type=number]').value,quantity:root.querySelectorAll('input[type=number]')[1].value});box.remove();notice('提交成功')};box.querySelectorAll('button')[1].onclick=()=>box.remove();document.body.append(box)},500)}
 function transfer(id,quantity){setTimeout(()=>{const box=document.createElement('div');box.className='el-dialog';box.innerHTML='<div>转让 测试商品</div><div class="inputWrap"><p>转让价格</p><div><input type="number" value="19"></div></div><div class="inputWrap"><p>转让数量</p><div><input type="number" value="'+quantity+'" disabled></div></div><button>确 定</button><button>取 消</button>';box.querySelectorAll('button')[1].onclick=()=>box.remove();box.querySelector('button').onclick=()=>{window.exits.push({id,price:box.querySelector('input').value,quantity:box.querySelectorAll('input')[1].value});box.remove();notice('转让成功 '+id)};document.body.append(box);setTimeout(()=>{if(box.isConnected)box.querySelector('input').value='19.5'},200)},500)}
 </script></body></html>`;
+
+
+// Element UI separates headers/bodies and redraws rows after selection changes.
+export function enableRefreshingOrderSelection() {
+  const table = document.querySelector("#orders table");
+  const wrapper = document.createElement("div");
+  wrapper.className = "el-table";
+  table.before(wrapper);
+  const header = document.createElement("table");
+  header.append(table.querySelector("thead"));
+  wrapper.append(header, table);
+  window.selectionRefreshes = 0;
+  window.emptySelectionRefreshes = 0;
+  window.trustedSelections = 0;
+  const bind = () => {
+    for (const row of table.querySelectorAll("tbody tr")) {
+      const input = row.querySelector("input");
+      if (!input.closest("label")) {
+        const label = document.createElement("label");
+        label.className = "el-checkbox";
+        label.style.cssText = "display:inline-block;width:20px;height:20px;background:#ddd";
+        input.before(label);
+        label.append(input, document.createElement("span"));
+        input.style.cssText = "position:absolute;opacity:0;width:0;height:0";
+      }
+      input.onchange = (event) => {
+        if (event.isTrusted) window.trustedSelections++;
+        if (![...table.querySelectorAll("tbody input")].some(node => node.checked)) window.emptySelectionRefreshes++;
+        const body = table.querySelector("tbody");
+        const fresh = body.cloneNode(true);
+        fresh.querySelectorAll("tr").forEach(row => row.removeAttribute("data-axiom-cancel-order"));
+        body.replaceWith(fresh);
+        window.selectionRefreshes++;
+        bind();
+      };
+    }
+  };
+  bind();
+}
+export const refreshingTradeFixture = tradeFixture.replace("</body>", `<script>(${enableRefreshingOrderSelection.toString()})()</script></body>`);

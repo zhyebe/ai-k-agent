@@ -2054,6 +2054,62 @@ function abandonChangedAnalysis(task, run, market, code) {
   return { task, market, run, skipped: true, reason: code, route: code, analysisTriggered: false };
 }
 
+// User policy: every verified current order is withdrawn, independently of AI.
+// The existing submission slot prevents cancellation racing a browser write.
+async function cancelCurrentOrders(task, market, connector, run, runtime, assertCurrent) {
+  const orderIds = [...new Set((market.account?.openOrders || []).filter(order => Number(order.remainingQuantity) > 0)
+    .map(order => String(order.orderId || "").trim()).filter(Boolean))];
+  if (!isLiveTask(task) || !isTradingSwitchOn() || market.account?.openOrdersVerified !== true || !orderIds.length
+    || pendingConfirmLocks.has(task.id)) return null;
+  assertCurrent();
+  const abort = new AbortController();
+  const cancelSubmission = () => abort.abort(new Error("ORDER_CANCEL_ABORTED"));
+  pendingConfirmLocks.add(task.id);
+  pendingSubmissionCancels.set(task.id, cancelSubmission);
+  appendAgentOutput({ taskId: task.id, runId: run?.id, stage: "action", kind: "order",
+    message: `发现 ${orderIds.length} 笔当前委托，立即撤销剩余未成交数量；不等待 AI 判断`, data: { orderIds } });
+  let cancellation;
+  try {
+    try {
+      cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: abort.signal });
+    } catch (error) {
+      assertCurrent();
+      abort.signal.throwIfAborted();
+      if (!/REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""))) throw error;
+      const login = await ensureLoggedIn(task, connector, run || { id: null }, { code: "REAUTH_REQUIRED" }, runtime, assertCurrent);
+      assertCurrent();
+      abort.signal.throwIfAborted();
+      if (!login?.ok || !login.authenticated) throw new Error("ORDER_CANCEL_REAUTH_FAILED");
+      cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: abort.signal });
+    }
+  } catch (error) {
+    assertCurrent();
+    abort.signal.throwIfAborted();
+    cancellation = { ok: false, code: "ORDER_CANCEL_FAILED", message: error.message };
+  } finally {
+    if (pendingSubmissionCancels.get(task.id) === cancelSubmission) pendingSubmissionCancels.delete(task.id);
+    pendingConfirmLocks.delete(task.id);
+  }
+  assertCurrent();
+  const results = orderIds.map(orderId => cancellation?.results?.find(result => String(result.orderId) === orderId)
+    || { orderId, ok: false, cancelled: false, code: cancellation?.code || "ORDER_CANCEL_RESULT_MISSING", message: cancellation?.message || "未收到该委托的撤销结果，不能认定撤单成功" });
+  cancellation = { ...cancellation, results, ok: results.every(result => result.cancelled === true) };
+  for (const result of results) appendAgentOutput({ taskId: task.id, runId: run?.id, stage: "action", kind: "order",
+    message: result.cancelled ? `委托 ${result.orderId} 已撤销剩余未成交数量` : `委托 ${result.orderId} 撤销结果：${result.message || result.code}，继续核对当前委托`, data: result });
+  const cancelledIds = new Set(results.filter(result => result.cancelled === true).map(result => String(result.orderId)));
+  for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean)) {
+    if (!["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || !pending.entrustedOrderIds?.length
+      || !pending.entrustedOrderIds.every(id => cancelledIds.has(String(id)))) continue;
+    pending.status = "CANCELLED";
+    pending.resolvedAt = new Date().toISOString();
+    pending.message = "已按策略撤销委托剩余数量；已成交部分继续按持仓监控";
+    recordConfirmedOrder(task, pending, { status: "cancelled_remainder", submitted: true, source: "current_order_policy", message: pending.message });
+  }
+  task.unsettledActions = (task.unsettledActions || []).filter(pending => pending.status !== "CANCELLED");
+  task.decision = { ...task.decision, orderCancellation: cancellation };
+  return cancellation;
+}
+
 export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, monitorRecentOnly = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
@@ -2103,7 +2159,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
 
     logStage(task, run, "collect", "读取网页可见数据与只读行情");
-    const market = await observeWithLoginRecovery(task, connector, run, runtime,
+    await positionExitRuns.get(taskId)?.catch(() => {});
+    let market = await observeWithLoginRecovery(task, connector, run, runtime,
       () => runtime.observeMarket(task, connector), assertCurrent);
     assertCurrent();
     if (!market.ok) {
@@ -2127,11 +2184,21 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (typeof market.account?.openOrdersVerified === "boolean") appendAgentOutput({
       taskId, runId: run.id, stage: "collect", kind: "order",
       message: market.account.openOrdersVerified
-        ? `当前委托已核实：${market.account.openOrders?.length || 0} 笔；逐笔交给 AI 比较继续等待与撤单释放资金`
+        ? `当前委托已核实：${market.account.openOrders?.length || 0} 笔；立即撤销剩余未成交数量，不等待 AI`
         : "当前委托读取未核实；不能当作没有委托，下轮继续读取",
       data: { verified: market.account.openOrdersVerified, orderIds: (market.account.openOrders || []).map(order => order.orderId),
         availableFunds: market.account.availableFunds ?? null, frozenFunds: market.account.frozenFunds ?? null, frozenMargin: market.account.frozenMargin ?? null },
     });
+    const cycleCancellation = await cancelCurrentOrders(task, market, connector, run, runtime, assertCurrent);
+    if (cycleCancellation) {
+      const fresh = await observeWithLoginRecovery(task, connector, run, runtime,
+        () => runtime.observeExecutionMarket(task, connector, { accountScope: "full" }), assertCurrent);
+      assertCurrent();
+      market = { ...market, account: fresh?.ok ? fresh.account : { ...market.account, positionsVerified: false, openOrdersVerified: false } };
+      task.market = toTaskMarket(market);
+      reconcilePendingPosition(task, market);
+      syncTaskMetricsFromMarket(task, market);
+    }
     task.lastPolledAt = new Date().toISOString();
     task.lastObservedFingerprint = String(market.fingerprint || "");
     task.monitorFailureCount = 0;
@@ -2417,7 +2484,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (providerSucceeded && market.fingerprint) task.lastAnalyzedFingerprint = market.fingerprint;
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
-    task.decision = { ...decision, runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
+    task.decision = { ...decision, ...(cycleCancellation ? { orderCancellation: cycleCancellation } : {}), runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
     const positionChangedDuringAnalysis = Number(task.exitExecutionRevision || 0) !== exitRevisionAtStart;
     const sessionChangedDuringAnalysis = Number(task.target.sessionRevision || 0) !== sessionRevision;
     if (providerSucceeded && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && !decisionExpired(task)) {
@@ -2432,7 +2499,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
     task.decision.positionAudit = { observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true, positions: updatePositionTracking(task, market), holdingPlan: decision.holdingPlan || null };
     appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "positions", message: market.account?.positionsVerified === true ? `持仓已核实：${openPositionCount(market)} 笔；AI ${decision.holdingPlan?.decision || "UNKNOWN"}；有效条件离场计划 ${(task.exitPlans || []).length} 个` : "持仓尚未核实，禁止将缺失数据认定为空仓", data: task.decision.positionAudit });
-    if (decision.orderAssessmentMissingIds?.length) appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "order", message: `AI 本轮尚未评估 ${decision.orderAssessmentMissingIds.length} 笔委托，下轮继续逐笔评估；本轮已明确动作继续执行`, data: { orderIds: decision.orderAssessmentMissingIds } });
     const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && item.jsonStatus !== "COMPLETE_JSON");
     if (modelFailure) task.lastModelFailure = {
       runId: run.id, providerId: provider?.id || task.providerId || "", createdAt: task.decision.createdAt,
@@ -2508,69 +2574,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       ? (isLiveTask(task) ? "路由 AI 动作，全自动提交下单或离场" : "路由 AI 动作，自动记录建议")
       : (isLiveTask(task) ? "准备入场表单，等待用户点击入场按钮" : "路由最终建议，等待确认后决定是否下单"));
     assertCurrent();
-    const liveOrderIds = new Set((market.account?.openOrders || []).filter((order) => order.remainingQuantity > 0).map((order) => String(order.orderId)));
-    const keepOrderIds = new Set((task.decision.orderAssessments || []).filter((item) => item.decision === "KEEP").map((item) => item.orderId));
-    const cancelOrderIds = [...new Set([...(task.decision.cancelOrderIds || []), ...(task.decision.orderAssessments || []).filter((item) => item.decision === "CANCEL").map((item) => item.orderId)])]
-      .filter((id) => liveOrderIds.has(id) && !keepOrderIds.has(id));
-    if (orderAssessmentSucceeded) {
-      for (const orderId of liveOrderIds) {
-        const assessment = task.decision.orderAssessments?.find(item => item.orderId === orderId);
-        const choice = cancelOrderIds.includes(orderId) ? "撤销剩余未成交数量" : keepOrderIds.has(orderId) ? "继续保留" : "尚未给出保留或撤销结论，下轮继续评估";
-        appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "order", message: `委托 ${orderId}：AI ${choice}${assessment?.reason ? `；${assessment.reason}` : ""}` });
-      }
-    }
-    const cancelAssessedOrders = async (orderIds) => {
-      // A complete cancellation is independent of missing entry/exit plan
-      // fields. The browser still verifies the exact order and its remainder.
-      if (!liveExecution || !isTradingSwitchOn() || !orderIds.length || !orderAssessmentSucceeded || positionChangedDuringAnalysis || sessionChangedDuringAnalysis || decisionExpired(task)) return;
-      const cancellationAbort = new AbortController();
-      const cancelSubmission = () => cancellationAbort.abort(new Error("ORDER_CANCEL_ABORTED"));
-      pendingSubmissionCancels.set(task.id, cancelSubmission);
-      let cancellation;
-      try {
-        cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: cancellationAbort.signal });
-      } catch (error) {
-        cancellation = { ok: false, results: orderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message })) };
-        if (/REAUTH|LOGIN|SESSION_EXPIRED|AUTH/i.test(String(error?.message || error?.code || ""))) {
-          try {
-            const login = await ensureLoggedIn(task, connector, run, { code: "REAUTH_REQUIRED" }, runtime, assertCurrent);
-            if (login?.ok && login.authenticated) {
-              cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId || `task:${task.id}`, orderIds }, { signal: cancellationAbort.signal });
-              appendAgentOutput({ taskId, runId: run.id, stage: "login", kind: "order", message: "登录已恢复，继续重试原委托撤单" });
-            }
-          } catch (recoveryError) {
-            cancellation = { ok: false, results: orderIds.map((orderId) => ({ orderId, cancelled: false, code: "ORDER_CANCEL_REAUTH_FAILED", message: recoveryError.message || "登录恢复失败" })) };
-          }
-        }
-      } finally {
-        if (pendingSubmissionCancels.get(task.id) === cancelSubmission) pendingSubmissionCancels.delete(task.id);
-      }
-      assertCurrent();
-      const results = orderIds.map(orderId => cancellation.results?.find(result => result.orderId === orderId)
-        || { orderId, ok: false, cancelled: false, code: cancellation.code || "ORDER_CANCEL_RESULT_MISSING", message: cancellation.message || "未收到该委托的撤销结果，不能认定撤单成功" });
-      const allResults = [...(task.decision.orderCancellation?.results || []), ...results];
-      task.decision.orderCancellation = { ...cancellation, results: allResults, ok: allResults.length > 0 && allResults.every((result) => result.cancelled) };
-      for (const result of results) {
-        appendAgentOutput({ taskId, runId: run.id, stage: "action", kind: "order", message: result.cancelled ? `委托 ${result.orderId} 已撤销剩余未成交数量` : `委托 ${result.orderId} 撤销结果：${result.message || result.code}，继续监控`, data: result });
-      }
-      const cancelledIds = new Set(allResults.filter((result) => result.cancelled).map((result) => result.orderId));
-      for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(Boolean)) {
-        if (!["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || !pending.entrustedOrderIds?.length || !pending.entrustedOrderIds.every((id) => cancelledIds.has(id))) continue;
-        pending.status = "CANCELLED";
-        pending.resolvedAt = new Date().toISOString();
-        pending.message = "AI 已撤销委托剩余数量；已成交部分继续按持仓监控";
-        recordConfirmedOrder(task, pending, { status: "cancelled_remainder", submitted: true, source: "ai_cancel", message: pending.message });
-      }
-      task.unsettledActions = (task.unsettledActions || []).filter((pending) => pending.status !== "CANCELLED");
-    };
-    // Only AI-selected cancellations needed to release this exit's frozen quantity go first.
-    // All other cancellations follow the urgent exit; never operate the same browser in parallel.
-    const exitTargets = new Set(task.decision.exitType ? task.decision.targetPositionIds : []);
-    const priorExitOrderIds = new Set(unsettledActions(task).filter((pending) => pending.exitType && pending.targetPositionIds?.some((id) => exitTargets.has(id))).flatMap((pending) => pending.entrustedOrderIds || []));
-    const prerequisiteCancels = cancelOrderIds.filter((id) => priorExitOrderIds.has(id)
-      || market.account?.openOrders?.some((order) => order.orderId === id && /转让/.test(order.orderKind)
-        && (exitTargets.has(order.positionOrderId) || task.decision.orderAssessments?.some((assessment) => assessment.orderId === id && assessment.targetPositionIds?.some((positionId) => exitTargets.has(positionId))))));
-    await cancelAssessedOrders(task.decision.exitType ? prerequisiteCancels : cancelOrderIds);
     task.decision = executableExitDecision(task, task.decision);
     const duplicateExit = Boolean(task.decision.exitType) && task.decision.targetPositionIds.length === 0;
     const previousEntryKWindow = task.pendingAction && !task.pendingAction.exitType
@@ -2603,7 +2606,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     } else if (!duplicateExit && !sameKEntry) {
       clearPendingAction(task, { persist: false });
     }
-    if (task.decision.exitType) await cancelAssessedOrders(cancelOrderIds.filter((id) => !prerequisiteCancels.includes(id)));
     if (execution.code === "SUGGESTION_PENDING" || execution.code === "TRADING_DISABLED") {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const waiting = task.pendingAction?.status === "WAITING";
@@ -2741,6 +2743,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     // the browser to the holdings tab while no existing position needs exit
     // monitoring; the target page keeps its own live data updated.
     if (!firstClosingWindow.active && waitingManualEntry && latestAccount?.positionsVerified === true
+      && !task.market?.account?.openOrders?.length && !unsettledActions(task).some(pending => pending.entrustedOrderIds?.length)
       && Array.isArray(latestAccount.positions) && !latestAccount.positions.some(position => Number(position.quantity) > 0)) {
       return { skipped: true, reason: "MANUAL_ENTRY_WAITING" };
     }
@@ -2748,7 +2751,8 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       () => runtime.observeExecutionMarket(task, connector, { signal: exitAbort.signal, accountScope }), assertCurrent);
     const monitorPendingOrders = unsettledActions(task).some((pending) => !pending.exitType || pending.entrustedOrderIds?.length)
       || Number(task.market?.account?.openOrders?.length || 0) > 0;
-    let market = await observe(firstClosingWindow.active || monitorPendingOrders ? "full" : "positions");
+    const inspectCurrentOrders = monitorPendingOrders || Number(task.exitObservationIndex || 0) % 5 === 4;
+    let market = await observe(firstClosingWindow.active || inspectCurrentOrders ? "full" : "positions");
     assertCurrent();
     task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
     if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
@@ -2770,38 +2774,25 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       openOrderCount: market.account?.openOrdersVerified === true ? market.account.openOrders?.length || 0 : null,
       observationDurationMs: Date.now() - observationStartedAt,
     };
+    // Cancel on every full current-order observation, including ordinary trading.
+    const cancellation = await cancelCurrentOrders(task, market, connector, { id: null }, runtime, assertCurrent);
+    if (cancellation) {
+      market = await observe("full");
+      assertCurrent();
+      closing = sessionCloseWindow(task, currentTime());
+      if (!market?.ok || market.account?.positionsVerified !== true || (closing.active && market.account?.openOrdersVerified !== true)) {
+        task.exitMonitor = { status: "CANCELLATION_UNVERIFIED", checkedAt: new Date().toISOString(), message: "撤单后持仓或委托尚未核实，继续检查当前委托与真实持仓" };
+        persistTask(task);
+        return { code: "CANCELLATION_UNVERIFIED" };
+      }
+      task.market = { ...task.market, account: market.account };
+      reconcilePendingPosition(task, market);
+    }
     if (market.account?.positionsVerified !== true || (closing.active && market.account?.openOrdersVerified !== true)) {
       task.exitMonitor = { status: "ACCOUNT_UNVERIFIED", checkedAt: new Date().toISOString(), message: "持仓或委托未核实，不能认定空仓或执行离场" };
       if (closing.active) task.sessionCloseState = { date: closing.date, closesAt: new Date(closing.closesAt).toISOString(), status: closing.overdue ? "OVERDUE" : "CLOSING", remainingPositions: null, checkedAt: market.observedAt };
       persistTask(task);
       return { code: "ACCOUNT_UNVERIFIED" };
-    }
-    // Closing withdraws unfilled entries and frozen transfers before flattening.
-    // Each cancellation is verified by the existing exact-order workflow.
-    if (closing.active && market.account.openOrders.length) {
-      let cancellation;
-      try {
-        cancellation = await runtime.cancelOpenOrders({ sessionId: task.target.browserSessionId, orderIds: market.account.openOrders.map(o => o.orderId) }, { signal: exitAbort.signal });
-      } catch (error) {
-        assertCurrent();
-        cancellation = { ok: false, results: [], error: error.message || "ORDER_CANCEL_FAILED" };
-        appendAgentOutput({ taskId, stage: "action", kind: "exit_monitor", level: "error", message: `收盘撤单异常：${cancellation.error}；继续处理未冻结持仓，并保留委托未核实状态` });
-      }
-      assertCurrent();
-      const cancelledIds = new Set((cancellation.results || []).filter(r => r.cancelled).map(r => r.orderId));
-      for (const pending of unsettledActions(task)) {
-        if (pending.entrustedOrderIds?.length && pending.entrustedOrderIds.every(id => cancelledIds.has(id))) pending.status = "CANCELLED";
-      }
-      task.unsettledActions = (task.unsettledActions || []).filter(p => p.status !== "CANCELLED");
-      market = await observe("full");
-      assertCurrent();
-      closing = sessionCloseWindow(task, currentTime());
-      if (!market.ok || market.account?.positionsVerified !== true || market.account?.openOrdersVerified !== true) {
-        task.exitMonitor = { status: "CANCELLATION_UNVERIFIED", checkedAt: new Date().toISOString(), message: "收盘撤单尚未全部核实，继续检查真实委托与持仓" };
-        persistTask(task);
-        return { code: "CANCELLATION_UNVERIFIED" };
-      }
-      reconcilePendingPosition(task, market);
     }
     const candidates = [];
     if (closing.active) {
@@ -2869,7 +2860,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
     }
     const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
-    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，逐笔监控2～4点收益目标及-3金额止损；AI 尚缺保护计划，继续分析` : `已核实 ${market.account.positions.length} 笔持仓，逐笔监控2～4点收益目标、-3金额止损及 AI 条件` };
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，逐笔监控1～4点收益目标及-3金额止损；AI 尚缺保护计划，继续分析` : `已核实 ${market.account.positions.length} 笔持仓，逐笔监控1～4点收益目标、-3金额止损及 AI 条件` };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔离场未完成；${task.exitMonitor.message}` };
     if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
     persistTask(task);

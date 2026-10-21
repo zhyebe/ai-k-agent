@@ -596,7 +596,7 @@ export function isOrderCancellationResponse(url, method) {
 function watchTradeResponse(page, matches = isTradeWriteResponse) {
   let matched = null;
   const listener = (response) => {
-    if (matched || !matches(response.url(), response.request?.().method?.())) return;
+    if (matched || !matches(response.url(), response.request?.().method?.(), response)) return;
     matched = response;
   };
   page.on("response", listener);
@@ -864,18 +864,38 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   const results = [];
   for (const orderId of [...new Set(orderIds.map(String).map((id) => id.trim()).filter(Boolean))]) {
     const baselineToken = await markTradePageHints(page);
-    const response = watchTradeResponse(page, isOrderCancellationResponse);
+    const response = watchTradeResponse(page, (url, method, candidate) => {
+      if (!isOrderCancellationResponse(url, method)) return false;
+      try { return String(candidate.request().postDataJSON()?.orderId || "") === orderId; }
+      catch { return false; }
+    });
     const nativeDialog = (dialog) => {
       if (/撤单|撤销.*委托/.test(dialog.message()) && !/所有|全撤/.test(dialog.message())) dialog.accept().catch(() => {});
     };
     page.on("dialog", nativeDialog);
+    let stage = "select_order";
     try {
       const clicked = await clickOrderCancellation(page, orderId);
       if (!clicked.clicked) {
-        results.push({ orderId, ok: false, cancelled: false, code: clicked.code });
+        results.push({ orderId, ok: false, cancelled: false, stage, code: clicked.code });
         continue;
       }
+      stage = "confirm_cancel";
       const dialogs = await completeTradeDialogs(page, { cancelOrder: true, baselineToken, finished: () => Boolean(response.peek()) });
+      stage = "verify_result";
+      // Public client confirms data.code === "0" for this exact POST/orderId.
+      // Success notices can be disabled; observe the browser response instead.
+      const readResponse = async () => {
+        const matched = response.peek();
+        if (!matched) return null;
+        const body = await matched.json().catch(() => null);
+        if (!matched.ok() || !["string", "number"].includes(typeof body?.code)) return null;
+        return { orderId, ok: String(body.code) === "0", cancelled: String(body.code) === "0",
+          code: String(body.code) === "0" ? "ORDER_CANCELLED" : "ORDER_CANCEL_REJECTED",
+          stage, source: "browser_response", message: String(body.message || "") };
+      };
+      let verifiedResponse = await readResponse();
+      if (verifiedResponse) { results.push(verifiedResponse); continue; }
       let hint = await readTradePageHint(page, baselineToken);
       let status = "";
       if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
@@ -884,6 +904,8 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
         // can still be pending when the current order list is first checked.
         if (!/^(已撤单|部分成交后撤单|已成交)$/.test(status) && (dialogs.confirmed || response.peek())) {
           hint = (await observeTradeFeedback(page, response, baselineToken)).pageHint;
+          verifiedResponse = await readResponse();
+          if (verifiedResponse) { results.push(verifiedResponse); continue; }
           if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
             status = /委托已成交|订单已成交/.test(hint) ? "已成交" : await readCurrentOrderStatus(page, orderId);
           }
@@ -901,7 +923,7 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
           ...(!cancelled && status !== "已成交" ? { message: "当前委托未能确认撤单结果，继续核对当前委托和真实持仓" } : {}) });
       }
     } catch (error) {
-      results.push({ orderId, ok: false, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message });
+      results.push({ orderId, ok: false, cancelled: false, stage, code: "ORDER_CANCEL_FAILED", message: error.message });
     } finally {
       response.dispose();
       page.off("dialog", nativeDialog);

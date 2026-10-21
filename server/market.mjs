@@ -391,7 +391,7 @@ function isCompleteCandle(candle) {
 // A flash K is a transient display quote, not a confirmed market print. Keep
 // the detector deliberately evidence-based: one large range is only an ATR
 // anomaly; a price must briefly appear and then revert/disappear in consecutive
-// observations (or in a short tick burst) before it is excluded from analysis.
+// observations (or in a short tick burst) before classifying a transient event.
 const flashKObservationHistory = new Map();
 
 function flashIdentity({ symbol = "", symbolName = "", instrumentId = "", timeframe = "" } = {}) {
@@ -451,7 +451,9 @@ export function detectFlashK({ symbol = "", symbolName = "", instrumentId = "", 
       price: transientPrice,
       timestamp: transient?.timestamp || currentCandle?.timestamp || null,
       reason,
-      excludeFromAnalysis: true,
+      excludeFromAnalysis: false,
+      interpretation: "TRANSIENT_PRICE_EVENT",
+      actorIntent: "UNKNOWN",
       preserveExecutableQuotes: true,
     };
 }

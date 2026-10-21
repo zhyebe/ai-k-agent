@@ -65,7 +65,7 @@ test("observation timestamps do not retrigger AI; actual confirmation does", () 
   assert.notEqual(fingerprint(second), fingerprint(observe("fingerprint", 56)));
 });
 
-test("unconfirmed and flashed K never leak via indicators, raw/page copies or secondary books", () => {
+test("unconfirmed intrabar prices survive analysis while confirmed-history indicators stay clean", () => {
   const transient = observe("contamination", 56, [candle(999)])[0];
   const book = { symbol: "A", timeframe: "1m", history: [{ ...candle(), timestamp: minute - 180000 }, transient],
     indicators: { ema20: 999 }, trend: "up", quote: { price: 999, high: 999 },
@@ -77,11 +77,30 @@ test("unconfirmed and flashed K never leak via indicators, raw/page copies or se
   const layered = buildLayeredAnalysisMarket(market);
   assert.equal(layered.history.length, 1);
   assert.equal(layered.nextCandle.lastClosedTime, minute - 180000);
-  assert.equal(layered.nextCandle.livePrice, null);
+  assert.equal(layered.nextCandle.livePrice, 999);
   assert.deepEqual(layered.indicators, {});
   assert.equal(layered.raw, undefined);
   assert.equal(layered.books[0].history.length, 1);
   assert.equal(layered.orderBook.bids[0].price, 101, "executable quotes survive display filtering");
-  assert.equal(JSON.stringify(summarizeMarketForDecision(market)).includes("999"), false);
-  assert.equal(JSON.stringify(buildMarketAnalysisSegments(market)).includes("999"), false);
+  assert.equal(summarizeMarketForDecision(market).intrabarEvidence.confirmed, false);
+  assert.equal(summarizeMarketForDecision(market).quote.price, 999);
+  assert.ok(JSON.stringify(buildMarketAnalysisSegments(market)).includes("999"), "transient evidence must reach segmented analysis too");
+});
+
+
+test("a transient price matching live quotes and ticks remains actionable intrabar evidence", () => {
+  const observedAt = new Date(minute + 56000).toISOString();
+  const market = { symbol: "PUSH", timeframe: "1m", observedAt,
+    history: [{ ...candle(105), timestamp: minute - 180000 }],
+    quote: { price: 105 }, latest: { price: 105 }, ticks: [{ timestamp: minute + 55000, price: 105, volume: 10 }],
+    flashK: { suspected: true, timestamp: minute - 180000, price: 105, reason: "TRANSIENT_REVERTED", excludeFromAnalysis: false },
+    orderBook: { bids: [{ price: 105, volume: 10 }], asks: [{ price: 106, volume: 10 }] },
+  };
+  const result = summarizeMarketForDecision(market);
+  assert.equal(result.quote.price, 105);
+  assert.equal(result.liveTicks[0].price, 105);
+  assert.equal(result.historyCount, 1, "a transient flag cannot erase an otherwise confirmed historical bar");
+  assert.equal(result.intrabarEvidence.transientEvent.price, 105);
+  assert.equal(result.intrabarEvidence.confirmed, false);
+  assert.equal(result.orderBook.bids[0].price, 105);
 });

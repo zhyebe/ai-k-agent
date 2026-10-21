@@ -6,7 +6,7 @@ const path = require("node:path");
 const { _electron } = require("playwright");
 
 async function main() {
-  const { tradeFixture } = await import("../tests/fixtures/trade-page.mjs");
+  const { refreshingTradeFixture: tradeFixture } = await import("../tests/fixtures/trade-page.mjs");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "axiom browser 中文 "));
   const executablePath = process.env.AXIOM_DESKTOP_EXECUTABLE;
   const screenshot = path.join(process.env.AXIOM_SMOKE_OUTPUT || os.tmpdir(), "axiom-client-browser-smoke.png");

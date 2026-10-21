@@ -2,7 +2,7 @@ import { summarizeOrderBook } from "./order-book.mjs";
 import { effectiveTradingSession } from "./trading-session.mjs";
 
 export const DEFAULT_SESSION_CLOSE = Object.freeze({ leadMinutes: 5, timezone: "Asia/Shanghai" });
-export const POSITION_MIN_PROFIT_POINTS = 2;
+export const POSITION_MIN_PROFIT_POINTS = 1;
 export const POSITION_MAX_PROFIT_POINTS = 4;
 export const POSITION_STOP_LOSS_AMOUNT = -3;
 
@@ -107,7 +107,7 @@ function positionExitCandidate(position, quote, pnl, now, exitType, triggerPrice
   };
 }
 
-// The user's 2–4 boundary is a directional price difference, not cash PnL.
+// The user's 1–4 boundary is a directional price difference, not cash PnL.
 // Unknown fees stay unknown; known negative net PnL is never called profit.
 export function positionProfitExit(position, market, now = Date.now()) {
   if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) !== 0) return null;

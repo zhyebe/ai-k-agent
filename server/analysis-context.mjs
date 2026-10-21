@@ -160,14 +160,14 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；单笔持仓总盈亏金额≥+5自动止盈、≤-3自动止损；区间内优先0～5果断离场，-3～0内结合恢复机会决定等待或止损；按可成交价差乘数量并扣已知整仓费用，费用未知保留毛利/净利未知。-3、0、5是整笔金额，不是每单位价格差、K线根数或百分比。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。疑似闪K价格不纳入预测，真实可成交bid/ask独立执行AI保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
+    summary: "观察实时数据、预测多周期大趋势、预测入场点和离场点，再执行AI明确动作。多单上涨、空单下跌都能获利；每单位有利价格点差≥1且已知费用后不亏立即兑现，目标1～4点，4点为上限；整仓净金额≤-3自动止损。价格点差不乘数量，费用另核算；未知费用与净利保持未知。未来预测到价不是现在已盈利：尚未到价可持有并给未来条件；实际达到AI合理目标、已有正净收益则及时兑现，不等理论全局最大收益。亏损也是预测对象：先预测未来是否继续亏损或扩亏，再决定是否止损；亏1点不自动离场，先区分点差、正常回撤与真实恶化；损失稳定或收窄、有恢复依据可继续观察。逐仓比较当前与上一轮同一持仓的可成交盈亏；有效走势确认持续扩亏且继续持有更可能恶化，或明确结构失效支持进一步亏损时及时止损，不无限等回本。闪K作为盘中拉盘/砸盘候选事件纳入判断，真实可成交bid/ask独立执行兑现与保护条件。持仓时长由AI预测，5根不是上限；概率只作诚实预测，不新增程序门槛。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "EXIT"],
     aiCompletes: ["ANALYZE", "RESULT", "ENTRY_DIRECTION", "EXIT_TIMING", "BROWSER_PLAN"],
     hostCompletes: ["OBSERVE_PAGE", "FEED_CONTEXT", "EXECUTE_AI_ACTION", "EXECUTE_POSITION_AMOUNT_BOUNDARIES", "EXECUTE_VISIBLE_CLICKS"],
     entry: { emptyOnly: false, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_RECOGNITION", minimumProbability: null,
       timing: "买多预测阶段低位入、高位出；买空预测阶段高位入、低位出。分别评估趋势和当前可成交价，未到合适点位可HOLD或明确LIMIT挂单，MARKET不等待预测价。",
       whileHolding: "已有持仓继续逐仓监控，同时独立评估新的买多/买空机会，不等上一单离场，不设持仓单数上限。单笔entryQuantity不是总持仓上限；考虑累计敞口和保证金，同K及同一未成交意图防重复。" },
-    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "PRIORITIZE_ZERO_TO_FIVE", positionTakeProfitAmount: 5, positionStopLossAmount: -3, preferredExitAmountRange: [0, 5], profitUnit: "POSITION_TOTAL_AMOUNT", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。单笔总盈亏≥+5自动止盈、≤-3自动止损；区间内 AI 优先0～5果断离场，0明确为保本；-3～0续抱须有实时证据支持的短期恢复价、预计到价时间和失效条件；逐轮核对上次预期，恢复未按期发生、路径失效或无续抱依据时由AI及时止损，禁止无新证据延后恢复时间或放宽止损。不得为追求更高目标拖延盈利兑现。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
+    exit: { whileHolding: true, positionList: ["转让"], priority: "BEFORE_ENTRY", profitGoal: "REALIZE_FROM_ONE_POINT", positionProfitPoints: { minimum: 1, maximum: 4 }, positionStopLossAmount: -3, profitUnit: "DIRECTIONAL_PRICE_POINTS", realtimeValueRule: "保留多周期趋势判断；account.realtimeValueChange（网页实时货值变化）仅作为 AI 的账户环境和趋势参考，不是程序硬性离场条件，也不能替代逐仓可成交盈亏。每单位有利价差≥1且费用后不亏及时兑现，目标1～4点；整仓净金额≤-3自动止损，净0明确为保本；未达兑现条件续抱须有实时证据支持的短期恢复价、预计到价时间和失效条件；逐轮核对上次预期，恢复未按期发生、路径失效或无续抱依据时由AI及时止损，禁止无新证据延后恢复时间或放宽止损。不得为追求更高目标拖延盈利兑现。", lossGoal: "MINIMIZE_PREDICTED_LOSS", onExitDecision: "EXECUTE_IMMEDIATELY", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: false,
   },
   kline: {
@@ -181,8 +181,9 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     doNotWaitForMinuteCloseAt00: true,
     liveQuotesMayUpdateEverySecond: true,
     flashK: {
-      summary: "疑似闪K可能是假显示，其价格与派生指标排除分析；单次大幅波动不等于假K，不能把真实反向走势删掉。新显示K须在第50秒后连续稳定超过5秒才确认；消失、变化或采样中断重新计时，缺少连续观察时不能声称已确认真假。真实新鲜可成交bid/ask与显示闪价分开，仍执行AI事先确定的保护条件。",
-      excludeTransientDisplayPriceFromAnalysis: true,
+      summary: "闪K是未确认盘中事件，可能反映主动拉盘、砸盘、试盘或扫单，结合真实报价、逐笔和深度分析，不能一律判假、删除或忽略。未确认OHLC不进入已确认历史指标；新鲜bid/ask独立触发1点兑现与保护，不等K稳定。单次跳价不能证明操盘者身份或意图。",
+      excludeTransientDisplayPriceFromAnalysis: false,
+      analyzeTransientEvents: true,
       priceSpikeAloneProvesFlash: false,
       preserveVerifiedExecutableQuotes: true,
     },
@@ -268,14 +269,10 @@ export function nextCandleTarget(market = {}, nowMs = null) {
   const periodMs = LIVE_KLINE_PERIOD_MS;
   const lastPrint = lastKlinePrintTime(now);
   const nextPrint = lastPrint + periodMs;
-  const minuteHistory = historyWithoutFlashK(
-    historyForTimeframe(market, "1m"),
-    market.timeframes?.["1m"],
-    market,
-  );
+  const minuteHistory = historyForTimeframe(market, "1m");
   const closedMinutes = confirmedCandlesForAnalysis(minuteHistory, "1m", now);
   const lastClosed = closedMinutes.at(-1) || null;
-  const liveTicks = recentLiveTicks(ticksWithoutFlashK(market.ticks, market, market), now);
+  const liveTicks = recentLiveTicks(market.ticks, now);
   const formingTicks = ticksAsCandles(liveTicks).filter((candle) => {
     const timestamp = finiteNumber(candle?.timestamp);
     return timestamp !== null && timestamp >= lastPrint && timestamp < nextPrint;
@@ -384,7 +381,7 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
   const layers = windows.layers.map((layer) => {
     const sourceSnapshot = market.timeframes?.[layer.timeframe] || {};
     const history = confirmedCandlesForAnalysis(
-      historyWithoutFlashK(layerCandles(market, layer), sourceSnapshot, market),
+      layerCandles(market, layer),
       layer.timeframe,
       now,
     );
@@ -413,7 +410,7 @@ export function buildLayeredAnalysisMarket(market = {}, nowMs = null) {
     quote: market.quote,
     latest: market.latest || market.quote,
   }, now);
-  const liveTicks = recentLiveTicks(ticksWithoutFlashK(market.ticks, market, market), now);
+  const liveTicks = recentLiveTicks(market.ticks, now);
   const raw = market.raw && typeof market.raw === "object" && !Array.isArray(market.raw)
     ? Object.fromEntries(Object.entries(market.raw).filter(([key]) => key !== "timeline"))
     : market.raw;
@@ -566,6 +563,7 @@ function timeframeMetadata(timeframe, snapshot, history) {
     trend: snapshot.trend || "unknown",
     anomaly: Boolean(snapshot.anomaly),
     flashK: snapshot.flashK || null,
+    intrabarEvidence: snapshot.intrabarEvidence || null,
     indicators: snapshot.indicators || null,
     dataQuality: snapshot.dataQuality || "UNKNOWN",
     missingFields: Array.isArray(snapshot.missingFields) ? snapshot.missingFields : [],
@@ -577,32 +575,13 @@ function timeframeMetadata(timeframe, snapshot, history) {
   });
 }
 
-function historyWithoutFlashK(history, snapshot, market = {}) {
-  const flash = snapshot?.flashK?.suspected ? snapshot.flashK : market?.flashK?.suspected ? market.flashK : null;
-  const timestamp = String(flash?.timestamp || "");
-  if (!flash || !timestamp) return Array.isArray(history) ? history : [];
-  return (Array.isArray(history) ? history : []).filter((candle) => String(candle?.timestamp || "") !== timestamp);
-}
-
-function ticksWithoutFlashK(ticks, snapshot, market = {}) {
-  const flash = snapshot?.flashK?.suspected ? snapshot.flashK : market?.flashK?.suspected ? market.flashK : null;
-  if (!flash) return Array.isArray(ticks) ? ticks : [];
-  const flashPrice = Number(flash.price);
-  const flashTimestamp = String(flash.timestamp || "");
-  return (Array.isArray(ticks) ? ticks : []).filter((tick) => {
-    const sameTimestamp = flashTimestamp && String(tick?.timestamp || "") === flashTimestamp;
-    const samePrice = Number.isFinite(flashPrice) && Number.isFinite(Number(tick?.price)) && Math.abs(Number(tick.price) - flashPrice) / Math.max(Math.abs(flashPrice), 1) <= 0.00001;
-    return !(sameTimestamp && samePrice);
-  });
-}
-
-// Remove duplicate/derived copies too: excluding an OHLC row alone still lets
-// its wick, indicator, page text or raw chart re-enter the model as evidence.
+// Keep unconfirmed intrabar events separate from confirmed-history indicators.
+// Remove duplicated derived chart/page copies while preserving quotes and ticks.
 function excludeUnconfirmedAnalysisData(market, now) {
   const excluded = [];
   const cleanSnapshot = (snapshot, timeframe) => {
     const original = snapshot.history || [];
-    const history = confirmedCandlesForAnalysis(historyWithoutFlashK(original, snapshot, market), timeframe, now);
+    const history = confirmedCandlesForAnalysis(original, timeframe, now);
     const kept = new Set(history);
     const removed = original.filter(c => !kept.has(c));
     excluded.push(...removed);
@@ -612,17 +591,20 @@ function excludeUnconfirmedAnalysisData(market, now) {
   const timeframes = Object.fromEntries(Object.entries(market.timeframes || {}).map(([key, snapshot]) => [key, cleanSnapshot(snapshot, snapshot.timeframe || key)]));
   const primary = cleanSnapshot(market, market.timeframe || "1m");
   const dirty = excluded.length > 0 || market.flashK?.suspected;
-  const suspectPrice = price => excluded.some(c => Number(c.close) === Number(price))
-    || (market.flashK?.suspected && Number(price) === Number(market.flashK.price));
-  const quote = value => !value || !dirty ? value : { ...value, price: suspectPrice(value.price) ? null : value.price,
-    open: null, high: null, low: null, changePct: null, quoteChangePct: null };
-  const ticks = ticksWithoutFlashK(market.ticks, market).filter(tick => !dirty || !suspectPrice(tick.price));
-  return { ...primary, timeframes, ticks, quote: quote(market.quote), latest: quote(market.latest),
+  const quote = value => !value || !dirty ? value : { ...value, open: null, high: null, low: null, changePct: null, quoteChangePct: null };
+  const ticks = Array.isArray(market.ticks) ? market.ticks : [];
+  // Preserve intrabar observations as labelled evidence, never confirmed bars.
+  const intrabarEvidence = market.intrabarEvidence || (dirty ? {
+    confirmed: false, source: "LIVE_DISPLAY", candles: excluded.slice(-3).map(compactMarketCandle),
+    transientEvent: market.flashK?.suspected ? market.flashK : null,
+    limitations: "盘中显示不证明成交或操盘者身份；结合实时可成交报价、逐笔与深度判断拉盘/砸盘及回吐风险",
+  } : null);
+  return { ...primary, timeframes, ticks, intrabarEvidence, quote: quote(market.quote), latest: quote(market.latest),
     books: (market.books || []).map(book => excludeUnconfirmedAnalysisData(book, now)),
     ...(dirty ? { indicators: {}, trend: "unknown", anomaly: false, changePct: null, raw: undefined,
       page: market.page ? { url: market.page.url, title: market.page.title, instrument: market.page.instrument } : null,
       pageView: market.pageView ? { instrument: market.pageView.instrument, orderBook: market.pageView.orderBook } : null,
-      candleEvidence: { excludedCount: excluded.length, reason: "UNCONFIRMED_OR_FLASH_K", derivedIndicatorsExcluded: true } } : {}) };
+      candleEvidence: { excludedCount: excluded.length, reason: "UNCONFIRMED_HISTORY_ONLY", derivedIndicatorsExcluded: true } } : {}) };
 }
 
 // Normalized OHLCV and page fields are canonical; raw API copies repeat the same rows.
@@ -664,7 +646,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     const timeframe = String(rawSnapshot.timeframe || timeframeKey);
     const snapshot = sanitizeReadOnlyValue(rawSnapshot);
     const history = confirmedCandlesForAnalysis(
-      historyWithoutFlashK(rawSnapshot.history, rawSnapshot, market),
+      rawSnapshot.history,
       timeframe,
       now,
     );
@@ -690,7 +672,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
         rows: chunk,
       }));
     });
-    const timeframeTicks = ticksWithoutFlashK(rawSnapshot.ticks, rawSnapshot, market);
+    const timeframeTicks = rawSnapshot.ticks || [];
     if (timeframeTicks.length) {
       const tickRows = timeframeTicks.map(compactMarketTick);
       let tickOffset = 0;
@@ -734,7 +716,7 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
       const timeframe = String(rawSnapshot.timeframe || timeframeKey);
       const snapshot = sanitizeReadOnlyValue(rawSnapshot);
       const history = confirmedCandlesForAnalysis(
-        historyWithoutFlashK(rawSnapshot.history, rawSnapshot, book),
+        rawSnapshot.history,
         timeframe,
         now,
       );
@@ -788,10 +770,12 @@ export function buildMarketAnalysisSegments(market = {}, options = {}) {
     instrumentId: market.instrumentId,
     instrument: market.instrument,
     quote: market.quote || market.latest,
+    intrabarEvidence: market.intrabarEvidence || null,
+    flashK: market.flashK || null,
     account: market.account,
     pageView: market.pageView || market.page?.view || null,
     orderBook: market.orderBook || null,
-    books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId, orderBook: book.orderBook || book.pageView?.orderBook || null })),
+    books: (market.books || []).map((book) => ({ symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId, intrabarEvidence: book.intrabarEvidence || null, flashK: book.flashK || null, orderBook: book.orderBook || book.pageView?.orderBook || null })),
     changePct: market.changePct,
     marketClosed: market.marketClosed,
     source: market.source,
@@ -866,7 +850,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
   for (const [key, rawSnapshot] of timeframeEntries(market)) {
     const snapshot = rawSnapshot || {};
     const history = confirmedCandlesForAnalysis(
-      historyWithoutFlashK(snapshot.history, snapshot, market),
+      snapshot.history,
       snapshot.timeframe || key,
       now,
     );
@@ -877,6 +861,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
       trend: snapshot.trend || "unknown",
       anomaly: Boolean(snapshot.anomaly),
       flashK: snapshot.flashK || null,
+    intrabarEvidence: snapshot.intrabarEvidence || null,
       indicators: snapshot.indicators || null,
       dataQuality: snapshot.dataQuality || "UNKNOWN",
       missingFields: Array.isArray(snapshot.missingFields) ? snapshot.missingFields : [],
@@ -901,6 +886,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
     trend: market.trend,
     anomaly: market.anomaly,
     flashK: market.flashK || null,
+    intrabarEvidence: market.intrabarEvidence || null,
     freshnessSec: market.freshnessSec,
     dataQuality: market.dataQuality,
     missingFields: market.missingFields || [],
@@ -925,6 +911,7 @@ export function summarizeMarketForDecision(market = {}, coverage = null, { recen
       changePct: book.changePct,
       trend: book.trend,
       flashK: book.flashK || null,
+      intrabarEvidence: book.intrabarEvidence || null,
       dataQuality: book.dataQuality,
       missingFields: Array.isArray(book.missingFields) ? book.missingFields : [],
       historyCount: book.historyCount || book.history?.length || 0,

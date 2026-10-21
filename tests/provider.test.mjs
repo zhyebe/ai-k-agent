@@ -321,7 +321,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     ["SELL", "STOP_LOSS", "CANCEL"], ["BUY", "TAKE_PROFIT", "KEEP"],
     ["SELL", "STOP_LOSS", "CANCEL", 1], ["BUY", "TAKE_PROFIT", "KEEP", 1],
   ]) {
-    const needsSupplement = !exitType || frozenQuantity > 0;
+    const needsSupplement = false;
     test(`${apiFormat} ${needsSupplement ? "supplements one omitted order" : "does not delay an unfrozen exit for omitted orders"} without changing ${action} ${exitType || "entry"}${frozenQuantity ? " with frozen holdings" : ""}`, async (t) => {
       const original = {
         action, exit_type: exitType, target_position_ids: exitType ? ["P-1"] : [], target_symbol: "DGKZ", target_price: 1363,
@@ -368,7 +368,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       ]);
       assert.equal(result.orderAssessments[0].reason, "original waiting opportunity");
       assert.deepEqual(result.cancelOrderIds, needsSupplement && missingOrderDecision === "CANCEL" ? ["O-cancel", "O-missing"] : ["O-cancel"]);
-      assert.deepEqual(result.orderAssessmentMissingIds, needsSupplement ? [] : ["O-missing"]);
+      assert.deepEqual(result.orderAssessmentMissingIds, []);
       assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
       if (exitType) {
         assert.equal(result.holdingPlan.decision, "EXIT_NOW");
@@ -394,7 +394,7 @@ for (const [failure, exitType] of ["transport", "malformed", "omitted"].flatMap(
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
       account: { openOrders: [{ orderId: "O-keep" }, { orderId: "O-missing" }] },
     }, { fastAnalysis: true });
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
     assert.equal(result.action, original.action);
     assert.equal(result.exitType, exitType);
     assert.deepEqual(result.targetPositionIds, original.target_position_ids);
@@ -402,7 +402,7 @@ for (const [failure, exitType] of ["transport", "malformed", "omitted"].flatMap(
     assert.equal(result.bearishProfitProbability, 0.31);
     assert.deepEqual(result.orderAssessments.map(item => [item.orderId, item.decision]), [["O-keep", "KEEP"]]);
     assert.deepEqual(result.cancelOrderIds, []);
-    assert.deepEqual(result.orderAssessmentMissingIds, ["O-missing"]);
+    assert.deepEqual(result.orderAssessmentMissingIds, []);
     assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
     assert.equal(result.riskFlags.includes("INVALID_MODEL_JSON"), false);
     assert.doesNotMatch(JSON.stringify(result.modelDiagnostics), /private transport detail/);
@@ -440,26 +440,25 @@ test("order supplement timeout preserves the valid first decision", async (t) =>
   const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
     account: { openOrders: [{ orderId: "O-missing" }] },
   }, { fastAnalysis: true, timeoutMs: 1000 });
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
   assert.equal(result.action, "SELL");
   assert.equal(result.bearishProfitProbability, 0.58);
-  assert.deepEqual(result.orderAssessmentMissingIds, ["O-missing"]);
+  assert.deepEqual(result.orderAssessmentMissingIds, []);
   assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
 });
 
-test("external cancellation during order supplementation still cancels the entire request", async (t) => {
+test("external cancellation aborts the initial decision request with current orders", async (t) => {
   const controller = new AbortController();
   let calls = 0;
   t.mock.method(globalThis, "fetch", async () => {
     calls++;
-    if (calls === 1) return new Response(JSON.stringify(decisionEnvelope("chat", { action: "BUY", bullish_profit_probability: 0.58, bearish_profit_probability: 0.31 })));
     controller.abort(new Error("USER_STOPPED_TASK"));
     throw controller.signal.reason;
   });
   await assert.rejects(requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, {
     account: { openOrders: [{ orderId: "O-missing" }] },
   }, { fastAnalysis: true, signal: controller.signal }), /USER_STOPPED_TASK/);
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
 });
 
 test("conflicting complete outputs and truncated nested JSON never become a trade", async (t) => {
@@ -482,9 +481,9 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
     calls += 1;
     const body = JSON.parse(options.body);
     const prompt = body.messages[0].content;
-    assert.match(prompt, /Every round inspect every account.openOrders/);
-    assert.match(prompt, /from the current order list only/);
-    assert.match(prompt, /Never open, query, scan or operate the historical order list/);
+    assert.match(prompt, /withdraw every verified current order/);
+    assert.match(prompt, /Use only current orders and actual positions/);
+    assert.match(prompt, /never open, query, scan or operate historical orders/);
     assert.match(prompt, /Do not label a negative net result TAKE_PROFIT/);
     assert.match(prompt, /User-configured entry quantity: 3/);
     assert.equal(JSON.parse(body.messages.at(-1).content).account.openOrders[0].orderId, "O-1");
@@ -778,8 +777,8 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /亏损也是预测对象/);
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
-    assert.match(prompt, /多空统一按每单位有利价格点差设定2～4点目标/);
-    assert.match(prompt, /达到至少2点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /多空统一按每单位有利价格点差设定1～4点目标/);
+    assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
@@ -794,7 +793,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /下一根及 1–5 根 K 只用于择时/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
     assert.match(prompt, /User-configured entry quantity: 1 per new order/);
-    assert.match(prompt, /TAKE_PROFIT requires at least 2 favorable executable price points and nonnegative net PnL/);
+    assert.match(prompt, /TAKE_PROFIT requires at least 1 favorable executable price point and nonnegative net PnL/);
     assert.match(prompt, /STOP_LOSS requires evidence-based adverse-path and recovery analysis/);
     assert.match(prompt, /Both manual-entry and auto-entry modes automate exits/);
     assert.match(prompt, /Price response outranks static displayed depth/);
@@ -897,7 +896,7 @@ for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
       assert.equal(result.action, "SELL");
       assert.equal(result.exitType, exitType);
       assert.deepEqual(result.targetPositionIds, ["P-risk"]);
-      assert.match(requests[1].messages.at(-1).content, /TAKE_PROFIT requires >=2 favorable executable points/);
+      assert.match(requests[1].messages.at(-1).content, /TAKE_PROFIT requires >=1 favorable executable points/);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1214,7 +1213,7 @@ test("monitoring history preserves each position's trend exit plan and closing d
 });
 
 for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
-  test(`${apiFormat} fast decisions receive broad-trend guidance, flash-price exclusions and prior exit plans`, async t => {
+  test(`${apiFormat} fast decisions receive broad-trend guidance, transient-price evidence and prior exit plans`, async t => {
     const bodies = [];
     const plan = { positionId: "P-long", heldSide: "LONG", quantity: 1, validForSec: 1800, takeProfitPrice: 112, stopLossPrice: 94, rationale: "大趋势向上，96-99 回撤不失效" };
     const previousPosition = { positionId: "P-long", side: "LONG", quantity: 1, entryPrice: 100, exitQuotePrice: 97, exitQuotePnlPoints: -3, lastObservedAt: "2026-10-15T06:00:00Z" };
@@ -1244,12 +1243,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);
     assert.match(prompt, /max_hold_k\/max_hold_minutes are forecasts, not host timers/);
     assert.doesNotMatch(prompt, /minimum expected loss only when the profitable path is invalidated|Profit targets and planned exits must stay within the next 5 K/);
-    assert.match(prompt, /exclude its price and derived high\/low\/return/);
+    assert.match(prompt, /do not discard its price or assume it is fake/);
     assert.match(prompt, /fresh executable bid\/ask as a separate execution fact/);
     assert.match(prompt, /not an ordinary next-K pullback or suspect flash price/);
     assert.match(prompt, /收益与风险必须一起预测/);
-    assert.match(prompt, /多空统一按每单位有利价格点差设定2～4点目标/);
-    assert.match(prompt, /达到至少2点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.match(prompt, /多空统一按每单位有利价格点差设定1～4点目标/);
+    assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
@@ -1331,7 +1330,7 @@ test("provider reviews a complete market segment and binds the returned review t
     assert.equal(result.rowCount, segment.rowCount);
     assert.equal(received.messages[0].role, "system");
     assert.match(received.messages[0].content, /First assess broad multi-bar trend/);
-    assert.match(received.messages[0].content, /exclude its price from trend, levels, returns/);
+    assert.match(received.messages[0].content, /Preserve its direction, magnitude and timing/);
     assert.equal(JSON.parse(received.messages[1].content).segment.segmentId, segment.segmentId);
   } finally {
     await new Promise((resolve) => server.close(resolve));

@@ -9,7 +9,7 @@ import { createProvider } from "../server/provider.mjs";
 
 import { positionAmountExit, positionProfitExit } from "../server/exit-policy.mjs";
 
-import { tradeFixture } from "./fixtures/trade-page.mjs";
+import { tradeFixture, refreshingTradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
 import { activateTradeControl, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
 
@@ -331,6 +331,32 @@ test("selected-order toolbar cancels exact IDs and partial remainder, never othe
   assert.equal(await page.locator("#orders tbody tr").count(), 1);
 });
 
+test("Element UI row redraw and hidden checkbox still cancel only the exact selected order", async () => {
+  await page.setContent(refreshingTradeFixture);
+  page.setDefaultTimeout(2000);
+  try {
+    const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
+    assert.ok(await page.evaluate(() => window.selectionRefreshes) >= 2);
+    assert.ok(await page.evaluate(() => window.trustedSelections) >= 2);
+    assert.equal(await page.evaluate(() => window.emptySelectionRefreshes), 0, "select the target before clearing other rows");
+    assert.equal(await page.evaluate(() => window.wrongCancelAll), 0);
+  } finally { page.setDefaultTimeout(30000); }
+});
+
+test("a numeric order ID matching another column still selects the exact ID column", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const rows = document.querySelectorAll("#orders tbody tr");
+    rows[0].cells[4].textContent = "123456";
+    rows[1].cells[1].textContent = "123456";
+  });
+  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["123456"] });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "123456", remaining: 2 }]);
+});
+
 for (const scenario of ["cancelRejected", "fillDuringCancel", "silentCancellation"]) {
   test(`cancellation truthfully verifies ${scenario}`, async () => {
     await page.reload();
@@ -340,6 +366,37 @@ for (const scenario of ["cancelRejected", "fillDuringCancel", "silentCancellatio
     assert.equal(result.results[0].cancelled, false);
   });
 }
+
+for (const [name, responseId, code, expected] of [
+  ["silent success", "O-1", "0", "ORDER_CANCELLED"],
+  ["silent rejection", "O-1", "12", "ORDER_CANCEL_REJECTED"],
+  ["another order response", "O-10", "0", "ORDER_CANCEL_UNVERIFIED"],
+]) test(`cancellation verifies the exact browser request: ${name}`, async () => {
+  await page.reload();
+  const url = "https://smyw.haohandahan.cn/qtfront_tq/intraday-trade/trade/cancel";
+  await page.route(url, route => route.fulfill({ contentType: "application/json", headers: { "access-control-allow-origin": "*" }, body: JSON.stringify({ code, message: "fixture result" }) }));
+  await page.evaluate(({ url, responseId }) => {
+    window.cancelSelected = () => {
+      const box = document.createElement("div"); box.className = "el-dialog";
+      box.innerHTML = "您确定要撤单吗?<button>确认</button><button>取消</button>";
+      box.querySelector("button").onclick = () => {
+        box.remove();
+        fetch(url, { method: "POST", body: JSON.stringify({ orderId: responseId }) }).then(response => response.json()).then(body => {
+          if (String(body.code) === "0") {
+            [...document.querySelectorAll("#orders tbody tr")].find(row => row.cells[1].textContent === responseId)?.remove();
+          }
+        });
+      };
+      document.body.append(box);
+    };
+  }, { url, responseId });
+  try {
+    const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+    assert.equal(result.results[0].code, expected, JSON.stringify(result));
+    assert.equal(result.results[0].cancelled, expected === "ORDER_CANCELLED");
+    if (responseId === "O-1") assert.equal(result.results[0].source, "browser_response");
+  } finally { await page.unroute(url); }
+});
 
 test("missing exact order never cancels an order with a similar ID", async () => {
   await page.reload();
@@ -894,11 +951,11 @@ for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", 
   });
 }
 
-for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [2, 4, 4.5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
+for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [1, 2, 4, 4.5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
   test(`${heldSide} profit points / stop amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
     const long = heldSide === "LONG";
     const entryPrice = 100 - (long ? 1 : -1) * (threshold > 0 ? threshold : (threshold + 2) / 2);
-    const belowThresholdPrice = threshold > 0 ? 100 - (long ? 1 : -1) * (threshold - (threshold === 4.5 ? 4 : 2) + 0.01)
+    const belowThresholdPrice = threshold > 0 ? 100 - (long ? 1 : -1) * (threshold - (threshold === 4.5 ? 4 : 1) + 0.01)
       : 100 + (long ? 1 : -1) * 0.01;
     const dialogPrice = scenario === "dialog-changed" ? belowThresholdPrice : 100;
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture

@@ -96,18 +96,24 @@ export async function collectPositionTables(page, collectTables) {
 }
 
 async function findOrderRow(page, orderId) {
-  const token = `${Date.now()}-${Math.random()}`;
-  const found = await page.locator("tr, [role='row']").evaluateAll((rows, { orderId, token }) => rows.some((row) => {
-    if (!row.getBoundingClientRect().height) return false;
-    const table = row.closest(".el-table") || row.closest("table, [role='table']");
-    const headers = [...(table?.querySelectorAll("th, [role='columnheader']") || [])].map((node) => node.textContent.trim());
-    const idIndex = headers.indexOf("委托单号");
-    const cells = [...row.querySelectorAll("td, [role='gridcell'], [role='cell']")];
-    if (idIndex < 0 || cells[idIndex]?.textContent.trim() !== orderId) return false;
-    row.dataset.axiomCancelOrder = token;
-    return true;
-  }), { orderId, token });
-  return found ? page.locator(`[data-axiom-cancel-order='${token}']`) : null;
+  const idIndex = await page.locator("tr, [role='row']").evaluateAll((rows, orderId) => {
+    for (const row of rows) {
+      if (!row.getBoundingClientRect().height) continue;
+      const table = row.closest(".el-table") || row.closest("table, [role='table']");
+      const headers = [...(table?.querySelectorAll("th, [role='columnheader']") || [])].map(node => node.textContent.trim());
+      const cells = row.querySelectorAll("td, [role='gridcell'], [role='cell']");
+      const index = headers.indexOf("委托单号");
+      if (index >= 0 && cells[index]?.textContent.trim() === orderId) return index;
+    }
+    return -1;
+  }, orderId);
+  // Resolve again on every action: Vue replaces rows after checkbox changes.
+  if (idIndex < 0) return null;
+  const header = page.locator("th, [role='columnheader']").filter({ hasText: /^\s*委托单号\s*$/ });
+  const table = page.locator(VISIBLE_TABLES).filter({ has: header }).first();
+  const cells = page.locator(`td:nth-child(${idIndex + 1}), [role='gridcell']:nth-child(${idIndex + 1}), [role='cell']:nth-child(${idIndex + 1})`)
+    .filter({ hasText: new RegExp(`^\\s*${orderId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`) });
+  return table.locator("tr:visible, [role='row']:visible").filter({ has: cells }).first();
 }
 
 async function findOrderOnAllPages(page, orderId) {
@@ -142,17 +148,35 @@ export async function clickOrderCancellation(page, orderId) {
       && Number(cells[headers.indexOf("未成交数量")]?.textContent.trim()) > 0;
   });
   if (!active) return { clicked: false, code: "ORDER_NO_LONGER_OPEN" };
-  // The production page uses row checkboxes plus the selected-order 撤单 toolbar.
-  await page.locator(VISIBLE_TABLES).locator("input[type='checkbox']").evaluateAll((nodes) => {
-    for (const node of nodes) if (node.checked && !node.disabled) node.click();
-  });
-  row = await findOrderRow(page, orderId);
-  if (!row) return { clicked: false, code: "ORDER_NO_LONGER_OPEN" };
-  const checkbox = row.locator("input[type='checkbox']").first();
-  if (!await checkbox.count() || await checkbox.isDisabled()) return { clicked: false, code: "ORDER_CANCEL_CONTROL_NOT_FOUND" };
-  await checkbox.evaluate((node) => { if (!node.checked) node.click(); });
-  const selected = await page.locator(VISIBLE_TABLES).locator("tbody input[type='checkbox']").evaluateAll((nodes) => nodes.filter((node) => node.checked).length);
-  if (selected !== 1 || !await checkbox.isChecked()) return { clicked: false, code: "ORDER_SELECTION_UNVERIFIED" };
+  // Keep a nonempty selection while replacing the previous choice: Haohan
+  // re-queries the table when selection becomes empty. Never toggle headers.
+  const setSelected = async (id, selected) => {
+    const current = await findOrderRow(page, id);
+    if (!current) return false;
+    const checkbox = current.locator("input[type='checkbox']").first();
+    if (!await checkbox.count() || await checkbox.isDisabled()) return false;
+    if (await checkbox.isChecked() !== selected) {
+      const label = current.locator("label.el-checkbox").first();
+      await (await label.count() ? label : checkbox).click({ timeout: 3000 });
+    }
+    return true;
+  };
+  const selectedIds = () => page.locator("tbody tr:visible, [role='row']:visible").evaluateAll(rows => rows.flatMap(row => {
+    const table = row.closest(".el-table") || row.closest("table, [role='table']");
+    const headers = [...(table?.querySelectorAll("th, [role='columnheader']") || [])].map(node => node.textContent.trim());
+    if (!headers.includes("委托单号") || !row.querySelector("input[type='checkbox']:checked")) return [];
+    return [row.querySelectorAll("td, [role='gridcell'], [role='cell']")[headers.indexOf("委托单号")]?.textContent.trim() || ""];
+  }));
+  let verified = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!await setSelected(orderId, true)) return { clicked: false, code: "ORDER_CANCEL_CONTROL_NOT_FOUND" };
+    for (const id of [...new Set(await selectedIds())].filter(id => id !== orderId)) {
+      if (!id || !await setSelected(id, false)) return { clicked: false, code: "ORDER_SELECTION_UNVERIFIED" };
+    }
+    const selected = await selectedIds();
+    if (selected.length === 1 && selected[0] === orderId) { verified = true; break; }
+  }
+  if (!verified) return { clicked: false, code: "ORDER_SELECTION_UNVERIFIED" };
   if (!await activateTradeControl(page, "撤单")) return { clicked: false, code: "ORDER_CANCEL_CONTROL_NOT_FOUND" };
   return { clicked: true };
 }

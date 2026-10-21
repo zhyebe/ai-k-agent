@@ -9,11 +9,11 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal("alternateTrigger" in entry, false);
   assert.equal("triggerRelation" in entry, false);
   assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.equal(exit.profitGoal, "PRIORITIZE_ZERO_TO_FIVE");
-  assert.equal(exit.positionTakeProfitAmount, 5);
+  assert.equal(exit.profitGoal, "REALIZE_FROM_ONE_POINT");
+  assert.deepEqual(exit.positionProfitPoints, { minimum: 1, maximum: 4 });
   assert.equal(exit.positionStopLossAmount, -3);
-  assert.deepEqual(exit.preferredExitAmountRange, [0, 5]);
-  assert.equal(exit.profitUnit, "POSITION_TOTAL_AMOUNT");
+  assert.equal("preferredExitAmountRange" in exit, false);
+  assert.equal(exit.profitUnit, "DIRECTIONAL_PRICE_POINTS");
   assert.match(exit.realtimeValueRule, /仅作为 AI.*参考/);
   assert.match(exit.realtimeValueRule, /不是程序硬性离场条件/);
   assert.equal("profitFallback" in exit, false);
@@ -26,11 +26,11 @@ test("入场由 AI 趋势识别，预测价格点收益与恢复路径并由AI�
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["转让"]);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /大趋势/);
-  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /-3、0、5是整笔金额，不是每单位价格差、K线根数或百分比/);
+  assert.match(LIVE_BOARD_STRATEGY.loop.summary, /每单位有利价格点差≥1/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /当前与上一轮/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /亏1点不自动离场/);
   assert.match(LIVE_BOARD_STRATEGY.loop.summary, /持续扩亏且继续持有更可能恶化/);
-  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, true);
+  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, false);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
   assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);
 });
@@ -241,7 +241,7 @@ test("未到第50秒或标记 partial 的分钟K不进入固定历史", () => {
     ] } },
   }, now);
   assert.deepEqual(layered.timeframes["1m"].history, []);
-  assert.equal(layered.nextCandle.livePrice, null, "unconfirmed display price is excluded; executable bid/ask remains separate");
+  assert.equal(layered.nextCandle.livePrice, 121, "live display evidence survives without becoming confirmed history");
 });
 
 test("监控上下文只保留最近1小时分钟数据", () => {
