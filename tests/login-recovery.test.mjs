@@ -129,7 +129,7 @@ test("relogin during slow analysis discards old-session actions and resumes with
         observeExecutionMarket: async () => ++reads === 1 ? expired : f.market,
       } });
     }
-    return { action: "BUY", bullishProfitProbability: 0.65, bearishProfitProbability: 0.3,
+    return { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.65, bearishProfitProbability: 0.3,
       targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [], cancelOrderIds: ["O1"] };
   };
   f.runtime.cancelOpenOrders = async () => { f.calls.push("cancel"); f.market.account.openOrders = []; return { ok: true, results: [{ orderId: "O1", cancelled: true }] }; };

@@ -35,7 +35,7 @@ for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"])
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => f.market,
       fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true }; },
-      requestDecision: async () => ({ action, targetSymbol: "DGKZ", orderType: "MARKET",
+      requestDecision: async () => ({ action, marketRegime: action === "SELL" ? "DOWN" : "UP", targetSymbol: "DGKZ", orderType: "MARKET",
         bullishProfitProbability: 0.6, bearishProfitProbability: 0.6, riskFlags: [], evidenceIds: [],
         holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", rationale: "保留 original，反向补救，原保护继续有效" },
         exitPlans: [{ positionId: "original", heldSide, quantity: 1, validForSec: 300,
@@ -131,7 +131,7 @@ for (const heldSide of ["LONG", "SHORT"]) for (const exitType of ["TAKE_PROFIT",
       observeMarket: async () => structuredClone(f.market),
       requestDecision: async () => {
         f.market.orderBook = { bids: [{ price: 99, volume: 100 }], asks: [{ price: 100, volume: 100 }] };
-        return { action: heldSide === "LONG" ? "SELL" : "BUY", exitType, targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [] };
+        return { action: heldSide === "LONG" ? "SELL" : "BUY", marketRegime: "UP", exitType, targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [] };
       },
     } });
     assert.equal(result.reason, "MARKET_CHANGED_DURING_ANALYSIS");
@@ -199,7 +199,7 @@ test("ordinary ticks do not starve AI; its matching price condition executes at 
   f.market.orderBook = { bids: [{ price: 103.5, volume: 100 }], asks: [{ price: 104.5, volume: 100 }] };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.equal(signal.aborted, false);
-  finish({ action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [],
+  finish({ action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetPositionIds: ["P1"], targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [],
     exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 107.5, stopLossPrice: 104 }] });
   await operation;
   assert.equal(f.submitted.length, 1);
@@ -267,7 +267,7 @@ for (const automatic of [false, true]) {
     t.mock.method(globalThis, "fetch", async () => {
       modelCalls++;
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        action: "BUY", target_symbol: "DGKZ", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3,
+        action: "BUY", marketRegime: "UP", target_symbol: "DGKZ", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3,
         holding_plan: { decision: "HOLD_FOR_TARGET" },
         exit_plans: [{ position_id: "P1", held_side: "LONG", quantity: 1, valid_for_sec: 300, take_profit_price: 103, stop_loss_price: 91 }],
       }) } }] }));
@@ -445,7 +445,7 @@ for (const unverifiedField of ["positionsVerified", "openOrdersVerified"]) {
 
 test("manual WAITING skips a verified empty account without disturbing the entry form", async () => {
   const f = setup("manual-waiting-flat", []);
-  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8 });
   const result = await runPositionExitCycle(f.task.id, { runtime: { ...f.runtime,
     observeExecutionMarket: async () => assert.fail("verified flat manual entry must keep its form in place"),
   } });
@@ -457,7 +457,7 @@ for (const observation of ["unverified-market", "unverified-audit"]) {
   test(`manual WAITING with ${observation} still reads and exits an existing holding`, async () => {
     const f = setup(`manual-waiting-${observation}`, [long("P1")]);
     f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 1, validForSec: 120, takeProfitPrice: 105 }] }, f.market, f.task).plans;
-    f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+    f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8 });
     const current = structuredClone(f.market);
     if (observation === "unverified-market") f.market.account = { ...f.market.account, positionsVerified: false, positions: [] };
     else f.task.lastPositionAudit = { positionsVerified: false, positions: [] };
@@ -474,7 +474,7 @@ for (const observation of ["unverified-market", "unverified-audit"]) {
 
 test("closing never skips a manual WAITING form even when the last holdings snapshot was empty", async () => {
   const f = setup("closing-manual-waiting-flat", []);
-  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8 });
   f.market.account.openOrders = [{ orderId: "entry-pending", orderKind: "订立", remainingQuantity: 1 }];
   const scopes = [];
   await runPositionExitCycle(f.task.id, { now: Date.parse("2026-10-13T15:56:00+08:00"), runtime: { ...f.runtime,
@@ -487,7 +487,7 @@ test("closing never skips a manual WAITING form even when the last holdings snap
 
 test("closing blocks both automatic entries and acknowledgements of stale manual entry forms", async () => {
   const f = setup("closing-entry", [], { autoDecisionEnabled: true, tradingSession: { opensAt: "2020-01-01T18:30", closesAt: "2020-01-02T09:00" }, sessionClose: { leadMinutes: 5, timezone: "Asia/Shanghai" } });
-  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8 });
   await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /SESSION_CLOSING_NO_ENTRY/);
   assert.equal(f.submitted.length, 0);
 });
@@ -515,7 +515,7 @@ test("small verified net profit executes while AI is waiting; late entry cannot 
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitType, "TAKE_PROFIT");
-  releaseModel({ action: "BUY", bullishProfitProbability: 0.9, bearishProfitProbability: 0.1, riskFlags: [], evidenceIds: ["market:test"], holdingPlan: { decision: "HOLD_FOR_TARGET" } });
+  releaseModel({ action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.9, bearishProfitProbability: 0.1, riskFlags: [], evidenceIds: ["market:test"], holdingPlan: { decision: "HOLD_FOR_TARGET" } });
   await analysis;
   assert.equal(f.submitted.length, 1);
   assert.equal(f.task.pendingAction?.exitType, "TAKE_PROFIT");
@@ -625,13 +625,13 @@ test("stop during submission ignores a successful late browser response", async 
 
 test("manual continuation receives the close deadline even for an already waiting entry", async () => {
   const f = setup("closing-manual-continuation", [], { tradingSession: { opensAt: "2020-01-01T18:30", closesAt: "2020-01-02T09:00" }, sessionClose: { leadMinutes: 5, timezone: "Asia/Shanghai" } });
-  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.8 });
+  f.task.pendingAction = buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8 });
   let input;
   await runAnalysis(f.task.id, "", { runtime: {
     ...f.runtime, openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
     continueManualEntry: async value => { input = value; return { ok: false, continued: false, code: "SESSION_CLOSING_NO_ENTRY" }; },
     observeMarket: async () => f.market,
-    requestDecision: async () => ({ action: "BUY", bullishProfitProbability: 0.8, bearishProfitProbability: 0.2, riskFlags: [], evidenceIds: ["market:test"] }),
+    requestDecision: async () => ({ action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.8, bearishProfitProbability: 0.2, riskFlags: [], evidenceIds: ["market:test"] }),
   } });
   assert.ok(input.entryDeadlineAt < Date.now());
   assert.equal(f.submitted.length, 0);
@@ -701,7 +701,7 @@ for (const automatic of [false, true]) test(`ordinary monitoring withdraws all c
     { orderId: "entry", orderKind: "订立", remainingQuantity: 2, filledQuantity: 1 },
     { orderId: "transfer", orderKind: "转让", remainingQuantity: 1 },
   ];
-  f.task.pendingAction = { ...buildPendingAction(f.task, { action: "BUY", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3 }), status: "AWAITING_FILL", entrustedOrderIds: ["entry"] };
+  f.task.pendingAction = { ...buildPendingAction(f.task, { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3 }), status: "AWAITING_FILL", entrustedOrderIds: ["entry"] };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.deepEqual(f.cancelled, ["entry", "transfer"]);
   assert.equal(f.submitted.length, 0);

@@ -838,6 +838,12 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     const prompt = seen[0].body.system;
     assert.match(prompt, /40% 不再是入场硬门、上限或 HOLD 触发器/);
     assert.doesNotMatch(prompt, /selected probability must be >=|hard entry requirement|BUY requires bullish_profit_probability >=/);
+    assert.match(prompt, /横盘震荡不新开仓/);
+    assert.match(prompt, /不能被吓到而因一次跳价亏损离场/);
+    assert.match(prompt, /新增止损不能只引用闪K/);
+    assert.match(prompt, /market_regime/);
+    assert.match(prompt, /数量2、每单位有利点差1时整仓毛利为2，不是1/);
+    assert.doesNotMatch(prompt, /低于2点不称盈利/);
     assert.match(prompt, /AI recognizes the broad market trend first/);
     assert.match(prompt, /历史 trend 字段、已完成 K 线和片段 trend 只是过去的证据，不是下单条件/);
     assert.match(prompt, /入场依据是从当前可成交价出发对未来路径的预测/);
@@ -1209,7 +1215,7 @@ test("provider decision preserves target board identity and per-board assessment
   const server = http.createServer(async (_request, response) => {
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-      action: "BUY",
+      action: "BUY", market_regime: "UP",
       target_symbol: "DGKZ",
       target_symbol_name: "丹桂康砖（二期）",
       target_instrument_id: "537",
@@ -1218,8 +1224,8 @@ test("provider decision preserves target board identity and per-board assessment
       bullish_profit_probability: 52,
       bearish_profit_probability: "0.41",
       board_assessments: [
-        { symbol: "DGJJ", symbol_name: "丹桂金尖（二期）", instrument_id: "536", action: "HOLD", confidence: 0.4, summary: "等待" },
-        { symbol: "DGKZ", symbol_name: "丹桂康砖（二期）", instrument_id: "537", action: "BUY", confidence: 0.75, summary: "满足条件" },
+        { symbol: "DGJJ", symbol_name: "丹桂金尖（二期）", instrument_id: "536", action: "HOLD", market_regime: "RANGE", confidence: 0.4, summary: "等待" },
+        { symbol: "DGKZ", symbol_name: "丹桂康砖（二期）", instrument_id: "537", action: "BUY", market_regime: "UP", confidence: 0.75, summary: "满足条件" },
       ],
     }) } }] }));
   });
@@ -1228,6 +1234,9 @@ test("provider decision preserves target board identity and per-board assessment
     const provider = createProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, model: "board-model", apiKey: "key" });
     const result = await requestDecision(provider, { market: { books: [] }, evidenceIds: [] });
     assert.equal(result.targetSymbol, "DGKZ");
+    assert.equal(result.marketRegime, "UP");
+    assert.equal(result.boardAssessments[0].marketRegime, "RANGE");
+    assert.equal(result.boardAssessments[1].marketRegime, "UP");
     assert.equal(result.targetInstrumentId, "537");
     assert.equal(result.profitProbability, 0.52);
     assert.equal(result.bullishProfitProbability, 0.52);
@@ -1315,6 +1324,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const body = bodies[0];
     const messages = body.input || body.messages || body.contents.map(item => ({ ...item, content: item.parts[0].text }));
     const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
+    assert.match(prompt, /横盘震荡不新开仓/);
+    assert.match(prompt, /不能被吓到而因一次跳价亏损离场/);
+    assert.match(prompt, /新增止损不能只引用闪K/);
+    assert.match(prompt, /market_regime/);
+    assert.match(prompt, /数量2、每单位有利点差1时整仓毛利为2，不是1/);
+    assert.doesNotMatch(prompt, /低于2点不称盈利/);
     assert.match(prompt, /AI recognizes the broad market trend first/);
     assert.match(prompt, /Next K and roughly 10 K are forecast checkpoints, not holding limits/);
     assert.match(prompt, /5根只是举例，不设固定持仓K数/);

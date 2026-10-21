@@ -12,7 +12,7 @@ for (const action of ["BUY", "SELL"]) {
     t.mock.method(globalThis, "fetch", async () => {
       calls++;
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        action, target_symbol: "DGKZ", entry_price: 100, bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
+        action, marketRegime: action === "SELL" ? "DOWN" : "UP", target_symbol: "DGKZ", entry_price: 100, bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
         holding_plan: { decision: "HOLD_FOR_TARGET", rationale: "旧仓持有，新机会可以增加一笔" }, exit_plans: [],
       }) } }] }));
     });
@@ -52,7 +52,7 @@ for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
         assert.equal(context.strategy.loop.entry.emptyOnly, false);
         assert.equal(context.strategy.loop.noSecondEntryWhileHolding, false);
         assert.equal(context.strategy.entryQuantity, 1);
-        return { action, targetSymbol: "DGKZ", orderType: "LIMIT", entryPrice: action === "BUY" ? 99 : 101, targetPrice: action === "BUY" ? 99 : 101,
+        return { action, marketRegime: action === "SELL" ? "DOWN" : "UP", targetSymbol: "DGKZ", orderType: "LIMIT", entryPrice: action === "BUY" ? 99 : 101, targetPrice: action === "BUY" ? 99 : 101,
           bullishProfitProbability: 0.62, bearishProfitProbability: 0.42, riskFlags: [], evidenceIds: [], decisionTtlSec: 300,
           holdingPlan: { decision: "HOLD_FOR_TARGET" }, exitPlans: positions.map(p => ({ positionId: p.positionOrderId, quantity: 1,
             heldSide: p.side === "买入" ? "LONG" : "SHORT", takeProfitPrice: p.orderPrice + (p.side === "买入" ? 4 : -4), validForSec: 300 })) };
@@ -83,9 +83,9 @@ for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
 
 test("predicted entry price is an explicit LIMIT; MARKET remains immediate at the current market", () => {
   const task = { mode: "LIVE", market: { latest: { price: 100 } } };
-  assert.equal(suggestOrderPreview(task, { action: "BUY", orderType: "LIMIT", entryPrice: 98 }).suggestedPrice, 98);
-  assert.equal(suggestOrderPreview(task, { action: "SELL", orderType: "LIMIT", entryPrice: 102 }).suggestedPrice, 102);
-  assert.equal(suggestOrderPreview(task, { action: "BUY", orderType: "MARKET", entryPrice: 98 }).suggestedPrice, 100);
+  assert.equal(suggestOrderPreview(task, { action: "BUY", marketRegime: "UP", orderType: "LIMIT", entryPrice: 98 }).suggestedPrice, 98);
+  assert.equal(suggestOrderPreview(task, { action: "SELL", marketRegime: "DOWN", orderType: "LIMIT", entryPrice: 102 }).suggestedPrice, 102);
+  assert.equal(suggestOrderPreview(task, { action: "BUY", marketRegime: "UP", orderType: "MARKET", entryPrice: 98 }).suggestedPrice, 100);
 });
 
 for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
@@ -114,7 +114,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /原多单持续下跌扩亏时可保留原单新开 SELL/);
       assert.match(prompt, /原空单持续上涨扩亏时可保留原单新开 BUY/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);
-      const value = JSON.stringify({ action: "BUY", order_type: "LIMIT", entry_price: 98, target_price: 98,
+      const value = JSON.stringify({ action: "BUY", marketRegime: "UP", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
         analysis_summary: "主判断：偏涨；预测回踩98后向103，采用限价入场" });
       const response = apiFormat === "anthropic" ? { content: [{ type: "text", text: value }] }

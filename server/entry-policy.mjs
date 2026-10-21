@@ -2,6 +2,11 @@
 // longer a hard execution threshold.
 export const MIN_PROFIT_PROBABILITY = 0.4;
 
+export function normalizeMarketRegime(value) {
+  const regime = String(value || "").trim().toUpperCase();
+  return ["UP", "DOWN", "RANGE"].includes(regime) ? regime : "UNKNOWN";
+}
+
 export function hasDirectionalProbabilities(decision) {
   if (decision?.directionalProbabilitiesComplete === false) return false;
   return [decision?.bullishProfitProbability, decision?.bearishProfitProbability].every((value) => {

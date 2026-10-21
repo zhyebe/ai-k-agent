@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exitGuardAllowsPrice, isNonLosingExit, positionAmountExit, positionAmountGuardAllowsPrice, positionProfitExit, validateExitPlans } from "../server/exit-policy.mjs";
+import { exitNetPnl, exitGuardAllowsPrice, isNonLosingExit, positionAmountExit, positionAmountGuardAllowsPrice, positionProfitExit, validateExitPlans } from "../server/exit-policy.mjs";
 
 const now = Date.parse("2026-10-20T10:00:00+08:00");
 for (const side of ["LONG", "SHORT"]) {
@@ -25,6 +25,21 @@ for (const side of ["LONG", "SHORT"]) {
       assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(0.99999)), false);
       assert.equal(exitGuardAllowsPrice(result.decision.exitGuard, price(0.99999), now), false);
       assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, position, price(1)), true);
+    }
+  });
+
+  test(`${side}: quantity scales whole-position exit amounts; one point remains per unit`, () => {
+    for (const quantity of [1, 2, 3, 10]) {
+      const holding = { ...position, quantity, roundTripFee: 0 };
+      const below = positionProfitExit(holding, market(0.5), now);
+      assert.equal(below, null, "gross >=1 for larger quantities must not exit below one per-unit point");
+      const result = positionProfitExit(holding, market(1), now);
+      assert.equal(result.grossPnl, quantity);
+      assert.equal(result.netPnl, quantity);
+      assert.equal(result.decision.exitGuard.positionPoints.threshold, 1);
+      assert.equal(exitNetPnl(holding, price(1)).grossPnl, quantity);
+      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, holding, price(0.5)), false);
+      assert.equal(positionAmountGuardAllowsPrice(result.decision.exitGuard, holding, price(1)), true);
     }
   });
 

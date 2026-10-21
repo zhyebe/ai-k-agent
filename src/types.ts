@@ -83,6 +83,7 @@ export interface Rule {
 }
 
 export interface PendingAction {
+  marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
   id: string;
   decisionRunId?: string | null;
   action: "BUY" | "SELL";
@@ -146,6 +147,7 @@ export interface Decision {
   riskFlags: string[];
   createdAt: string;
   ttlSec: number;
+  marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
   analysisSummary?: string;
   timeframeConsistency?: string;
   keyLevels?: unknown[];
@@ -155,6 +157,7 @@ export interface Decision {
     symbolName?: string;
     instrumentId?: string;
     action: "BUY" | "SELL" | "HOLD";
+    marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
     confidence: number;
     profitProbability?: number;
     bullishProfitProbability?: number;

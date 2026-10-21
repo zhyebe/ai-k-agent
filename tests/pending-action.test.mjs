@@ -27,7 +27,7 @@ function insertTask(id, extras = {}) {
     target: { type: "website", name: "浩瀚数贸", url: "https://smyw.haohandahan.cn/client/#/transcc", connectorId: "connector_haohan_readonly", browserSessionId: `task:${id}` },
     workflow: [],
     rules: [],
-    decision: { action: "BUY", confidence: 0.8, profitProbability: 0.55, bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "BUY", marketRegime: "UP", confidence: 0.8, profitProbability: 0.55, bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
     metrics: { equity: 18000, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
     market: { latest: { price: 1800 }, account: { availableFunds: 18000 } },
     ...extras,
@@ -40,7 +40,7 @@ test("suggestion preview keeps buy quantity honest and never implies a live orde
   const preview = suggestOrderPreview({
     metrics: { equity: 18000 },
     market: { latest: { price: 1800 }, account: { availableFunds: 18000 } },
-  }, { action: "BUY", targetPositionPct: 10, maxOrderValuePct: 8 });
+  }, { action: "BUY", marketRegime: "UP", targetPositionPct: 10, maxOrderValuePct: 8 });
   assert.equal(preview.action, "BUY");
   assert.equal(preview.suggestedPrice, 1800);
   assert.equal(preview.suggestedQty, 1);
@@ -57,10 +57,10 @@ test("forbidden trade controls stay blocked for submit labels", () => {
   assert.deepEqual(suggestionFormLabels("SELL"), { price: "卖价", quantity: "卖量", extras: ["订立价", "订立量", "价格", "数量"] });
   assert.equal(tradePaneLabel({}), "订立");
   assert.equal(tradePaneLabel({ exitType: "TAKE_PROFIT" }), "转让");
-  assert.deepEqual(tradeSubmitLabels({ action: "BUY" }), ["买入订立", "买订立"]);
-  assert.deepEqual(tradeSubmitLabels({ action: "SELL" }), ["卖出订立", "卖订立"]);
-  assert.deepEqual(tradeSubmitLabels({ action: "SELL", exitType: "TAKE_PROFIT" }), ["卖出转让", "卖转让"]);
-  assert.deepEqual(tradeSubmitLabels({ action: "BUY", exitType: "STOP_LOSS" }), ["买入转让", "买转让"]);
+  assert.deepEqual(tradeSubmitLabels({ action: "BUY", marketRegime: "UP" }), ["买入订立", "买订立"]);
+  assert.deepEqual(tradeSubmitLabels({ action: "SELL", marketRegime: "DOWN" }), ["卖出订立", "卖订立"]);
+  assert.deepEqual(tradeSubmitLabels({ action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT" }), ["卖出转让", "卖转让"]);
+  assert.deepEqual(tradeSubmitLabels({ action: "BUY", marketRegime: "UP", exitType: "STOP_LOSS" }), ["买入转让", "买转让"]);
   assert.deepEqual(positionListExitLabels({ exitType: "TAKE_PROFIT" }), ["转让"]);
   assert.deepEqual(positionListExitLabels({ exitType: "STOP_LOSS" }), ["转让"]);
   assert.deepEqual(positionListExitLabels({}), ["转让"]);
@@ -75,9 +75,9 @@ test("forbidden trade controls stay blocked for submit labels", () => {
       { type: "click", label: "关闭窗口" },
       { type: "fill", label: "买量", value: "2" },
     ],
-  }, { buttons: [{ label: "买入订立" }, { label: "卖出订立" }], fields: [{ label: "买量" }], rowActions: [{ label: "转让" }] }, { action: "BUY" });
+  }, { buttons: [{ label: "买入订立" }, { label: "卖出订立" }], fields: [{ label: "买量" }], rowActions: [{ label: "转让" }] }, { action: "BUY", marketRegime: "UP" });
   assert.deepEqual(plan.actions, [{ type: "fill", label: "买量", value: "2" }, { type: "click", label: "买入订立" }]);
-  const exitPlan = normalizeBrowserPlan({ actions: [{ type: "click", label: "转让" }] }, { rowActions: [{ label: "转让" }] }, { action: "SELL", exitType: "TAKE_PROFIT" });
+  const exitPlan = normalizeBrowserPlan({ actions: [{ type: "click", label: "转让" }] }, { rowActions: [{ label: "转让" }] }, { action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT" });
   assert.deepEqual(exitPlan.actions, []);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/qtfront_tq/intraday-trade/trade/make", "POST"), true);
   assert.equal(isTradeWriteResponse("https://smyw.haohandahan.cn/qtfront_tq/intraday-trade/trade/marketTake", "POST"), true);
@@ -299,7 +299,7 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   const task = insertTask(`task_live_sell_${Date.now()}`, {
     mode: "LIVE",
     autoDecisionEnabled: true,
-    decision: { action: "SELL", targetSymbol: "DGJJ", confidence: 0.7, profitProbability: 0.55, bullishProfitProbability: 0.45, bearishProfitProbability: 0.55, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "SELL", marketRegime: "DOWN", targetSymbol: "DGJJ", confidence: 0.7, profitProbability: 0.55, bullishProfitProbability: 0.45, bearishProfitProbability: 0.55, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
   });
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.action, "SELL");
@@ -328,7 +328,7 @@ test("live exit submits 转让 with position ids", async () => {
     mode: "LIVE",
     autoDecisionEnabled: true,
     decision: {
-      action: "SELL",
+      action: "SELL", marketRegime: "DOWN",
       exitType: "TAKE_PROFIT",
       targetPositionIds: ["P-9"],
       targetSymbol: "DGKZ",
@@ -372,7 +372,7 @@ test("live exit submits 转让 with position ids", async () => {
 test("partial row exits reconcile only submitted rows and available quantities", async () => {
   const task = insertTask(`partial_exit_${Date.now()}`, {
     mode: "LIVE", autoDecisionEnabled: false,
-    decision: { action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"] },
+    decision: { action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"] },
     market: { latest: { price: 20 }, account: { positions: [{ positionOrderId: "P-1", quantity: 2 }, { positionOrderId: "P-2", quantity: 1 }] } },
   });
   task.pendingAction = buildPendingAction(task, task.decision);
@@ -387,7 +387,7 @@ test("partial row exits reconcile only submitted rows and available quantities",
 test("pending action preserves AI entry and exit levels", () => {
   const task = insertTask(`task_ai_levels_${Date.now()}`, {
     decision: {
-      action: "BUY",
+      action: "BUY", marketRegime: "UP",
       orderType: "LIMIT",
       entryPrice: 1810,
       targetPrice: 1810,
@@ -419,7 +419,7 @@ test("multi-board pending action uses and submits the selected board price and i
   const task = insertTask(`task_target_board_${Date.now()}`, {
     mode: "LIVE",
     autoDecisionEnabled: true,
-    decision: { action: "BUY", targetSymbol: "DGKZ", targetSymbolName: "丹桂康砖（二期）", targetInstrumentId: "537", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3, confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
+    decision: { action: "BUY", marketRegime: "UP", targetSymbol: "DGKZ", targetSymbolName: "丹桂康砖（二期）", targetInstrumentId: "537", bullishProfitProbability: 0.6, bearishProfitProbability: 0.3, confidence: 0.8, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
     market: {
       symbol: "DGJJ",
       latest: { price: 1800 },
@@ -487,7 +487,7 @@ for (const action of ["BUY", "SELL"]) {
       const task = insertTask(`task_probability_guard_${action}_${probability}_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
       task.decision = {
         ...task.decision,
-        action,
+        action, marketRegime: action === "SELL" ? "DOWN" : "UP",
         profitProbability: 0.9,
         bullishProfitProbability: action === "BUY" ? probability : 0.9,
         bearishProfitProbability: action === "SELL" ? probability : 0.9,

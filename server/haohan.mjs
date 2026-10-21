@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { normalizeMarketRegime } from "./entry-policy.mjs";
 
 export const HAO_HAN_HOST = "smyw.haohandahan.cn";
 export const HAO_HAN_TARGET_URL = `https://${HAO_HAN_HOST}/client/#/transcc`;
@@ -209,6 +210,7 @@ export function uniqueBoardAssessments(values = [], books = []) {
     const instrument = normalizePageInstrument(item);
     if (!instrument) continue;
     const action = ["BUY", "SELL", "HOLD"].includes(item.action) ? item.action : "HOLD";
+    const marketRegime = normalizeMarketRegime(item.marketRegime ?? item.market_regime);
     const confidence = Math.min(1, Math.max(0, Number(item.confidence) || 0));
     const profitProbability = Math.min(1, Math.max(0, Number(item.profitProbability ?? item.profit_probability) || 0));
     const bullishProfitProbability = Math.min(1, Math.max(0, Number(item.bullishProfitProbability ?? item.bullish_profit_probability) || 0));
@@ -219,15 +221,18 @@ export function uniqueBoardAssessments(values = [], books = []) {
       existing.symbol ||= instrument.symbol;
       existing.symbolName ||= instrument.symbolName;
       existing.instrumentId ||= instrument.instrumentId;
+      const range = existing.marketRegime === "RANGE" || marketRegime === "RANGE";
       const take = confidence > existing.confidence || (existing.action === "HOLD" && action !== "HOLD");
       if (take) {
         existing.action = action;
+        existing.marketRegime = marketRegime;
         existing.confidence = Math.max(existing.confidence, confidence);
         existing.profitProbability = Math.max(existing.profitProbability, profitProbability);
         existing.bullishProfitProbability = Math.max(existing.bullishProfitProbability || 0, bullishProfitProbability);
         existing.bearishProfitProbability = Math.max(existing.bearishProfitProbability || 0, bearishProfitProbability);
         if (summary) existing.summary = summary;
       } else if (summary && !existing.summary) existing.summary = summary;
+      if (range) existing.marketRegime = "RANGE";
       continue;
     }
     result.push({
@@ -235,6 +240,7 @@ export function uniqueBoardAssessments(values = [], books = []) {
       symbolName: instrument.symbolName,
       instrumentId: instrument.instrumentId,
       action,
+      marketRegime,
       confidence,
       profitProbability,
       bullishProfitProbability,
