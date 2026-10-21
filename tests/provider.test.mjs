@@ -98,6 +98,79 @@ test("GLM models using Anthropic-compatible gateways disable dynamic thinking", 
   assert.equal(body.max_tokens, 8192);
 });
 
+for (const model of ["GLM-5.3", "glm-5.3-flash", "zai-org/GLM-5.3", "glm-5.3-flashx"]) {
+  test(`${model} live analysis respects mandatory thinking without retrying rejected parameters`, async (t) => {
+    let calls = 0;
+    t.mock.method(globalThis, "fetch", async (_url, options) => {
+      calls++;
+      const body = JSON.parse(options.body);
+      if (body.thinking?.type === "disabled" || body.reasoning_effort !== "low") {
+        return new Response(JSON.stringify({ error: { message: "This model always engages in thinking and cannot be disabled; please use low, high, or max" } }), { status: 400 });
+      }
+      assert.equal(body.model, model);
+      assert.deepEqual(body.thinking, { type: "enabled" });
+      assert.equal(body.max_tokens, 8192);
+      return new Response(JSON.stringify({ choices: [{ message: { reasoning_content: "private reasoning", content: '{"action":"BUY","bullish_profit_probability":0.7,"bearish_profit_probability":0.3}' } }] }));
+    });
+    const result = await requestDecision({ apiKey: "test", baseUrl: "https://api.z.ai/api/paas/v4", apiFormat: "chat", model }, {}, { fastAnalysis: true });
+    assert.equal(result.action, "BUY");
+    assert.equal(calls, 1);
+  });
+}
+
+test("mandatory-thinking GLM on Anthropic gateways keeps the gateway's default thinking enabled", async (t) => {
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.thinking, undefined);
+    assert.equal(body.reasoning_effort, undefined);
+    assert.equal(body.max_tokens, 8192);
+    return new Response(JSON.stringify({ content: [{ type: "text", text: '{"action":"HOLD","bullish_profit_probability":0.5,"bearish_profit_probability":0.5}' }] }));
+  });
+  const result = await requestDecision({ apiKey: "test", baseUrl: "https://gateway.example.test/v1/messages", apiFormat: "anthropic", model: "GLM-5.3" }, {}, { fastAnalysis: true });
+  assert.equal(result.action, "HOLD");
+});
+
+test("mandatory-thinking GLM verification reserves enough output for reasoning and a final reply", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    calls++;
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.thinking, { type: "enabled" });
+    assert.equal(body.reasoning_effort, "low");
+    assert.ok(body.max_tokens >= 1024);
+    return new Response(JSON.stringify({ choices: [{ message: { reasoning_content: "private reasoning", content: "OK" } }] }));
+  });
+  const result = await verifyProvider({ apiKey: "test", baseUrl: "https://api.z.ai/api/paas/v4", apiFormat: "chat", model: "GLM-5.3" });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+});
+
+test("thinking parameter rejection is reported as incompatibility rather than an unavailable model", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(JSON.stringify({ error: { message: "This model always engages in thinking and cannot be disabled; please use low, high, or max" } }), { status: 400 });
+  });
+  const result = await verifyProvider({ apiKey: "test", baseUrl: "https://gateway.example.test/v1", apiFormat: "chat", model: "custom-model" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PROVIDER_PARAMETERS_INVALID");
+  assert.equal(result.status, "请求参数不兼容");
+  assert.equal(calls, 1);
+});
+
+test("GLM insufficient balance is not retried or reported as a successful connection", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls++;
+    return new Response(JSON.stringify({ error: { message: "Insufficient balance or no resource package. Please recharge." } }), { status: 429 });
+  });
+  const result = await verifyProvider({ apiKey: "test", baseUrl: "https://api.z.ai/api/paas/v4", apiFormat: "chat", model: "GLM-5.3" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "PROVIDER_RATE_LIMITED");
+  assert.match(result.message, /Insufficient balance/);
+  assert.equal(calls, 1);
+});
+
 test("reasoning-only live responses are re-asked for a conclusion", async (t) => {
   let calls = 0;
   const bodies = [];

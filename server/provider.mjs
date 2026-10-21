@@ -219,9 +219,13 @@ function chatCompletionsBody(provider, messages, options = {}) {
     messages,
     // DeepSeek defaults to high-effort thinking; live decisions use its documented fast mode.
     ...(options.fastAnalysis === true && officialDeepSeek ? { thinking: { type: "disabled" } } : {}),
-    // GLM-4.5/4.7 defaults to dynamic thinking. Live decisions need the final
-    // answer promptly; otherwise some responses contain only reasoning_content.
-    ...(fastGlm ? { thinking: { type: "disabled" }, max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 8192)) } : {}),
+    // GLM-5.3/Flash require thinking. Use their documented low effort for live
+    // decisions; older hybrid GLMs still support disabling thinking.
+    ...(fastGlm ? {
+      thinking: { type: requiresGlmThinking(provider) ? "enabled" : "disabled" },
+      ...(requiresGlmThinking(provider) ? { reasoning_effort: "low" } : {}),
+      max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 8192)),
+    } : {}),
     ...(fastStepFive ? { reasoning_effort: "high", max_tokens: Math.min(65536, Math.max(1, Number(options.maxOutputTokens) || 65536)) } : {}),
   };
 }
@@ -234,6 +238,11 @@ function isOfficialGlm(provider) {
 
 function isGlmModel(provider) {
   return /glm/i.test(String(provider?.model || ""));
+}
+
+function requiresGlmThinking(provider) {
+  // https://docs.z.ai/guides/llm/glm-5.3: enabled only; low/high/max effort.
+  return /(?:^|\/)glm-5\.3(?:$|[-:])/i.test(String(provider?.model || "").trim());
 }
 
 function isOfficialStepFive(provider) {
@@ -259,7 +268,9 @@ function anthropicBody(provider, messages, options = {}) {
     model: provider.model,
     max_tokens: Math.min(fastStepFive || fastGlm ? 65536 : 8192, Math.max(1, Number(options.maxOutputTokens) || (fastStepFive ? 65536 : fastGlm ? 8192 : 4096))),
     ...(fastStepFive ? { output_config: { effort: "high" } } : {}),
-    ...(fastGlm ? { thinking: { type: "disabled" } } : {}),
+    // Mandatory-thinking models retain the Anthropic gateway's native default;
+    // Chat Completions reasoning_effort is not an Anthropic request parameter.
+    ...(fastGlm && !requiresGlmThinking(provider) ? { thinking: { type: "disabled" } } : {}),
     ...(system ? { system } : {}),
     messages: messages
       .filter((message) => message.role !== "system")
@@ -474,7 +485,7 @@ export async function verifyProvider(provider, { timeoutMs = 30000, signal } = {
       const response = await fetch(candidate.url, {
         method: "POST",
         headers: providerHeaders(candidate.provider, apiKey),
-        body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: 8, fastAnalysis: true })),
+        body: JSON.stringify(providerRequestBody(candidate.provider, [{ role: "user", content: "Reply with OK only." }], { maxOutputTokens: requiresGlmThinking(candidate.provider) ? 1024 : 8, fastAnalysis: true })),
         signal: requestTimeout,
       });
       let payload;
@@ -498,6 +509,7 @@ export async function verifyProvider(provider, { timeoutMs = 30000, signal } = {
     const detail = lastFailure.detail;
     if (response.status === 401 || response.status === 403) return { ok: false, code: "PROVIDER_AUTH_FAILED", status: "Key 无效", httpStatus: response.status, message: detail || "Provider 拒绝了 API Key" };
     if (response.status === 404) return { ok: false, code: "PROVIDER_ENDPOINT_OR_MODEL_NOT_FOUND", status: "接口或模型不存在", httpStatus: response.status, message: detail || "请检查协议、完整 URL 和模型 ID" };
+    if ((response.status === 400 || response.status === 422) && /thinking|reasoning_effort/i.test(detail)) return { ok: false, code: "PROVIDER_PARAMETERS_INVALID", status: "请求参数不兼容", httpStatus: response.status, message: detail };
     if ((response.status === 400 || response.status === 422) && /model|模型/i.test(detail)) return { ok: false, code: "PROVIDER_MODEL_INVALID", status: "模型不可用", httpStatus: response.status, message: detail || "Provider 不支持该模型 ID" };
     if (response.status === 429) return { ok: false, code: "PROVIDER_RATE_LIMITED", status: "额度不足或限流", httpStatus: response.status, message: detail || "Provider 拒绝了本次推理请求" };
     return { ok: false, code: "PROVIDER_HTTP_ERROR", status: `模型请求失败（HTTP ${response.status}）`, httpStatus: response.status, message: detail || "请检查协议和请求地址" };
