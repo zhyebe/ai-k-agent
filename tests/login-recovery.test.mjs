@@ -15,7 +15,7 @@ function setup(t) {
   const market = { ok: true, symbol: "DGKZ", timeframe: "1m", observedAt: new Date().toISOString(),
     source: "test", evidenceId: "market:test", fingerprint: id, history: [], historyCount: 0, books: [], indicators: {},
     latest: { price: 103 }, quote: { price: 103 }, orderBook: { bids: [{ price: 103, volume: 10 }], asks: [{ price: 104, volume: 10 }] },
-    account: { positionsVerified: true, positions: [position], openOrdersVerified: true, openOrders: [{ orderId: "O1", remainingQuantity: 1 }], availableFunds: 10000 } };
+    account: { positionsVerified: true, positions: [position], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O1", remainingQuantity: 1 }], availableFunds: 10000 } };
   task.market = market;
   state.tasks.unshift(task);
   t.after(() => { stopController(id); state.tasks = state.tasks.filter(item => item !== task); });
@@ -68,7 +68,7 @@ for (const entryPrice of [102, 102.01, 106, 105.99]) test(`fast position monitor
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  if (entryPrice === 102 || entryPrice === 106) {
+  if (entryPrice === 102) {
     assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
     assert.equal(submitted.exitType, entryPrice === 102 ? "TAKE_PROFIT" : "STOP_LOSS");
     assert.deepEqual(submitted.targetPositionIds, ["P1"]);

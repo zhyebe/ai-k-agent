@@ -670,3 +670,32 @@ test("live Agent snapshot completes loading and survives a late HTTP response", 
   await page.locator(".request-progress").waitFor({ state: "detached" });
   reopened.resolve();
 });
+
+test("rescue status distinguishes ordinary, pending, active, exiting and completed trades", async t => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  sample.tasks = [{ ...sample.tasks[0], stopLocked: true, monitoringEnabled: false,
+    decision: { ...sample.tasks[0].decision, action: "HOLD", riskFlags: [], analysisSummary: "测试救单状态", entryPurpose: "RESCUE" }, pendingAction: null }];
+  const task = sample.tasks[0];
+  await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+  await navigate();
+  const panel = page.getByLabel("判断与未来预测");
+  await panel.waitFor();
+  assert.doesNotMatch(await panel.innerText(), /救单中|待核实成交|整体离场/);
+  task.pendingAction = { action: "SELL", status: "AWAITING_FILL", entryPurpose: "RESCUE", rescuePositionIds: ["original"] };
+  await page.reload();
+  await panel.getByText("反向补救建议 · 待核实成交").waitFor();
+  task.rescueSession = { status: "ACTIVE", netPnl: null };
+  await page.reload();
+  await panel.getByText("救单中", { exact: true }).waitFor();
+  assert.match(await panel.innerText(), /合计净利润：待核实/);
+  task.rescueSession = { status: "EXITING", netPnl: 0 };
+  await page.reload();
+  await panel.getByText("救单已达到保本条件，正在整体离场").waitFor();
+  await capture(page, "rescue-exiting");
+  task.rescueSession.status = "COMPLETE";
+  task.pendingAction.status = "CONFIRMED";
+  await page.reload();
+  await panel.waitFor();
+  assert.doesNotMatch(await panel.innerText(), /救单中|待核实成交|整体离场/);
+});

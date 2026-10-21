@@ -7,7 +7,7 @@ import { parseHaohanAccount } from "../server/haohan.mjs";
 import { browserExtract, cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 import { createProvider } from "../server/provider.mjs";
 
-import { positionAmountExit, positionProfitExit } from "../server/exit-policy.mjs";
+import { positionProfitExit } from "../server/exit-policy.mjs";
 
 import { tradeFixture, refreshingTradeFixture } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
@@ -990,14 +990,18 @@ for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [1, 2, 4, 4.5,
     const position = { positionOrderId: "P-1", symbol: "DGKZ", symbolName: "测试商品", side: heldSide, quantity: 2, orderPrice: entryPrice, roundTripFee: threshold === 4.5 ? 11 : 2 };
     const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true, positions: [position] },
       orderBook: { bids: [{ price: 100, volume: 30 }], asks: [{ price: 100, volume: 20 }] } };
-    const candidate = threshold > 0 ? positionProfitExit(position, market) : positionAmountExit(position, market);
+    const candidate = threshold > 0 ? positionProfitExit(position, market) : { netPnl: -3, decision: {
+      action: long ? "SELL" : "BUY", exitType: "STOP_LOSS", targetPositionIds: ["P-1"],
+      exitGuard: { positionId: "P-1", heldSide, quantity: 2, entryPrice, exitType: "STOP_LOSS",
+        triggerPrice: 100, comparison: long ? "LTE" : "GTE", expiresAt: new Date(Date.now() + 10000).toISOString(),
+        positionAmount: { threshold: -3, fees: 2 } } } };
     assert.equal(candidate.netPnl, threshold > 0 ? threshold * 2 - position.roundTripFee : threshold);
     if (scenario === "expired") candidate.decision.exitGuard.expiresAt = new Date(Date.now() - 1).toISOString();
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: 2 });
-    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
+    assert.equal(result.ok, scenario === "valid" && threshold > 0, JSON.stringify(result));
     const exits = await page.evaluate(() => window.exits);
-    assert.equal(exits.length, scenario === "valid" ? 1 : 0);
-    if (scenario === "valid") assert.deepEqual(exits[0], { id: "P-1", price: "100", quantity: "2" });
+    assert.equal(exits.length, scenario === "valid" && threshold > 0 ? 1 : 0);
+    if (scenario === "valid" && threshold > 0) assert.deepEqual(exits[0], { id: "P-1", price: "100", quantity: "2" });
     else assert.equal(result.code, "EXIT_CONDITION_CHANGED");
   });
 }

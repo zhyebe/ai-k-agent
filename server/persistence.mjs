@@ -97,6 +97,8 @@ function compactPersistedDecision(decision) {
   if (!decision || typeof decision !== "object") return decision;
   return {
     action: decision.action || "HOLD",
+    entryPurpose: decision.entryPurpose || "NORMAL",
+    rescuePositionIds: decision.rescuePositionIds || [],
     marketRegime: decision.marketRegime || "UNKNOWN",
     entryBlock: decision.entryBlock || null,
     runId: decision.runId || null,
@@ -192,6 +194,8 @@ export function compactTaskRuntime(task = {}) {
     exitMonitor: task.exitMonitor || null,
     lastPositionAudit: task.lastPositionAudit || null,
     positionTracking: task.positionTracking && typeof task.positionTracking === "object" ? task.positionTracking : {},
+    currentOrderTracking: task.currentOrderTracking || {},
+    rescueSession: task.rescueSession || null,
     lastObservedFingerprint: task.lastObservedFingerprint || "",
     lastAnalyzedFingerprint: task.lastAnalyzedFingerprint || "",
     lastAnalysisSucceeded: task.lastAnalysisSucceeded === true,
@@ -726,6 +730,8 @@ async function createMySqlAdapter() {
             exitMonitor: runtime.exitMonitor || null,
             lastPositionAudit: runtime.lastPositionAudit || null,
             positionTracking: runtime.positionTracking && typeof runtime.positionTracking === "object" ? runtime.positionTracking : {},
+            currentOrderTracking: runtime.currentOrderTracking || {},
+            rescueSession: runtime.rescueSession || null,
             lastObservedFingerprint: runtime.lastObservedFingerprint || "",
             lastAnalyzedFingerprint: runtime.lastAnalyzedFingerprint || "",
             lastAnalysisSucceeded: runtime.lastAnalysisSucceeded === true,

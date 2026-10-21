@@ -1,54 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isNonLosingExit, parseSessionClose, positionAmountExit, positionProfitExit, positionAmountGuardAllowsPrice, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
+import { evaluateExitPlan, exitGuardAllowsPrice, exitNetPnl, isNonLosingExit, parseSessionClose, positionProfitExit, positionAmountGuardAllowsPrice, sessionCloseWindow, validateExitPlans } from "../server/exit-policy.mjs";
 
 const observed = Date.parse("2026-10-13T10:00:00+08:00");
 const position = { positionOrderId: "P-1", symbol: "DGKZ", side: "买入", quantity: 2, orderPrice: 102 };
 const market = { symbol: "DGKZ", observedAt: new Date(observed).toISOString(), account: { positionsVerified: true, positions: [position] }, orderBook: { bids: [{ price: 104, volume: 20 }], asks: [{ price: 106, volume: 20 }] } };
 const source = { positionId: "P-1", heldSide: "LONG", quantity: 2, validForSec: 120, takeProfitPrice: 105, stopLossPrice: 99 };
 
-for (const side of ["LONG", "SHORT"]) {
-  test(`${side}: -3 whole-position stop includes quantity and costs, independent of account total`, () => {
-    const p = { ...position, side, orderPrice: 100, roundTripFee: 1 };
-    const snapshot = amount => {
-      const price = 100 + (side === "LONG" ? 1 : -1) * (amount + 1) / 2;
-      return { ...market, account: { positionsVerified: true, positions: [p], realtimeValueChange: 100 },
-        orderBook: { bids: [{ price, volume: 20 }], asks: [{ price, volume: 20 }] } };
-    };
-    for (const amount of [-2.99, -1, 0, 2, 10]) assert.equal(positionAmountExit(p, snapshot(amount), observed), null);
-    for (const amount of [-10, -3]) {
-      const result = positionAmountExit(p, snapshot(amount), observed);
-      assert.equal(result.decision.exitType, "STOP_LOSS");
-      assert.equal(result.decision.action, side === "LONG" ? "SELL" : "BUY");
-      assert.equal(result.netPnl, amount);
-      const guard = result.decision.exitGuard;
-      assert.equal(guard.positionAmount.threshold, -3);
-      assert.equal(positionAmountGuardAllowsPrice(guard, p, result.quotePrice), true);
-      for (const change of [{ orderPrice: 101 }, { quantity: 1 }, { frozenQuantity: 1 }, { side: side === "LONG" ? "SHORT" : "LONG" }])
-        assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, ...change }, result.quotePrice), false);
-      if (amount === -3) {
-        assert.equal(positionAmountGuardAllowsPrice(guard, { ...p, roundTripFee: 0 }, result.quotePrice), false);
-        assert.equal(positionAmountGuardAllowsPrice(guard, p, result.quotePrice + (side === "LONG" ? 0.01 : -0.01)), false);
-      }
-    }
-    assert.equal(positionAmountExit(p, snapshot(-3), observed + 5001), null);
-    assert.equal(positionAmountExit(p, { ...snapshot(-3), account: { positionsVerified: false } }, observed), null);
-    assert.equal(positionAmountExit({ ...p, frozenQuantity: 1 }, snapshot(-3), observed), null);
-  });
-
-  test(`${side}: exact decimal stop boundary does not round an interior amount`, () => {
-    const p = { ...position, side, orderPrice: 100, quantity: 4, roundTripFee: 0.2 };
-    const price = 100 + (side === "LONG" ? 1 : -1) * (-3 + 0.2) / 4;
-    const snapshot = { ...market, orderBook: { bids: [{ price, volume: 20 }], asks: [{ price, volume: 20 }] } };
-    const candidate = positionAmountExit(p, snapshot, observed);
-    assert.ok(candidate);
-    assert.equal(positionAmountGuardAllowsPrice(candidate.decision.exitGuard, p, price), true);
-    const inside = price + (side === "LONG" ? 0.00001 : -0.00001);
-    assert.equal(positionAmountGuardAllowsPrice(candidate.decision.exitGuard, p, inside), false);
-    snapshot.orderBook = { bids: [{ price: inside, volume: 20 }], asks: [{ price: inside, volume: 20 }] };
-    assert.equal(positionAmountExit(p, snapshot, observed), null);
-  });
-}
+for (const side of ["LONG", "SHORT"]) test(`${side}: retired fixed amount guards cannot execute after upgrade`, () => {
+  const p = { ...position, side, orderPrice: 100, roundTripFee: 1 };
+  const guard = { positionId: p.positionOrderId, heldSide: side, quantity: 2, entryPrice: 100,
+    exitType: "STOP_LOSS", expiresAt: new Date(observed + 60_000).toISOString(),
+    comparison: side === "LONG" ? "LTE" : "GTE", triggerPrice: side === "LONG" ? 99 : 101,
+    positionAmount: { threshold: -3, fees: 1 } };
+  for (const price of [95, 99, 100, 101, 105]) {
+    assert.equal(positionAmountGuardAllowsPrice(guard, p, price), false);
+    assert.equal(exitGuardAllowsPrice(guard, price, observed), false);
+  }
+});
 
 test("unknown fees stay unknown when user price-point boundary executes", () => {
   const result = positionProfitExit({ ...position, quantity: 3 }, market, observed);

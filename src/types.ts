@@ -83,6 +83,8 @@ export interface Rule {
 }
 
 export interface PendingAction {
+  entryPurpose?: "NORMAL" | "RESCUE";
+  rescuePositionIds?: string[];
   marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
   id: string;
   decisionRunId?: string | null;
@@ -126,6 +128,8 @@ export interface Forecast {
 }
 
 export interface Decision {
+  entryPurpose?: "NORMAL" | "RESCUE";
+  rescuePositionIds?: string[];
   runId?: string;
   observedAt?: string | null;
   analysisDurationMs?: number | null;
@@ -321,6 +325,7 @@ export interface TradingSession {
 }
 
 export interface Task {
+  rescueSession?: { status: "ACTIVE" | "EXITING" | "COMPLETE"; netPnl?: number | null; originalPositionIds: string[]; rescuePositionIds: string[] } | null;
   id: string;
   name: string;
   status: TaskStatus;

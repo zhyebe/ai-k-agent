@@ -954,7 +954,7 @@ for (const response of ["KEEP", "error"]) test(`current orders cancel before AI 
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("cancel-before-ai", 100);
   market.account = { positionsVerified: true, positions: [], openOrdersVerified: true,
-    openOrders: [{ orderId: "O-current", remainingQuantity: 2, filledQuantity: 1 }] };
+    openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-current", remainingQuantity: 2, filledQuantity: 1 }] };
   const events = [];
   try {
     await runAnalysis(task.id, "", { runtime: {
@@ -983,8 +983,8 @@ for (const autoDecisionEnabled of [false, true]) {
     Object.assign(task, { mode: "LIVE", autoDecisionEnabled, entryQuantity: 3, status: "MONITORING", monitoringEnabled: true, lastEntryKWindow: Date.now() });
     const market = testMarketSnapshot("pending-orders-unchanged", 103);
     market.account = { positions: [], positionsVerified: true, openOrdersVerified: true, openOrders: [
-      { orderId: "O-1", symbol: "BTC/USDT", side: "买", orderKind: "订立", orderPrice: 100, quantity: 3, filledQuantity: 1, remainingQuantity: 2 },
-      { orderId: "O-2", symbol: "BTC/USDT", side: "卖", orderPrice: 104, quantity: 1, remainingQuantity: 1 },
+      { orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", symbol: "BTC/USDT", side: "买", orderKind: "订立", orderPrice: 100, quantity: 3, filledQuantity: 1, remainingQuantity: 2 },
+      { orderTime: "2020-01-01T00:00:00Z", orderId: "O-2", symbol: "BTC/USDT", side: "卖", orderPrice: 104, quantity: 1, remainingQuantity: 1 },
     ] };
     task.market = { ...market, account: { ...market.account, openOrders: [] } };
     task.pendingAction = { ...buildPendingAction(task, { action: "BUY", marketRegime: "UP", targetSymbol: "BTC/USDT", orderType: "LIMIT", targetPrice: 100, bullishProfitProbability: 0.6 }), status: "AWAITING_FILL", source: "auto_timeout" };
@@ -1023,7 +1023,7 @@ for (const autoDecisionEnabled of [false, true]) {
       market.account = { ...market.account, positionsVerified: true,
         positions: [{ positionOrderId: "P-1", symbol: "BTC/USDT", side: "买", quantity: 1, orderPrice: 100 }],
         openOrdersVerified: true, frozenFunds: 3000,
-        openOrders: [{ orderId: "O-1", remainingQuantity: 1 }, { orderId: "O-keep", remainingQuantity: 1 }],
+        openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", remainingQuantity: 1 }, { orderTime: "2020-01-01T00:00:00Z", orderId: "O-keep", remainingQuantity: 1 }],
       };
       const cancelled = [];
       try {
@@ -1061,8 +1061,8 @@ for (const autoDecisionEnabled of [false, true]) {
         openOrdersVerified: true,
         positions: [{ positionOrderId: "P-partial", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", quantity: 1, orderPrice: 100 }],
         openOrders: [
-          { orderId: "O-cancel", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 2, filledQuantity: 1, remainingQuantity: 1 },
-          { orderId: "O-keep", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 1, filledQuantity: 0, remainingQuantity: 1 },
+          { orderTime: "2020-01-01T00:00:00Z", orderId: "O-cancel", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 2, filledQuantity: 1, remainingQuantity: 1 },
+          { orderTime: "2020-01-01T00:00:00Z", orderId: "O-keep", symbol: "BTC/USDT", side: action === "BUY" ? "买" : "卖", orderKind: "订立", quantity: 1, filledQuantity: 0, remainingQuantity: 1 },
         ],
       };
       const events = [];
@@ -1129,7 +1129,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       market.account = { positionsVerified: true, openOrdersVerified: true, positions: [
         { positionOrderId: "P-legacy", symbol: task.symbol, side: "买", quantity: 1, orderPrice: 100 },
         { positionOrderId: "P-active", symbol: task.symbol, side: "买", quantity: 2, orderPrice: 100 },
-      ], openOrders: [{ orderId: "O-cancel", symbol: task.symbol, side: "买", remainingQuantity: 1 }] };
+      ], openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-cancel", symbol: task.symbol, side: "买", remainingQuantity: 1 }] };
       task.market = structuredClone(market);
       task.pendingAction = { ...buildPendingAction(task, { action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetPositionIds: ["P-legacy"], targetSymbol: task.symbol }), status: "AWAITING_FILL", decisionRunId: "old-run", createdAt: "2026-10-10T00:00:00Z" };
       const legacyId = task.pendingAction.id;
@@ -1241,7 +1241,7 @@ test("AI KEEP cannot override the user current-order cancellation policy", async
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("keep-order", 101);
   market.account.openOrdersVerified = true;
-  market.account.openOrders = [{ orderId: "O-keep", remainingQuantity: 1 }];
+  market.account.openOrders = [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-keep", remainingQuantity: 1 }];
   try {
     await runMonitoringCycle(task.id, { runtime: {
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market,
@@ -1258,7 +1258,7 @@ test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场
   const task = insertNorthstarTask(`cancel_and_exit_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", entryQuantity: 3, status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("cancel-and-exit", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 5, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 5, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", remainingQuantity: 1 }] };
   let submitted = 0;
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -1278,7 +1278,7 @@ test("当前委托在AI分析前已撤销，随后执行本轮明确离场", asy
   const task = insertNorthstarTask(`exit_first_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("exit-first", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-1", orderKind: "订立", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", orderKind: "订立", remainingQuantity: 1 }] };
   const actions = [];
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -1298,7 +1298,7 @@ test(`AI${cancelled ? "撤销" : "未能撤销"}旧离场委托后${cancelled ? 
   const task = insertNorthstarTask(`replace_exit_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("replace-exit", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 2, frozenQuantity: 2, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-old", orderKind: "转让", remainingQuantity: 2, positionOrderId: "P-1" }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 2, frozenQuantity: 2, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 2, positionOrderId: "P-1" }] };
   task.market = market;
   task.pendingAction = { ...buildPendingAction(task, { action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], targetSymbol: "BTC/USDT", orderType: "LIMIT", targetPrice: 110 }), status: "AWAITING_FILL", source: "auto_timeout", entrustedOrderIds: ["O-old"] };
   const actions = [];
@@ -1322,7 +1322,7 @@ test(`撤单${failure}后${autoDecisionEnabled ? "自动" : "手动"}模式持�
   const task = insertNorthstarTask(`retry_cancel_${autoDecisionEnabled}_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("retry-cancel", 100);
-  market.account = { availableFunds: 100, frozenFunds: 3000, openOrdersVerified: true, openOrders: [{ orderId: "O-1", remainingQuantity: 1, frozenMargin: 3000 }] };
+  market.account = { availableFunds: 100, frozenFunds: 3000, openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", remainingQuantity: 1, frozenMargin: 3000 }] };
   let rounds = 0;
   let attempts = 0;
   const runtime = {
@@ -1366,7 +1366,7 @@ test("启动时已有转让委托，按AI关联的持仓先撤单再离场", asy
   const task = insertNorthstarTask(`startup_transfer_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("startup-transfer", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, frozenQuantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderId: "O-old", orderKind: "转让", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, frozenQuantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 1 }] };
   const actions = [];
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -2544,11 +2544,11 @@ for (const autoDecisionEnabled of [false, true]) {
       Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
       const market = testMarketSnapshot("range-cancel", 100);
       market.account = { positionsVerified: true, positions: [], openOrdersVerified: true, openOrders: [
-        { orderId: "equal", orderPrice: 100, remainingQuantity: 1 },
-        { orderId: "above", orderPrice: 200, remainingQuantity: 2 },
-        { orderId: "below", orderPrice: 50, remainingQuantity: 1 },
-        { orderId: "no-price", remainingQuantity: 1 },
-        { orderId: "filled", orderPrice: 100, remainingQuantity: 0 },
+        { orderTime: "2020-01-01T00:00:00Z", orderId: "equal", orderPrice: 100, remainingQuantity: 1 },
+        { orderTime: "2020-01-01T00:00:00Z", orderId: "above", orderPrice: 200, remainingQuantity: 2 },
+        { orderTime: "2020-01-01T00:00:00Z", orderId: "below", orderPrice: 50, remainingQuantity: 1 },
+        { orderTime: "2020-01-01T00:00:00Z", orderId: "no-price", remainingQuantity: 1 },
+        { orderTime: "2020-01-01T00:00:00Z", orderId: "filled", orderPrice: 100, remainingQuantity: 0 },
       ] };
       const events = [];
       try {

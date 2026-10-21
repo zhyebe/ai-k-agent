@@ -110,9 +110,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
       assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
       assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
-      assert.match(prompt, /整个账户全部持仓可成交、扣费后的合计净利润严格大于0/);
-      assert.match(prompt, /原多单持续下跌扩亏时可保留原单新开 SELL/);
-      assert.match(prompt, /原空单持续上涨扩亏时可保留原单新开 BUY/);
+      assert.match(prompt, /整个账户全部持仓可成交、扣手续费和预计平仓成本后的合计净利润>=0，立即整体离场/);
+      assert.match(prompt, /原多单持续下跌扩亏时保留原单另开一笔 SELL/);
+      assert.match(prompt, /原空单持续上涨扩亏时保留原单另开一笔 BUY/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);
       const value = JSON.stringify({ action: "BUY", marketRegime: "UP", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,

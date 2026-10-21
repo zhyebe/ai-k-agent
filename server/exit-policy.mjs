@@ -4,7 +4,6 @@ import { effectiveTradingSession } from "./trading-session.mjs";
 export const DEFAULT_SESSION_CLOSE = Object.freeze({ leadMinutes: 5, timezone: "Asia/Shanghai" });
 export const POSITION_MIN_PROFIT_POINTS = 1;
 export const POSITION_MAX_PROFIT_POINTS = 4;
-export const POSITION_STOP_LOSS_AMOUNT = -3;
 
 export function parseSessionClose(value = DEFAULT_SESSION_CLOSE) {
   if (!value || typeof value !== "object") return null;
@@ -126,30 +125,12 @@ export function positionProfitExit(position, market, now = Date.now()) {
     { positionPoints: { threshold, fees: pnl.fees } });
 }
 
-export function positionAmountExit(position, market, now = Date.now()) {
-  if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) !== 0) return null;
-  const quote = executableExitQuote(market, position, now);
-  const pnl = quote && exitNetPnl(position, quote.price);
-  // Whole-position amount after known costs. Unknown fees remain unknown,
-  // so this case uses gross PnL without claiming verified net profit.
-  if (!pnl) return null;
-  const long = heldDirection(position) === "LONG";
-  // Compare equivalent price boundaries to avoid subtraction error at exact
-  // decimal amounts. Never round an amount inside the range to a boundary.
-  const lossPrice = positionAmountTriggerPrice(pnl, long, POSITION_STOP_LOSS_AMOUNT);
-  const loss = long ? quote.price <= lossPrice : quote.price >= lossPrice;
-  if (!loss) return null;
-  return positionExitCandidate(position, quote, pnl, now, "STOP_LOSS", lossPrice,
-    { positionAmount: { threshold: POSITION_STOP_LOSS_AMOUNT, fees: pnl.fees } });
-}
-
 export function positionAmountGuardAllowsPrice(guard, position, price) {
-  const boundary = guard?.positionPoints || guard?.positionAmount;
+  if (guard?.positionAmount) return false; // Retired fixed-amount exits cannot resume after upgrade.
+  const boundary = guard?.positionPoints;
   if (!boundary) return true;
   const profit = guard.exitType === "TAKE_PROFIT";
-  if ((guard.positionPoints && guard.positionAmount)
-    || (guard.positionPoints ? boundary.threshold !== (profit ? POSITION_MIN_PROFIT_POINTS : POSITION_MAX_PROFIT_POINTS)
-      : profit || boundary.threshold !== POSITION_STOP_LOSS_AMOUNT)
+  if (boundary.threshold !== (profit ? POSITION_MIN_PROFIT_POINTS : POSITION_MAX_PROFIT_POINTS)
     || (!profit && guard.exitType !== "STOP_LOSS")
     || !position || position.positionOrderId !== guard.positionId || heldDirection(position) !== guard.heldSide
     || Number(position.quantity) !== guard.quantity || Number(position.frozenQuantity || 0) !== 0
@@ -159,13 +140,9 @@ export function positionAmountGuardAllowsPrice(guard, position, price) {
   const pnl = exitNetPnl({ ...position, roundTripFee: fees }, price);
   if (!pnl) return false;
   const long = guard.heldSide === "LONG";
-  if (guard.positionPoints) {
-    if (profit) return isNonLosingExit({ ...position, roundTripFee: fees }, price);
-    const ceiling = pnl.entryPrice + (long ? 1 : -1) * POSITION_MAX_PROFIT_POINTS;
-    return pnl.netPnl !== null && pnl.netPnl < 0 && (long ? pnl.exitPrice >= ceiling : pnl.exitPrice <= ceiling);
-  }
-  const triggerPrice = positionAmountTriggerPrice(pnl, long, boundary.threshold);
-  return long === profit ? pnl.exitPrice >= triggerPrice : pnl.exitPrice <= triggerPrice;
+  if (profit) return isNonLosingExit({ ...position, roundTripFee: fees }, price);
+  const ceiling = pnl.entryPrice + (long ? 1 : -1) * POSITION_MAX_PROFIT_POINTS;
+  return pnl.netPnl !== null && pnl.netPnl < 0 && (long ? pnl.exitPrice >= ceiling : pnl.exitPrice <= ceiling);
 }
 
 export function normalizeExitPlans(value) {
@@ -265,7 +242,7 @@ export function realtimeValueAbove(account, threshold) {
 }
 
 export function exitGuardAllowsPrice(guard, price, now = Date.now()) {
-  if (!guard || !Number.isFinite(Date.parse(guard.expiresAt)) || now >= Date.parse(guard.expiresAt) || !Number.isFinite(Number(price)) || Number(price) <= 0) return false;
+  if (!guard || guard.positionAmount || !Number.isFinite(Date.parse(guard.expiresAt)) || now >= Date.parse(guard.expiresAt) || !Number.isFinite(Number(price)) || Number(price) <= 0) return false;
   if (guard.comparison === "GT") return Number(price) > guard.triggerPrice;
   if (guard.comparison === "LT") return Number(price) < guard.triggerPrice;
   if (guard.comparison === "GTE") return Number(price) >= guard.triggerPrice;

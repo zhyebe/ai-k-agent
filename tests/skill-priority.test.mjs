@@ -34,8 +34,8 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.doesNotMatch(content, /realtimeValueChange >= 2/);
   assert.match(content, /亏损时比较等待恢复盈利与及时止损/);
   assert.match(content, /多周期结构/);
-  assert.match(content, /没有 AI 计划也执行 1 点起兑现、4 点上限和 -3 金额止损/);
-  assert.match(content, /程序执行用户点差边界、-3 金额止损/);
+  assert.match(content, /没有 AI 计划也执行 1 点起兑现、4 点上限/);
+  assert.match(content, /取消固定整仓金额 ≤ -3 自动止损/);
   assert.match(content, /previousAnalysis\.decision\.positionAudit\.positions/);
   assert.match(content, /-1 点变 -3 点是亏损扩大/);
   assert.match(content, /亏 1 个点先结合趋势/);

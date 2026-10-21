@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { exitNetPnl, exitGuardAllowsPrice, isNonLosingExit, positionAmountExit, positionAmountGuardAllowsPrice, positionProfitExit, validateExitPlans } from "../server/exit-policy.mjs";
+import { exitNetPnl, exitGuardAllowsPrice, isNonLosingExit, positionAmountGuardAllowsPrice, positionProfitExit, validateExitPlans } from "../server/exit-policy.mjs";
 
 const now = Date.parse("2026-10-20T10:00:00+08:00");
 for (const side of ["LONG", "SHORT"]) {
@@ -14,7 +14,6 @@ for (const side of ["LONG", "SHORT"]) {
   test(`${side}: 1–4 means price points, never total cash, account PnL or candle count`, () => {
     for (const points of [0, 0.5, 0.99999]) {
       assert.equal(positionProfitExit(position, market(points), now), null);
-      assert.equal(positionAmountExit(position, market(points), now), null, "cash profit above 5 must not close below 1 point");
       assert.equal(isNonLosingExit(position, price(points)), false);
     }
     for (const points of [1, 2, 3, 4, 6]) {
