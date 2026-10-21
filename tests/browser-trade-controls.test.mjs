@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import test, { after, before } from "node:test";
+import test, { after, afterEach, before } from "node:test";
 import { chromium } from "playwright";
-import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, scanBrowserPage, setBrowserSessionFactory } from "../server/browser.mjs";
+import { closeAllBrowserSessions, openBrowserPage, readVisiblePage, resolveSnapshotControl, scanBrowserPage, setBrowserSessionFactory } from "../server/browser.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
-import { cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
+import { browserExtract, cancelOpenOrders, continueManualEntry, fillSuggestionForm, isOrderCancellationResponse, readTradeControls, submitSuggestionForm } from "../server/tools.mjs";
 import { createProvider } from "../server/provider.mjs";
 
 import { positionAmountExit, positionProfitExit } from "../server/exit-policy.mjs";
@@ -27,6 +27,9 @@ after(async () => {
   await closeAllBrowserSessions();
   setBrowserSessionFactory(null);
   await browser?.close();
+});
+afterEach(async () => {
+  assert.equal(await page.evaluate(() => window.historyVisits), 0, "automation must never open historical orders");
 });
 
 test("a reordered holding keeps its exact identity instead of clicking the old row index", async () => {
@@ -333,8 +336,8 @@ for (const scenario of ["cancelRejected", "fillDuringCancel", "silentCancellatio
     await page.reload();
     await page.evaluate((name) => { window[name] = true; }, scenario);
     const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
-    assert.equal(result.results[0].code, scenario === "cancelRejected" ? "ORDER_CANCEL_REJECTED" : scenario === "fillDuringCancel" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCELLED", JSON.stringify(result));
-    assert.equal(result.results[0].cancelled, scenario === "silentCancellation");
+    assert.equal(result.results[0].code, scenario === "cancelRejected" ? "ORDER_CANCEL_REJECTED" : scenario === "fillDuringCancel" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCEL_UNVERIFIED", JSON.stringify(result));
+    assert.equal(result.results[0].cancelled, false);
   });
 }
 
@@ -348,7 +351,6 @@ test("missing exact order never cancels an order with a similar ID", async () =>
 test("unfinished cancellation dialog is dismissed automatically and a later attempt can complete", async () => {
   await page.reload();
   await page.evaluate(() => {
-    document.querySelector("#history table").__vue__ = { pageData: { total: 0 }, isNetWrong: false };
     window.cancelObserver = new MutationObserver(() => {
       const box = document.querySelector(".el-dialog");
       if (!box || box.dataset.testDisabled) return;
@@ -367,103 +369,77 @@ test("unfinished cancellation dialog is dismissed automatically and a later atte
   assert.equal(second.results[0].cancelled, true);
 });
 
-test("silent cancellation is verified across historical-order pages", async () => {
+test("historical-order controls are excluded from AI snapshots and rejected at execution", async () => {
   await page.reload();
+  const snapshot = await scanBrowserPage(page);
+  assert.equal(snapshot.controls.some(control => /历史委托/.test(control.label)), false);
+  assert.equal(await activateTradeControl(page, "历史委托"), false);
   await page.evaluate(() => {
-    window.silentCancellation = true;
-    const history = document.querySelector("#history");
-    history.querySelector("table").__vue__ = { pageData: { total: 1 }, isNetWrong: false };
-    const pagination = document.createElement("div");
-    pagination.className = "el-pagination";
-    pagination.innerHTML = '<button class="btn-prev" disabled>previous</button><ul class="el-pager"><li class="number active">1</li><li class="number">2</li></ul><button class="btn-next">next</button>';
-    history.append(pagination);
-    const storage = document.createElement("tbody");
-    let current = 1;
-    const render = () => {
-      if (current === 1) storage.append(...history.querySelectorAll("tbody tr"));
-      else history.querySelector("tbody").append(...storage.children);
-      pagination.querySelector(".btn-prev").disabled = current === 1;
-      pagination.querySelector(".btn-next").disabled = current === 2;
-      [...pagination.querySelectorAll("li")].forEach((node, index) => node.classList.toggle("active", index === current - 1));
-    };
-    new MutationObserver(() => { if (current === 1 && history.querySelector("tbody tr")) render(); }).observe(history.querySelector("tbody"), { childList: true });
-    pagination.querySelector(".btn-next").onclick = () => { current = 2; render(); };
-    pagination.querySelector(".btn-prev").onclick = () => { current = 1; render(); };
+    const tab = [...document.querySelectorAll(".head_l_btns")].find(node => node.textContent === "历史委托");
+    tab.dataset.axiomControl = "stale-history-control";
   });
-  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
-  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
+  assert.equal(await resolveSnapshotControl(page, "stale-history-control"), null);
 });
 
-test("historical-order verification waits for the query after its empty table mounts", async () => {
+for (const scan of ["visible", "controls"]) for (const currentAvailable of [true, false]) {
+  test(`${scan} scan ${currentAvailable ? "leaves" : "rejects"} an already-open history pane before reading account data`, async () => {
+    await page.reload();
+    await page.evaluate(() => {
+      document.querySelector("#positions").style.display = "none";
+      const history = document.querySelector("#history");
+      history.style.display = "";
+      const root = document.createElement("div");
+      root.id = "hisPage";
+      root.append(...history.childNodes);
+      history.append(root);
+      root.querySelector("tbody").innerHTML = '<tr><td>HISTORICAL-ORDER-SECRET</td></tr>';
+    });
+    if (!currentAvailable) await page.getByText("当前委托", { exact: true }).evaluate(node => node.remove());
+    const snapshot = scan === "visible" ? await readVisiblePage("trade-fixture", { quick: true }) : await scanBrowserPage(page);
+    assert.equal(snapshot.ok, currentAvailable, JSON.stringify(snapshot));
+    assert.equal(JSON.stringify(snapshot).includes("HISTORICAL-ORDER-SECRET"), false);
+    assert.equal(await page.locator("#orders").isVisible(), currentAvailable);
+  });
+}
+
+test("text extraction cannot read the hidden historical-order panel by selector", async () => {
   await page.reload();
   await page.evaluate(() => {
-    window.silentCancellation = true;
-    const table = document.querySelector("#history table");
-    table.__vue__ = { pageData: { total: null }, isNetWrong: false };
-    const tab = [...document.querySelectorAll(".head_l_btns")].find((node) => node.textContent === "历史委托");
-    tab.onclick = () => {
-      orderPane("history");
-      const rows = [...table.querySelector("tbody").children];
-      table.querySelector("tbody").replaceChildren();
-      setTimeout(() => {
-        table.querySelector("tbody").append(...rows);
-        table.__vue__.pageData.total = rows.length;
-      }, 600);
-    };
-  });
-  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
-  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
-  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
-});
-
-test("cancellation history queries today when the website initially excludes today's orders", async () => {
-  await page.reload();
-  const dates = await page.evaluate(() => {
-    window.silentCancellation = true;
-    window.historyQueries = [];
-    const dateString = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-    const today = dateString(new Date());
-    const previousDay = new Date();
-    previousDay.setDate(previousDay.getDate() - 1);
-    const yesterday = dateString(previousDay);
-    const section = document.querySelector("#history");
-    const table = section.querySelector("table");
     const root = document.createElement("div");
     root.id = "hisPage";
-    root.innerHTML = '<div class="el-date-editor--daterange"><input placeholder="开始日期"><input placeholder="结束日期"></div><button>查询</button>';
-    section.append(root);
-    root.append(table);
-    for (const input of root.querySelectorAll("input")) input.value = yesterday;
-    table.__vue__ = { pageData: { total: 0 }, tableData: [], isNetWrong: false };
-    let rows = [];
-    const tab = [...document.querySelectorAll(".head_l_btns")].find((node) => node.textContent === "历史委托");
-    tab.onclick = () => {
-      orderPane("history");
-      rows = [...table.querySelector("tbody").children];
-      table.querySelector("tbody").replaceChildren();
-    };
-    root.querySelector("button").onclick = () => {
-      const range = [...root.querySelectorAll("input")].map((input) => input.value);
-      window.historyQueries.push(range);
-      setTimeout(() => {
-        const matching = range[0] <= today && range[1] >= today ? rows : [];
-        table.querySelector("tbody").replaceChildren(...matching);
-        table.__vue__.tableData = matching;
-        table.__vue__.pageData.total = matching.length;
-      }, 400);
-    };
-    return { today, yesterday };
+    root.textContent = "HISTORICAL-ORDER-SECRET";
+    document.querySelector("#history").append(root);
   });
-  const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
-  assert.equal(result.results[0].code, "ORDER_CANCELLED", JSON.stringify(result));
-  assert.deepEqual(await page.evaluate(() => window.historyQueries), [[dates.yesterday, dates.today]]);
-  assert.deepEqual(await page.evaluate(() => window.cancelled), [{ id: "O-1", remaining: 2 }]);
+  const snapshot = await browserExtract({ sessionId: "trade-fixture", selector: "#hisPage" });
+  assert.equal(snapshot.code, "HISTORICAL_ORDERS_DISABLED");
+  assert.equal(JSON.stringify(snapshot).includes("HISTORICAL-ORDER-SECRET"), false);
 });
+
+for (const status of ["已撤单", "部分成交后撤单", "已成交"]) {
+  test(`cancellation reads terminal status ${status} only from the current order row`, async () => {
+    await page.reload();
+    await page.evaluate(status => {
+      const original = window.cancelSelected;
+      window.cancelSelected = () => {
+        const row = [...document.querySelectorAll("#orders tbody tr")].find(row => row.querySelector("input").checked);
+        original();
+        const box = document.querySelector(".el-dialog");
+        box.querySelector("button").onclick = () => {
+          row.cells[9].textContent = status;
+          row.cells[8].textContent = "0";
+          box.remove();
+        };
+      };
+    }, status);
+    const result = await cancelOpenOrders({ sessionId: "trade-fixture", orderIds: ["O-1"] });
+    assert.equal(result.results[0].code, status === "已成交" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCELLED", JSON.stringify(result));
+    assert.equal(result.results[0].cancelled, status !== "已成交");
+  });
+}
 
 test("cancellation waits for the result when confirmation closes before the request finishes", async () => {
   await page.reload();
   await page.evaluate(() => {
-    document.querySelector("#history table").__vue__ = { pageData: { total: 0 }, isNetWrong: false };
     const original = window.cancelSelected;
     window.cancelSelected = () => {
       original();

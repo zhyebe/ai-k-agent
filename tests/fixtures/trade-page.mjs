@@ -35,8 +35,8 @@ export const tradeFixture = `<!doctype html><html><head><title>Trade controls fi
 </tbody></table>
 <script>
 window.entries=[];window.exits=[];window.agreementChanges=0;window.wrongStopDialog=0;window.wrongGlobalExit=0;
-window.cancelled=[];window.wrongCancelAll=0;
-function orderPane(name){for(const id of ['positions','orders','history'])document.querySelector('#'+id).style.display=id===name?'':'none'}
+window.cancelled=[];window.wrongCancelAll=0;window.historyVisits=0;
+function orderPane(name){if(name==='history')window.historyVisits++;for(const id of ['positions','orders','history'])document.querySelector('#'+id).style.display=id===name?'':'none'}
 function cancelSelected(){const selected=[...document.querySelectorAll('#orders tbody tr')].filter(row=>row.querySelector('input').checked);if(selected.length!==1){notice('撤单失败，选单错误');return}const row=selected[0];const box=document.createElement('div');box.className='el-dialog';box.innerHTML='您确定要撤单吗?<button>确认</button><button>取消</button>';box.querySelector('button').onclick=()=>{box.remove();if(window.cancelRejected){notice('撤单失败');return}if(window.fillDuringCancel){row.cells[9].textContent='已成交';row.cells[8].textContent='0';document.querySelector('#history tbody').append(row);notice('委托已成交');return}window.cancelled.push({id:row.cells[1].textContent,remaining:Number(row.cells[8].textContent)});row.cells[9].textContent=Number(row.cells[7].textContent)>0?'部分成交后撤单':'已撤单';document.querySelector('#history tbody').append(row);if(!window.silentCancellation)notice('撤单成功')};document.body.append(box)}
 function direction(side){document.querySelector('#buy').style.display=side==='BUY'?'':'none';document.querySelector('#sell').style.display=side==='SELL'?'':'none'}
 function pane(name){document.querySelector('#entry').style.display=name==='entry'?'':'none';document.querySelector('#transfer').style.display=name==='transfer'?'':'none'}

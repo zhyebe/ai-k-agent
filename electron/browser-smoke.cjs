@@ -38,6 +38,13 @@ module.exports = async function inspectBrowser({ app }, input) {
     const exit = await call("submitSuggestionForm", { sessionId, confirmationId: "smoke-exit", action: "SELL", price: 21, quantity: 3, orderType: "LIMIT", exitType: "TAKE_PROFIT", targetPositionIds: ["P-1", "P-2"] });
     if (!exit.ok) throw new Error(JSON.stringify(exit));
     const { entries, exits } = await page.evaluate(() => ({ entries: window.entries, exits: window.exits }));
+    const controls = await call("browserScanControls", { sessionId });
+    if (!controls.ok || controls.controls.some(control => /历史委托/.test(control.label))) throw new Error("SMOKE_HISTORY_CONTROL_EXPOSED");
+    const cancellation = await call("cancelOpenOrders", { sessionId, orderIds: ["O-1"] });
+    if (!cancellation.ok) throw new Error(JSON.stringify(cancellation));
+    await page.evaluate(() => { window.silentCancellation = true; });
+    const unverifiedCancellation = await call("cancelOpenOrders", { sessionId, orderIds: ["O-10"] });
+    const historyVisits = await page.evaluate(() => window.historyVisits);
     // Exercise the shipped Electron/Playwright runtime while Windows hides or
     // minimizes the trade window, including model-unavailable execution and
     // the real final price/position guard. All requests stay on a local fixture.
@@ -70,12 +77,12 @@ module.exports = async function inspectBrowser({ app }, input) {
         const result = await call("submitSuggestionForm", { sessionId, confirmationId: `smoke-${state}-${side}`, ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: position.quantity, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ state, side, ...result }));
       }
-      background.push({ state, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits })) });
+      background.push({ state, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits, historyVisits: window.historyVisits })) });
     }
     await runtime.setSmokeWindowState("visible");
     await page.screenshot({ path: input.screenshot });
     const closed = await call("closeBrowserSession", { sessionId: "task:fixture" });
-    return { packaged: app.isPackaged, mode: opened.mode, title: opened.title, orderBook, manualFilled: manual.filled, manualBeforeClick, manualContinued: continued.continued, entries, exits, background, sessions: ids.length, closed, remainingSessions: browser.browserSessionIds().length };
+    return { packaged: app.isPackaged, mode: opened.mode, title: opened.title, orderBook, manualFilled: manual.filled, manualBeforeClick, manualContinued: continued.continued, entries, exits, cancellation, unverifiedCancellation, historyVisits, background, sessions: ids.length, closed, remainingSessions: browser.browserSessionIds().length };
   } finally {
     await runtime.closeBrowserRuntime();
   }

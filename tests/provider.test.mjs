@@ -483,6 +483,8 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
     const body = JSON.parse(options.body);
     const prompt = body.messages[0].content;
     assert.match(prompt, /Every round inspect every account.openOrders/);
+    assert.match(prompt, /from the current order list only/);
+    assert.match(prompt, /Never open, query, scan or operate the historical order list/);
     assert.match(prompt, /Do not label a negative net result TAKE_PROFIT/);
     assert.match(prompt, /User-configured entry quantity: 3/);
     assert.equal(JSON.parse(body.messages.at(-1).content).account.openOrders[0].orderId, "O-1");
@@ -1089,6 +1091,7 @@ test("provider browser control returns visible click actions", async () => {
     for await (const chunk of request) body += chunk;
     const payload = JSON.parse(body);
     assert.match(payload.messages[0].content, /built-in browser/);
+    assert.match(payload.messages[0].content, /Never open, query, scan or operate 历史委托/);
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ goal: "ENTRY_BUY_UP", actions: [{ type: "click", label: "买入订立" }] }) } }] }));
   });

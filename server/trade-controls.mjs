@@ -31,13 +31,14 @@ async function findControl(root, labels, selector = BUTTONS, allowPartial = true
 }
 
 export async function activateTradeControl(page, label) {
+  if (String(label).replace(/\s+/g, "") === "历史委托") return false;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const control = await findControl(page, [label], TABS, false);
     if (!control) {
       await page.waitForTimeout(150);
       continue;
     }
-    const active = ["当前委托", "持仓明细", "历史委托"].includes(label) && await control.evaluate((node) => {
+    const active = ["当前委托", "持仓明细"].includes(label) && await control.evaluate((node) => {
       return node.getAttribute("aria-selected") === "true"
         || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active");
     }).catch(() => false);
@@ -290,7 +291,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     if (finished()) return { ok: true, confirmed };
     if (cancelOrder && confirmed) {
       const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
-      // History/current orders verify the outcome; do not wait for a toast after the modal closes.
+      // The caller verifies current orders and fresh feedback after the modal closes.
       if (!dialogs.some((text) => /撤单|撤销.*委托/.test(text))) return { ok: true, confirmed };
     }
     const hint = await page.locator(".el-message:visible, .el-notification__content:visible").evaluateAll((nodes, token) => nodes

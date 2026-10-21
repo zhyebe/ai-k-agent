@@ -8,7 +8,7 @@ import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession
 import { requestBrowserActions } from "./provider.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
-import { activateCurrentOrders, clickOrderCancellation, readHistoricalOrderStatus } from "./order-controls.mjs";
+import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
 
@@ -313,7 +313,11 @@ export async function browserExtract({ sessionId = "default", selector = "body" 
     if (selector === "body") return { ...snapshot, selector, text: snapshot.visibleText.slice(0, 12000), capturedAt: new Date(snapshot.capturedAt).toISOString() };
     const page = await getBrowserPage(sessionId);
     if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
-    const text = await page.locator(selector).innerText({ timeout: 10000 });
+    const target = page.locator(selector);
+    if (await target.evaluate(node => Boolean(node.closest("#hisPage, [role='tabpanel'][aria-label='历史委托']")))) {
+      return { ok: false, code: "HISTORICAL_ORDERS_DISABLED", message: "只允许读取当前委托和真实持仓" };
+    }
+    const text = await target.innerText({ timeout: 10000 });
     return { ok: true, sessionId, selector, text: String(text).slice(0, 12000), capturedAt: new Date().toISOString() };
   } catch (error) {
     return { ok: false, code: "EXTRACT_FAILED", message: error.message };
@@ -875,13 +879,13 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
       let hint = await readTradePageHint(page, baselineToken);
       let status = "";
       if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
-        status = await readHistoricalOrderStatus(page, orderId);
+        status = /委托已成交|订单已成交/.test(hint) ? "已成交" : await readCurrentOrderStatus(page, orderId);
         // Closing the confirmation is not the cancellation result. A slow request
-        // can still be pending when the first historical-order query completes.
+        // can still be pending when the current order list is first checked.
         if (!/^(已撤单|部分成交后撤单|已成交)$/.test(status) && (dialogs.confirmed || response.peek())) {
           hint = (await observeTradeFeedback(page, response, baselineToken)).pageHint;
           if (tradePageHintKind(hint) !== "rejected" && !(/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted")) {
-            status = await readHistoricalOrderStatus(page, orderId);
+            status = /委托已成交|订单已成交/.test(hint) ? "已成交" : await readCurrentOrderStatus(page, orderId);
           }
         }
       }
@@ -890,9 +894,11 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
       } else if (/撤单|撤销/.test(hint) && tradePageHintKind(hint) === "submitted") {
         results.push({ orderId, ok: true, cancelled: true, code: "ORDER_CANCELLED", message: hint });
       } else {
-        // A vanished live row may have filled while cancellation was pending. Verify history.
+        // Disappearance alone cannot distinguish cancellation from a fill.
+        // Leave it unverified for the next current-order/position reconciliation.
         const cancelled = /^(已撤单|部分成交后撤单)$/.test(status);
-        results.push({ orderId, ok: cancelled, cancelled, code: cancelled ? "ORDER_CANCELLED" : status === "已成交" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCEL_UNVERIFIED", status });
+        results.push({ orderId, ok: cancelled, cancelled, code: cancelled ? "ORDER_CANCELLED" : status === "已成交" ? "ORDER_ALREADY_FILLED" : "ORDER_CANCEL_UNVERIFIED", status,
+          ...(!cancelled && status !== "已成交" ? { message: "当前委托未能确认撤单结果，继续核对当前委托和真实持仓" } : {}) });
       }
     } catch (error) {
       results.push({ orderId, ok: false, cancelled: false, code: "ORDER_CANCEL_FAILED", message: error.message });

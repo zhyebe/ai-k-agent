@@ -36,12 +36,17 @@ async function main() {
     assert.equal(result.manualContinued, true);
     assert.deepEqual(result.entries.map((item) => item.side), ["BUY", "SELL"]);
     assert.deepEqual(result.exits, [{ id: "P-1", price: "21", quantity: "2" }, { id: "P-2", price: "21", quantity: "1" }]);
+    assert.equal(result.cancellation.results[0].code, "ORDER_CANCELLED");
+    assert.equal(result.unverifiedCancellation.results[0].code, "ORDER_CANCEL_UNVERIFIED");
+    assert.equal(result.unverifiedCancellation.results[0].cancelled, false);
+    assert.equal(result.historyVisits, 0);
     assert.deepEqual(result.background.map(item => item.state), ["minimized", "hidden"]);
     for (const item of result.background) {
       assert.ok(item.windowsAfter.length > 0);
       assert.ok(item.windowsAfter.every(window => !window.minimized && window.visible), "execution restores the browser surface before Playwright actions");
       assert.deepEqual(item.entries.map(entry => entry.side), ["BUY", "SELL"]);
       assert.deepEqual(item.exits, [{ id: "P-1", price: "100", quantity: "2" }, { id: "P-10", price: "100", quantity: "1" }]);
+      assert.equal(item.historyVisits, 0);
     }
     assert.equal(result.orderBook.bids[0].price, 100);
     assert.equal(result.orderBook.asks[0].price, 101);

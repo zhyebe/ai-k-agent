@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 import { activateTradeControl } from "./trade-controls.mjs";
-import { collectCurrentOrderTables, collectPositionTables } from "./order-controls.mjs";
+import { collectCurrentOrderTables, collectPositionTables, ensureCurrentAccountView } from "./order-controls.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -521,6 +521,7 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
   const session = sessions.has(key) ? await getSession(key) : null;
   if (!session) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先打开目标网页" };
   try {
+    await ensureCurrentAccountView(session.page);
     const orderTables = inspectPositions && accountScope !== "positions" ? await collectCurrentOrderTables(session.page, collectTables) : [];
     const positionTables = inspectPositions ? await collectPositionTables(session.page, collectTables) : [];
     const raw = await session.page.evaluate(() => ({
@@ -679,6 +680,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", controls: [] };
   const token = `axiom-snapshot-${Date.now()}-${crypto.randomBytes(6).toString("hex")}`;
   try {
+    await ensureCurrentAccountView(page);
     const snapshot = await page.evaluate(({ token: snapshotToken, max: limit, textLimit, targetIds }) => {
       const visible = (node) => {
         if (!node || !(node instanceof Element)) return false;
@@ -743,6 +745,7 @@ export async function scanBrowserPage(page, { maxControls = 120, maxText = 12000
         const type = compact(checkbox?.type || node.getAttribute("type") || (node instanceof HTMLInputElement ? node.type : ""), 30);
         const sensitiveValue = ["password", "text", "tel", "email"].includes(type.toLowerCase());
         const label = compact((!sensitiveValue && node.value) || labelFor(node) || node.innerText || node.textContent, 120);
+        if ([label, node.value, node.getAttribute("aria-label"), node.textContent].some(value => String(value || "").replace(/\s+/g, "") === "历史委托")) return;
         const placeholder = compact(node.getAttribute("placeholder"), 120);
         const name = compact(node.getAttribute("name"), 80);
         const text = compact(node.innerText || node.textContent, 160);
@@ -781,6 +784,8 @@ export async function resolveSnapshotControl(page, controlId, { role = "", targe
   const locator = page.locator(`[data-axiom-control="${id.replace(/"/g, "\\\"")}"]`).first();
   try {
     if (await locator.count() !== 1 || !await locator.isVisible({ timeout: 800 }) || await locator.isDisabled({ timeout: 800 }).catch(() => true)) return null;
+    if (await locator.evaluate(node => Boolean(node.closest("#hisPage, [role='tabpanel'][aria-label='历史委托']"))
+      || [node.value, node.getAttribute("aria-label"), node.textContent].some(value => String(value || "").replace(/\s+/g, "") === "历史委托"))) return null;
     if (role && String(await locator.getAttribute("role", { timeout: 800 }) || "") !== role && !await locator.evaluate((node, expected) => {
       if (expected === "button") return node.matches("button, input[type='button'], input[type='submit'], a, [role='button'], [role='tab']")
         || (!node.matches("input, textarea, select, [contenteditable='true'], [role]")
