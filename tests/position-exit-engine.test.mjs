@@ -2,7 +2,7 @@ import "./fixtures/open-market-clock.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { buildPendingAction, confirmPendingAction, runAnalysis, runPositionExitCycle, startTask, stopAllControllers, stopController, stopTask } from "../server/engine.mjs";
-import { validateExitPlans } from "../server/exit-policy.mjs";
+import { exitNetPnl, validateExitPlans } from "../server/exit-policy.mjs";
 import { requestDecision } from "../server/provider.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
 import { state } from "../server/store.mjs";
@@ -24,6 +24,71 @@ function setup(id, positions, extras = {}) {
   return { task, market, runtime, submitted, cancelled };
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
+
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide}: counter-trend rescue opens the opposite side and preserves the original protection`, async () => {
+    const position = { ...long("original"), side: heldSide, orderPrice: heldSide === "LONG" ? 107 : 104, roundTripFee: 0.2 };
+    const f = setup(`rescue-entry-${automatic}-${heldSide}`, [position], { autoDecisionEnabled: automatic });
+    const action = heldSide === "LONG" ? "SELL" : "BUY";
+    const forms = [];
+    await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
+      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+      observeMarket: async () => f.market,
+      fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true }; },
+      requestDecision: async () => ({ action, targetSymbol: "DGKZ", orderType: "MARKET",
+        bullishProfitProbability: 0.6, bearishProfitProbability: 0.6, riskFlags: [], evidenceIds: [],
+        holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", rationale: "保留 original，反向补救，原保护继续有效" },
+        exitPlans: [{ positionId: "original", heldSide, quantity: 1, validForSec: 300,
+          takeProfitPrice: heldSide === "LONG" ? 109 : 102, stopLossPrice: heldSide === "LONG" ? 104.5 : 106.5 }],
+      }),
+    } });
+    const writes = automatic ? f.submitted : forms;
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].action, action);
+    assert.equal(writes[0].quantity, 1);
+    assert.equal(writes[0].exitType || null, null);
+    assert.deepEqual(writes[0].targetPositionIds, []);
+    assert.deepEqual(f.market.account.positions, [position]);
+    assert.equal(f.task.exitPlans[0].positionId, "original");
+    assert.equal(f.task.exitPlans[0].stopLossPrice, heldSide === "LONG" ? 104.5 : 106.5);
+  });
+}
+
+for (const automatic of [false, true]) {
+  test(`${automatic ? "automatic" : "manual"}: AI-selected account recovery exit closes losing, small-profit and other-instrument legs`, async () => {
+    const positions = [
+      { ...long("original-loss"), orderPrice: 101, roundTripFee: 0.2 },
+      { ...long("rescue-short"), side: "SHORT", orderPrice: 102.5, roundTripFee: 0.2 },
+      { ...long("other-instrument"), symbol: "DGJJ", symbolName: "另一商品", orderPrice: 200, roundTripFee: 0.2 },
+    ];
+    const f = setup(`rescue-account-exit-${automatic}`, positions, { autoDecisionEnabled: automatic });
+    f.market.orderBook = { bids: [{ price: 100, volume: 100 }], asks: [{ price: 101, volume: 100 }] };
+    f.market.books = [
+      { symbol: "DGKZ", observedAt: f.market.observedAt, orderBook: f.market.orderBook },
+      { symbol: "DGJJ", observedAt: f.market.observedAt, orderBook: { bids: [{ price: 201, volume: 100 }], asks: [{ price: 202, volume: 100 }] } },
+    ];
+    f.market.account.realtimeValueChange = -999;
+    const prices = [100, 101, 201];
+    const pnls = positions.map((p, i) => exitNetPnl(p, prices[i]).netPnl);
+    assert.ok(pnls[0] < 0);
+    assert.ok(pnls.reduce((sum, value) => sum + value, 0) > 0);
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 0, "positive account total alone must not invent an AI liquidation decision");
+    const validated = validateExitPlans({ exitPlans: positions.map((p, i) => ({
+      positionId: p.positionOrderId, heldSide: p.side === "SHORT" ? "SHORT" : "LONG", quantity: 1,
+      validForSec: 300, takeProfitPrice: null, stopLossPrice: prices[i], rationale: "全账户补救成功，整体保护锁盈",
+    })) }, f.market, f.task);
+    assert.deepEqual(validated.rejected, []);
+    f.task.exitPlans = validated.plans;
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.deepEqual(f.submitted.map(input => input.targetPositionIds[0]).sort(), positions.map(p => p.positionOrderId).sort());
+    assert.deepEqual(f.submitted.map(input => input.action), ["SELL", "BUY", "SELL"]);
+    assert.ok(f.submitted.every(input => input.exitType === "STOP_LOSS" && input.quantity === 1));
+    assert.deepEqual(f.market.account.positions, []);
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+    assert.equal(f.submitted.length, 3, "completed recovery exits must not be submitted twice");
+  });
+}
 
 for (const heldSide of ["LONG", "SHORT"]) test(`${heldSide}: 4-point ceiling exits a fee loss without waiting for 5`, async () => {
   const f = setup(`fee-ceiling-${heldSide}`, [{ ...long("P1"), side: heldSide, roundTripFee: 5 }]);

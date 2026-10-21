@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { approvedKnowledgeForAnalysis, buildApprovedExperiencePrompt } from "../../server/rag.mjs";
 
-// Synthetic, fixed monitoring data. Never contacts a provider or a trading page.
+// Freeze the reviewed knowledge as well as the monitoring data: the byte
+// baseline was measured on v0.3.88. Current Skill delivery is tested separately.
+// Never contacts a provider or a trading page.
 export async function decisionLatencyContext(roundCount = 8) {
-  const content = await readFile(new URL("../../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
+  const content = await readFile(new URL("./trading-skill-v0.3.88.md", import.meta.url), "utf8");
   const evidence = approvedKnowledgeForAnalysis([{ id: "knowledge-fixture", title: "交易分析经验", status: "APPROVED", version: "fixture", content }]);
   const observedAt = "2026-10-17T07:00:00.000Z";
   const positions = Array.from({ length: 4 }, (_, i) => ({ positionOrderId: `P-${i}`, side: i % 2 ? "SHORT" : "LONG", quantity: 1, frozenQuantity: 0, orderPrice: 100 + i, symbol: "DGKZ" }));
