@@ -578,7 +578,7 @@ test("AI cancel decisions preserve exact IDs with HOLD and prompt uses net profi
     calls += 1;
     const body = JSON.parse(options.body);
     const prompt = body.messages[0].content;
-    assert.match(prompt, /wait at least 30 seconds/);
+    assert.match(prompt, /wait at least 120 seconds/);
     assert.match(prompt, /Use current orders and actual positions only/);
     assert.match(prompt, /never read historical orders/);
     assert.match(prompt, /Do not label a negative net result TAKE_PROFIT/);
@@ -884,7 +884,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
     assert.doesNotMatch(prompt, /至少\s*2\s*个有利价格点|都达2点|委托保留或撤销也由AI判断/);
     assert.doesNotMatch(prompt, /其价格和由此计算的高低点、涨跌幅不得进入趋势|不等于闪 K 可作为趋势证据|疑似闪 K\/闪价可能是假显示/);
-    assert.match(prompt, /wait at least 30 seconds/);
+    assert.match(prompt, /wait at least 120 seconds/);
     assert.match(prompt, /保留方向、幅度、出现和回落时点/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
@@ -1367,7 +1367,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
     assert.doesNotMatch(prompt, /至少\s*2\s*个有利价格点|都达2点|委托保留或撤销也由AI判断/);
     assert.doesNotMatch(prompt, /其价格和由此计算的高低点、涨跌幅不得进入趋势|不等于闪 K 可作为趋势证据|疑似闪 K\/闪价可能是假显示/);
-    assert.match(prompt, /wait at least 30 seconds/);
+    assert.match(prompt, /wait at least 120 seconds/);
     assert.match(prompt, /保留方向、幅度、出现和回落时点/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);

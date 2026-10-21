@@ -735,7 +735,7 @@ test("verified current orders still cancel when holdings are unverified", async 
   assert.equal(result.code, "CANCELLATION_UNVERIFIED");
 });
 
-for (const path of ["analysis", "monitor"]) test(`${path}: new orders wait 30 seconds without blocking qualified exits`, async () => {
+for (const path of ["analysis", "monitor"]) test(`${path}: new orders wait 120 seconds without blocking qualified exits`, async () => {
   const f = setup(`wait-current-${path}`, [long("profit")]);
   const startedAt = Date.now();
   f.market.account.openOrders = [{ orderId: "fresh", symbol: "DGKZ", side: "买入", quantity: 2, remainingQuantity: 1,
@@ -750,8 +750,12 @@ for (const path of ["analysis", "monitor"]) test(`${path}: new orders wait 30 se
   await runPositionExitCycle(f.task.id, { runtime });
   assert.deepEqual(f.submitted.map(p => p.targetPositionIds[0]), ["profit"]);
   assert.deepEqual(f.cancelled, []);
-  f.market.account.openOrders[0].orderTime = new Date(startedAt - 30001).toISOString();
-  f.task.currentOrderTracking.fresh.startedAt = startedAt - 30001;
+  f.market.account.openOrders[0].orderTime = new Date(startedAt - 60000).toISOString();
+  f.task.currentOrderTracking.fresh.startedAt = startedAt - 60000;
+  await cycle();
+  assert.deepEqual(f.cancelled, [], "one minute is still inside this order's fill window");
+  f.market.account.openOrders[0].orderTime = new Date(startedAt - 120001).toISOString();
+  f.task.currentOrderTracking.fresh.startedAt = startedAt - 120001;
   await cycle();
   assert.deepEqual(f.cancelled, ["fresh"]);
 });
@@ -836,7 +840,7 @@ test("partial rescue fill remains active after cancellation of its aged remainde
   await confirmPendingAction(f.task.id, { source: "auto_timeout", runtime: { ...f.runtime, submitSuggestionForm: async () => ({ ok: true, submitted: true }) } });
   f.task.pendingAction.entrustedOrderIds = ["remainder"];
   f.market.account.positions.push({ ...long("rescue"), side: "SHORT", orderPrice: 105, roundTripFee: 0 });
-  f.market.account.openOrders = [{ orderId: "remainder", remainingQuantity: 1, orderTime: new Date(Date.now() - 31000).toISOString() }];
+  f.market.account.openOrders = [{ orderId: "remainder", remainingQuantity: 1, orderTime: new Date(Date.now() - 121000).toISOString() }];
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.deepEqual(f.cancelled, ["remainder"]);
   assert.equal(f.task.pendingAction.status, "CANCELLED");

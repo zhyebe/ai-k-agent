@@ -2107,7 +2107,7 @@ function abandonChangedAnalysis(task, run, market, code) {
   return { task, market, run, skipped: true, reason: code, route: code, analysisTriggered: false };
 }
 
-// User policy: give each current order 30 seconds to fill before withdrawing
+// User policy: give each current order 120 seconds to fill before withdrawing
 // its verified remainder, independently of AI or current price.
 // The existing submission slot prevents cancellation racing a browser write.
 async function cancelCurrentOrders(task, market, connector, run, runtime, assertCurrent, now = Date.now()) {
@@ -2118,14 +2118,14 @@ async function cancelCurrentOrders(task, market, connector, run, runtime, assert
   const { orderIds, waiting } = currentOrderCancellationPlan(task, market.account, now);
   const newWaiting = waiting.filter(item => !previousIds.has(item.orderId));
   if (newWaiting.length) appendAgentOutput({ taskId: task.id, runId: run?.id, stage: "action", kind: "order",
-    message: `${newWaiting.length} 笔当前委托等待成交，满 30 秒后仍未成交才撤剩余数量`, data: { waiting: newWaiting } });
+    message: `${newWaiting.length} 笔当前委托等待成交，满 2 分钟后仍未成交才撤剩余数量`, data: { waiting: newWaiting } });
   if (!orderIds.length) return null;
   const abort = new AbortController();
   const cancelSubmission = () => abort.abort(new Error("ORDER_CANCEL_ABORTED"));
   pendingConfirmLocks.add(task.id);
   pendingSubmissionCancels.set(task.id, cancelSubmission);
   appendAgentOutput({ taskId: task.id, runId: run?.id, stage: "action", kind: "order",
-    message: `${orderIds.length} 笔当前委托已等待至少 30 秒，撤销剩余未成交数量`, data: { orderIds } });
+    message: `${orderIds.length} 笔当前委托已等待至少 2 分钟，撤销剩余未成交数量`, data: { orderIds } });
   let cancellation;
   try {
     try {
@@ -2243,7 +2243,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (typeof market.account?.openOrdersVerified === "boolean") appendAgentOutput({
       taskId, runId: run.id, stage: "collect", kind: "order",
       message: market.account.openOrdersVerified
-        ? `当前委托已核实：${market.account.openOrders?.length || 0} 笔；等待满 30 秒后仍未成交才撤剩余数量`
+        ? `当前委托已核实：${market.account.openOrders?.length || 0} 笔；等待满 2 分钟后仍未成交才撤剩余数量`
         : "当前委托读取未核实；不能当作没有委托，下轮继续读取",
       data: { verified: market.account.openOrdersVerified, orderIds: (market.account.openOrders || []).map(order => order.orderId),
         availableFunds: market.account.availableFunds ?? null, frozenFunds: market.account.frozenFunds ?? null, frozenMargin: market.account.frozenMargin ?? null },

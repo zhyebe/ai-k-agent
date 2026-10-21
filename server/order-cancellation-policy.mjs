@@ -1,4 +1,4 @@
-export const CURRENT_ORDER_WAIT_MS = 30_000;
+export const CURRENT_ORDER_WAIT_MS = 120_000;
 
 function orderTimestamp(value) {
   const raw = String(value || "").trim();
