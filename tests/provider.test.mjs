@@ -779,6 +779,10 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.match(prompt, /预测未来路径可能持续亏损或扩亏时/);
     assert.match(prompt, /多空统一按每单位有利价格点差设定1～4点目标/);
     assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.doesNotMatch(prompt, /至少\s*2\s*个有利价格点|都达2点|委托保留或撤销也由AI判断/);
+    assert.doesNotMatch(prompt, /其价格和由此计算的高低点、涨跌幅不得进入趋势|不等于闪 K 可作为趋势证据|疑似闪 K\/闪价可能是假显示/);
+    assert.match(prompt, /当前委托只要存在就由主机撤销剩余数量/);
+    assert.match(prompt, /保留方向、幅度、出现和回落时点/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
@@ -1249,6 +1253,10 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.match(prompt, /收益与风险必须一起预测/);
     assert.match(prompt, /多空统一按每单位有利价格点差设定1～4点目标/);
     assert.match(prompt, /达到至少1点且已知费用后非负就立即EXIT_NOW\/TAKE_PROFIT/);
+    assert.doesNotMatch(prompt, /至少\s*2\s*个有利价格点|都达2点|委托保留或撤销也由AI判断/);
+    assert.doesNotMatch(prompt, /其价格和由此计算的高低点、涨跌幅不得进入趋势|不等于闪 K 可作为趋势证据|疑似闪 K\/闪价可能是假显示/);
+    assert.match(prompt, /当前委托只要存在就由主机撤销剩余数量/);
+    assert.match(prompt, /保留方向、幅度、出现和回落时点/);
     assert.match(prompt, /4点为硬上限/);
     assert.match(prompt, /费用未知按用户点差边界执行，净利润保持未知/);
     assert.doesNotMatch(prompt, /Close with TAKE_PROFIT when actual executable net gain reaches|when realized executable net gain meets the reasonable target|由AI选择离场时机/);
