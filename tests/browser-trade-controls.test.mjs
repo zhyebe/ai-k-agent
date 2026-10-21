@@ -83,6 +83,83 @@ test("verified row transfer completes with AI offline and retains the requested 
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
 
+for (const scenario of ["valid", "missing-quote", "disabled-confirm"]) {
+  test(`empty transfer price after the site's one-shot initialization: ${scenario}`, async t => {
+    t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+      .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+    await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+    await page.reload();
+    await page.evaluate(scenario => {
+      window.transfer = (id, quantity) => {
+        const box = document.createElement("div");
+        box.className = "el-dialog";
+        box.style.cssText = "position:fixed;inset:0;background:white;z-index:9999";
+        // The site initializes price once, before the websocket quote may arrive.
+        // Editable quantity must never be mistaken for a price.
+        box.innerHTML = '<div>转让 测试商品</div><label>转让数量<input value="' + quantity + '"></label><label>转让价格<input type="number" value=""></label><button>确 定</button><button>取 消</button>';
+        box.querySelector("button").disabled = scenario === "disabled-confirm";
+        box.querySelector("button").onclick = () => {
+          window.exits.push({ id, price: box.querySelector('[type="number"]').value, quantity });
+          box.remove(); notice("转让成功");
+        };
+        box.querySelectorAll("button")[1].onclick = () => box.remove();
+        document.body.append(box);
+        if (scenario === "missing-quote") document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = "--";
+      };
+    }, scenario);
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
+      exitType: "STOP_LOSS", targetPositionIds: ["P-1"], exitGuard: {
+        positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 101, comparison: "LTE", expiresAt: new Date(Date.now() + 30000).toISOString(),
+      } });
+    assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.exits), scenario === "valid" ? [{ id: "P-1", price: "100", quantity: 2 }] : []);
+    assert.equal(await page.locator(".el-dialog:visible").count(), 0, "failed dialog must not obstruct the next read or exact-row exit");
+    if (scenario !== "valid") {
+      assert.ok(result.message.includes(result.code), "report the actual failure instead of generic dialog retries");
+      await page.evaluate(() => {
+        const original = window.transfer;
+        window.transfer = (...args) => { original(...args); document.querySelector(".el-dialog button").disabled = false; };
+      });
+      // A different exact holding remains operable after cleanup, without a reload.
+      const next = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", quantity: 1, price: 100,
+        exitType: "STOP_LOSS", orderType: "LIMIT", targetPositionIds: ["P-2"] });
+      assert.equal(next.ok, true, JSON.stringify(next));
+      assert.deepEqual((await page.evaluate(() => window.exits)).map(exit => exit.id), ["P-2"]);
+    }
+  });
+}
+
+test("confirmation sent before a quote reversal stays uncertain and is never clicked twice", async t => {
+  t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+  await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+    .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  await page.reload();
+  await page.evaluate(() => {
+    window.transfer = id => {
+      const box = document.createElement("div");
+      box.className = "el-dialog";
+      box.innerHTML = '<div>转让 测试商品</div><label>转让价格<input value="100"></label><button>确定</button><button>取消</button>';
+      box.querySelector("button").onclick = () => {
+        window.exits.push(id);
+        document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = "102";
+        // Request may already have reached the venue; no acknowledgement yet.
+      };
+      box.querySelectorAll("button")[1].onclick = () => box.remove();
+      document.body.append(box);
+    };
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
+    exitType: "STOP_LOSS", targetPositionIds: ["P-1"], exitGuard: {
+      positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 101, comparison: "LTE", expiresAt: new Date(Date.now() + 30000).toISOString(),
+    } });
+  assert.equal(result.ok, false);
+  assert.equal(result.uncertain, true);
+  assert.deepEqual(await page.evaluate(() => window.exits), ["P-1"]);
+  assert.equal(await page.locator(".el-dialog:visible").count(), 0);
+});
+
 test("AI confirmation for an updated immediate dialog still fills the transfer limit", async () => {
   await page.reload();
   await page.evaluate(() => {

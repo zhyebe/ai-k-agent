@@ -18,3 +18,10 @@ export function hasDirectionalProbabilities(decision) {
     return Number.isFinite(unit) && unit >= 0 && unit <= 1;
   });
 }
+
+export function entryRegimeAllows(decision) {
+  const regime = normalizeMarketRegime(decision?.marketRegime);
+  return ["UP", "DOWN"].includes(regime) || (regime === "RANGE"
+    && decision?.entryPurpose === "RESCUE"
+    && Array.isArray(decision.rescuePositionIds) && decision.rescuePositionIds.length > 0);
+}

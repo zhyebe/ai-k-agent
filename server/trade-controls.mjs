@@ -244,18 +244,37 @@ export async function clickPositionTransfer(page, input) {
   }
 }
 
-export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation } = {}) {
+async function transferDialogPrice(box) {
+  return box.locator("input").evaluateAll(inputs => {
+    const fields = inputs.filter(input => {
+      const rect = input.getBoundingClientRect();
+      if (!rect.width || !rect.height || input.disabled || input.type === "checkbox") return false;
+      const container = input.closest(".inputWrap, .el-form-item, li, label, .form-item");
+      const label = [...(input.labels || [])].map(node => node.textContent).join("") || container?.textContent || input.placeholder;
+      return /转让价格/.test(label || "");
+    });
+    if (fields.length !== 1) return null;
+    const value = Number(fields[0].value);
+    return Number.isFinite(value) && value > 0 ? value : null;
+  });
+}
+
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation, resolveTransferPrice } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
   let confirmed = false;
+  let failureCode = "TRADE_DIALOG_NOT_CONFIRMED";
   do {
+    if (finished()) return { ok: true, confirmed };
     const boxes = page.locator(selector);
     for (let index = 0; index < await boxes.count(); index += 1) {
       const box = boxes.nth(index);
       if (!await box.isVisible()) continue;
       const text = (await box.innerText()).replace(/\s+/g, "");
       if (!(cancelOrder ? /撤单|撤销.*委托/.test(text) : exitType ? /转让/.test(text) : /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text)) || /止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
+      if (exitType && baselineToken) await box.evaluate((node, token) => { node.dataset.axiomTransferDialog = token; }, baselineToken);
+      let dialogPrice = null;
       if (/转让价格/.test(text)) {
         // The production dialog initializes counterparty price after 200 ms.
         await page.waitForTimeout(300);
@@ -263,19 +282,27 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
           const fields = await fillTradeFields(page, [{ labels: ["转让价格"], value: price }], box);
           if (!fields.length) return { ok: false, code: "TRANSFER_PRICE_FIELD_NOT_FOUND" };
         }
-        const prices = await box.locator("input").evaluateAll((inputs) => inputs.filter((node) => !node.disabled && node.type !== "checkbox").map((node) => Number(node.value)));
-        if (!prices.some((value) => Number.isFinite(value) && value > 0)) continue;
+        dialogPrice = await transferDialogPrice(box);
+        if (dialogPrice === null && orderType === "MARKET" && resolveTransferPrice) {
+          const quote = await resolveTransferPrice();
+          if (!quote.ok) return { ...quote, confirmed };
+          if (Number.isFinite(quote.price) && quote.price > 0) {
+            const fields = await fillTradeFields(page, [{ labels: ["转让价格"], value: quote.price }], box);
+            if (!fields.length) return { ok: false, code: "TRANSFER_PRICE_FIELD_NOT_FOUND", confirmed };
+            dialogPrice = await transferDialogPrice(box);
+          }
+        }
+        if (dialogPrice === null) { failureCode = "TRANSFER_PRICE_UNAVAILABLE"; continue; }
       }
       const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"], BUTTONS, false)
         || (resolveConfirmation ? await resolveConfirmation(box) : null);
-      if (!control || await control.isDisabled()) continue;
+      if (!control || await control.isDisabled()) { failureCode = control ? "TRADE_CONFIRM_DISABLED" : "TRADE_CONFIRM_NOT_FOUND"; continue; }
       if (canConfirm) {
-        const price = await box.locator("input").evaluateAll((inputs) => inputs.filter(node => !node.disabled && node.type !== "checkbox").map(node => Number(node.value)).find(value => value > 0) ?? null);
-        const guard = await canConfirm(price);
+        const guard = await canConfirm(dialogPrice);
         if (!guard.ok) {
           const cancel = await findControl(box, ["取消", "关闭"]);
           if (cancel && !await cancel.isDisabled()) await cancel.click({ timeout: 1500 });
-          return { ok: false, code: guard.code };
+          return { ...guard, confirmed };
         }
       }
       const fresh = await control.evaluate((node, token) => {
@@ -300,7 +327,17 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     if (hint.some((text) => /成功|已提交|失败|不足|拒绝|错误/.test(text))) return { ok: true, confirmed };
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
-  return { ok: !exitType || confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : "TRADE_DIALOG_NOT_CONFIRMED" };
+  return { ok: !exitType || confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
+}
+
+export async function dismissTransferDialogs(page, token) {
+  for (const box of await page.locator("[data-axiom-transfer-dialog]:visible").all()) {
+    if (await box.getAttribute("data-axiom-transfer-dialog") !== token) continue;
+    const cancel = await findControl(box, ["取消", "关闭"], BUTTONS, false);
+    if (!cancel || await cancel.isDisabled()) throw new Error("TRANSFER_DIALOG_DISMISS_FAILED");
+    await cancel.click({ timeout: 1500 });
+    await box.waitFor({ state: "hidden", timeout: 1500 });
+  }
 }
 
 export async function dismissOrderCancellationDialogs(page) {

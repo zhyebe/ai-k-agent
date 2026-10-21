@@ -11,7 +11,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
+import { entryRegimeAllows, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, POSITION_MIN_PROFIT_POINTS, POSITION_MAX_PROFIT_POINTS, positionEntryPrice, positionProfitExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
 
@@ -462,7 +462,7 @@ export function applyEntryBoundary(decision, market = {}) {
     const boardRegime = normalizeMarketRegime(assessment?.marketRegime);
     next.marketRegime = topRegime === "RANGE" || boardRegime === "RANGE" ? "RANGE"
       : boardRegime !== "UNKNOWN" ? boardRegime : topRegime;
-    if (!["UP", "DOWN"].includes(next.marketRegime)) {
+    if (!entryRegimeAllows(next)) {
       next.action = "HOLD";
       next.targetPositionPct = 0;
       next.maxOrderValuePct = 0;
@@ -916,7 +916,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     throw new Error("FIXED_AMOUNT_STOP_RETIRED");
   }
   if (isLiveTask(task) && !task.pendingAction.exitType && sessionCloseWindow(task).active) throw new Error("SESSION_CLOSING_NO_ENTRY");
-  if (isLiveTask(task) && !task.pendingAction.exitType && !["UP", "DOWN"].includes(normalizeMarketRegime(task.pendingAction.marketRegime))) throw new Error(task.pendingAction.marketRegime === "RANGE" ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN");
+  if (isLiveTask(task) && !task.pendingAction.exitType && !entryRegimeAllows(task.pendingAction)) throw new Error(task.pendingAction.marketRegime === "RANGE" ? "RANGE_MARKET_NO_ENTRY" : "ENTRY_MARKET_REGIME_UNKNOWN");
   if (isLiveTask(task) && !meetsOrderBoundary(task.pendingAction)) throw new Error("INCOMPLETE_DIRECTIONAL_PROBABILITIES");
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
@@ -1866,7 +1866,7 @@ function decisionExecutionPolicy(task) {
     exitsAutomatic: true, cancellationsAutomatic: true,
     lossExit: "ai_trend_and_recovery", fixedLossAmountStop: false,
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
-    rangeMarketEntry: "blocked", entryMarketRegimeRequired: true,
+    rangeMarketEntry: "ordinary_entries_blocked_rescue_evaluated_separately", entryMarketRegimeRequired: true,
     conditionalExits: true, profitPointExit: { minPoints: POSITION_MIN_PROFIT_POINTS, maxPoints: POSITION_MAX_PROFIT_POINTS, unit: "directional_price_difference", unknownFees: "net_unknown", knownNegativeNetAtCeiling: "STOP_LOSS" }, sessionClose: sessionCloseWindow(task),
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2368,7 +2368,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
             observedAt: market.observedAt,
             freshnessSec: market.freshnessSec,
           },
-          account: { ...task.metrics, ...(market.account || {}), positionContext },
+          account: { ...task.metrics, ...(market.account || {}), positionContext, rescueSession: task.rescueSession || null },
           positions: positionContext,
           realtimeObservations: recentLiveObservations(task),
           rawPositions: market.account?.positions || [],
@@ -2614,7 +2614,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           : automaticRuleFailures.length
             ? `${targetedActionLabel}建议已保留；自动规则标记已记录，继续按 AI 决策执行`
             : task.decision.action === "HOLD"
-              ? decisionFlags.has("RANGE_MARKET_NO_ENTRY") ? "目标盘口横盘震荡，不新开仓；继续管理持仓和当前委托"
+              ? decisionFlags.has("RANGE_MARKET_NO_ENTRY") ? "目标盘口横盘震荡，不开普通新单；救单单独评估，继续管理持仓和当前委托"
                 : decisionFlags.has("ENTRY_MARKET_REGIME_UNKNOWN") ? "目标盘口主情景未明确，不新开仓；继续监控并重新分析"
                   : "模型建议观望，当前轮次无需动作"
               : riskLimitExceeded

@@ -7,7 +7,7 @@ const bind = decision => applyEntryBoundary(bindDecisionToMarket(decision, marke
 
 for (const action of ["BUY", "SELL"]) {
   for (const orderType of ["MARKET", "LIMIT"]) {
-    test(`${action} ${orderType}: sideways forbids new entries including rescue, preserving exits and cancellations`, () => {
+    test(`${action} ${orderType}: sideways forbids ordinary new entries, preserving exits and cancellations`, () => {
       const decision = { action, orderType, marketRegime: "RANGE", targetSymbol: "A", targetPrice: 100,
         bullishProfitProbability: 0.9, bearishProfitProbability: 0.9, targetPositionPct: 10, maxOrderValuePct: 4,
         exitPlans: [{ positionId: "old", heldSide: "LONG", quantity: 2, stopLossPrice: 98 }], cancelOrderIds: ["O1"] };
@@ -94,5 +94,15 @@ for (const side of ["LONG", "SHORT"]) {
     assert.equal(context().exitQuoteNetPnl, null);
     snapshot.orderBook = {};
     assert.equal(context().exitQuoteGrossPnl, null, "the last mark is not an exit quote");
+  });
+}
+
+for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"]) {
+  test(`${action} ${orderType}: tagged rescue can be evaluated in RANGE but not UNKNOWN`, () => {
+    const decision = { action, orderType, targetSymbol: "A", marketRegime: "RANGE", entryPurpose: "RESCUE", rescuePositionIds: ["original"] };
+    assert.equal(bind(decision).action, action);
+    assert.equal(bind({ ...decision, rescuePositionIds: [] }).action, "HOLD");
+    assert.equal(bind({ ...decision, entryPurpose: "NORMAL" }).action, "HOLD");
+    assert.equal(bind({ ...decision, marketRegime: "UNKNOWN" }).action, "HOLD");
   });
 }

@@ -1522,11 +1522,12 @@ test("未读到持仓不代表离场成交，下一次真实空仓才核实", as
   }
 });
 
-test("生产后端只调度客户端分析，不分片、不向客户端重发完整行情", async () => {
+for (const rescueStatus of ["ACTIVE", "EXITING"]) test(`生产后端只调度客户端分析，传递 ${rescueStatus} 救单状态`, async () => {
   const previous = process.env.AXIOM_REQUIRE_DESKTOP_BROWSER;
   process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
   const task = insertNorthstarTask(`client_analysis_${Date.now()}`);
   const market = testMarketSnapshot("client-snapshot", 100);
+  task.rescueSession = { status: rescueStatus, originalPositionIds: ["original"], rescuePositionIds: ["rescue"], lastRescueByPosition: { original: { lossPoints: 3 } } };
   task.exitPlans = [{ positionId: "existing", status: "ARMED", takeProfitPrice: 110, stopLossPrice: 94, rationale: "大趋势延续" }];
   let calls = 0;
   try {
@@ -1539,6 +1540,7 @@ test("生产后端只调度客户端分析，不分片、不向客户端重发�
       requestSegmentReview: async () => { throw new Error("SERVER_SEGMENT_FORBIDDEN"); },
       requestMarketAnalysis: async (_provider, context) => {
         calls++;
+        assert.deepEqual(context.account.rescueSession, task.rescueSession);
         assert.equal(context.market, undefined);
         assert.equal(context.marketRef.fingerprint, market.fingerprint);
         assert.equal(context.marketRef.observedAt, market.observedAt);

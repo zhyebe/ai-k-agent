@@ -170,7 +170,7 @@ const riskLabels: Record<string, string> = {
   BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
   LOW_PROFIT_PROBABILITY: "历史概率提示",
   INCOMPLETE_DIRECTIONAL_PROBABILITIES: "AI 方向预测字段不完整",
-  RANGE_MARKET_NO_ENTRY: "目标盘横盘震荡，禁止新开仓",
+  RANGE_MARKET_NO_ENTRY: "目标盘横盘震荡，禁止普通开仓",
   ENTRY_MARKET_REGIME_UNKNOWN: "目标盘当前趋势字段不足，无法核实入场条件",
   EXIT_PROFIT_NOT_VERIFIED: "入场成本或可成交盈利未核实",
 };

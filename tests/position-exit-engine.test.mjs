@@ -25,17 +25,27 @@ function setup(id, positions, extras = {}) {
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
 
-for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) {
-  test(`${automatic ? "automatic" : "manual"} ${heldSide}: counter-trend rescue opens the opposite side and preserves the original protection`, async () => {
+for (const scenario of ["missing-id", "wrong-side", "other-instrument", "not-losing"]) {
+  test(`RANGE rescue exception still rejects ${scenario}`, () => {
+    const position = { ...long("original"), orderPrice: scenario === "not-losing" ? 100 : 108 };
+    const f = setup(`range-rescue-invalid-${scenario}`, [position]);
+    assert.throws(() => buildPendingAction(f.task, { action: scenario === "wrong-side" ? "BUY" : "SELL", marketRegime: "RANGE",
+      entryPurpose: "RESCUE", rescuePositionIds: [scenario === "missing-id" ? "other" : "original"],
+      targetSymbol: scenario === "other-instrument" ? "DGJJ" : "DGKZ", bullishProfitProbability: 0.5, bearishProfitProbability: 0.5 }), /INVALID_RESCUE_TARGET/);
+  });
+}
+
+for (const automatic of [false, true]) for (const heldSide of ["LONG", "SHORT"]) for (const regime of ["trend", "RANGE"]) {
+  test(`${automatic ? "automatic" : "manual"} ${heldSide} ${regime}: counter-trend rescue opens the opposite side and preserves the original protection`, async () => {
     const position = { ...long("original"), side: heldSide, orderPrice: heldSide === "LONG" ? 107 : 104, roundTripFee: 0.2 };
-    const f = setup(`rescue-entry-${automatic}-${heldSide}`, [position], { autoDecisionEnabled: automatic });
+    const f = setup(`rescue-entry-${automatic}-${heldSide}-${regime}`, [position], { autoDecisionEnabled: automatic });
     const action = heldSide === "LONG" ? "SELL" : "BUY";
     const forms = [];
     await runAnalysis(f.task.id, "", { runtime: { ...f.runtime,
       openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => f.market,
       fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true }; },
-      requestDecision: async () => ({ action, marketRegime: action === "SELL" ? "DOWN" : "UP", targetSymbol: "DGKZ", orderType: "MARKET",
+      requestDecision: async () => ({ action, entryPurpose: "RESCUE", rescuePositionIds: ["original"], marketRegime: regime === "RANGE" ? "RANGE" : action === "SELL" ? "DOWN" : "UP", targetSymbol: "DGKZ", orderType: "MARKET",
         bullishProfitProbability: 0.6, bearishProfitProbability: 0.6, riskFlags: [], evidenceIds: [],
         holdingPlan: { decision: "HOLD_THROUGH_PULLBACK", rationale: "保留 original，反向补救，原保护继续有效" },
         exitPlans: [{ positionId: "original", heldSide, quantity: 1, validForSec: 300,
