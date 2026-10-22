@@ -9,7 +9,7 @@ module.exports = async function inspectBrowser({ app }, input) {
   const { createProvider } = await import(pathToFileURL(path.join(root, "server", "provider.mjs")).href);
   const { positionProfitExit } = await import(pathToFileURL(path.join(root, "server", "exit-policy.mjs")).href);
   const controller = new AbortController();
-  const call = (method, data) => runtime.executeBrowserCall(app, { id: `smoke-${method}`, method, userId: "smoke-user", input: data, deadlineAt: Date.now() + 45000 }, "https://api.example.test", controller.signal);
+  const call = (method, data, credential) => runtime.executeBrowserCall(app, { id: `smoke-${method}`, method, userId: "smoke-user", input: data, credential, deadlineAt: Date.now() + 45000 }, "https://api.example.test", controller.signal);
   try {
     const opened = await call("openMarketBrowser", { task: { id: "fixture", target: { url: input.url } }, connector: {} });
     if (!opened.ok) throw new Error(opened.message);
@@ -87,10 +87,26 @@ module.exports = async function inspectBrowser({ app }, input) {
       }
       background.push({ state, observationVerified: observed.account.positionsVerified, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits, historyVisits: window.historyVisits, controlRedraws: window.controlRedraws })) });
     }
+    const loginHtml = await fetch(`${input.url}/login-fixture`).then(response => response.text());
+    const targetUrl = "https://smyw.haohandahan.cn/client/#/transcc";
+    await page.unroute("https://smyw.haohandahan.cn/client/**");
+    await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: loginHtml }));
+    const logins = [];
+    for (const state of ["visible", "minimized", "hidden"]) {
+      await page.goto(targetUrl.replace("transcc", "login"));
+      await page.reload();
+      await runtime.setSmokeWindowState(state);
+      const result = await call("browserLogin", { sessionId, adapterId: "haohan-readonly", targetUrl, browserProvider },
+        { username: "fixture", password: "fixture-password", target: { url: targetUrl } });
+      if (!result.ok || !result.authenticated) throw new Error(JSON.stringify({ state, phase: "login", ...result }));
+      logins.push({ state, authenticated: result.authenticated, url: page.url(), ...await page.evaluate(() => ({
+        attempts: window.loginAttempts, agreementChanges: window.agreementChanges, documentOpens: window.documentOpens, redraws: window.redraws,
+      })) });
+    }
     await runtime.setSmokeWindowState("visible");
     await page.screenshot({ path: input.screenshot });
     const closed = await call("closeBrowserSession", { sessionId: "task:fixture" });
-    return { packaged: app.isPackaged, mode: opened.mode, title: opened.title, orderBook, manualFilled: manual.filled, manualBeforeClick, manualContinued: continued.continued, entries, exits, cancellation, unverifiedCancellation, historyVisits, background, sessions: ids.length, closed, remainingSessions: browser.browserSessionIds().length };
+    return { packaged: app.isPackaged, mode: opened.mode, title: opened.title, orderBook, manualFilled: manual.filled, manualBeforeClick, manualContinued: continued.continued, entries, exits, cancellation, unverifiedCancellation, historyVisits, background, logins, sessions: ids.length, closed, remainingSessions: browser.browserSessionIds().length };
   } finally {
     await runtime.closeBrowserRuntime();
   }

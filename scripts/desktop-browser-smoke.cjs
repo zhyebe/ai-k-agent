@@ -7,13 +7,21 @@ const { _electron } = require("playwright");
 
 async function main() {
   const { refreshingTradeFixture: tradeFixture } = await import("../tests/fixtures/trade-page.mjs");
+  const { loginFixture } = await import("../tests/fixtures/login-page.mjs");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "axiom browser 中文 "));
   const executablePath = process.env.AXIOM_DESKTOP_EXECUTABLE;
   const screenshot = path.join(process.env.AXIOM_SMOKE_OUTPUT || os.tmpdir(), "axiom-client-browser-smoke.png");
   fs.mkdirSync(path.dirname(screenshot), { recursive: true });
-  const server = http.createServer((_request, response) => {
+  let modelRequests = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url.startsWith("/v1")) {
+      modelRequests++;
+      response.writeHead(503, { "content-type": "application/json" });
+      response.end('{"error":"offline model fixture"}');
+      return;
+    }
     response.setHeader("content-type", "text/html; charset=utf-8");
-    response.end(tradeFixture);
+    response.end(request.url === "/login-fixture" ? loginFixture : tradeFixture);
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   let host;
@@ -51,6 +59,16 @@ async function main() {
       assert.equal(item.historyVisits, 0);
     }
     assert.equal(result.orderBook.bids[0].price, 100);
+    assert.equal(modelRequests, 0, "known login and trade controls must not depend on model availability");
+    assert.deepEqual(result.logins.map(item => item.state), ["visible", "minimized", "hidden"]);
+    for (const login of result.logins) {
+      assert.equal(login.authenticated, true);
+      assert.match(login.url, /#\/transcc$/);
+      assert.equal(login.attempts, 1);
+      assert.equal(login.agreementChanges, 1);
+      assert.equal(login.documentOpens, 0);
+      assert.equal(login.redraws, 2);
+    }
     assert.equal(result.orderBook.asks[0].price, 101);
     assert.equal(result.sessions, 1);
     assert.equal(result.closed, true);

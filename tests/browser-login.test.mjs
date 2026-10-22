@@ -6,6 +6,7 @@ import { closeAllBrowserSessions, openBrowserPage, resolveSnapshotControl, setBr
 import { browserLoginStatus, browserLoginWithCredential, browserScanControls } from "../server/tools.mjs";
 import { parseHaohanPageSnapshot } from "../server/haohan.mjs";
 import { createProvider } from "../server/provider.mjs";
+import { loginFixture } from "./fixtures/login-page.mjs";
 
 const target = "https://smyw.haohandahan.cn/client/#/transcc";
 const sessionId = "login-fixture";
@@ -66,6 +67,24 @@ test("expired trading screen opens the known login route, fills saved credential
   assert.equal(result.authenticated, true);
   assert.equal(page.url(), target);
   assert.equal((await browserLoginStatus(input)).authenticated, true);
+});
+
+test("recognized login completes without a response from the configured browser model", async () => {
+  await page.goto(target.replace("transcc", "login"));
+  await page.evaluate(() => sessionStorage.removeItem("ai-fixture"));
+  await page.reload();
+  let requests = 0;
+  const server = http.createServer(() => { requests++; });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const provider = createProvider({ baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: "unresponsive-fixture", apiKey: "synthetic" });
+  try {
+    const started = Date.now();
+    const result = await browserLoginWithCredential({ ...input, browserProvider: provider }, { username: "fixture", password: "fixture-password", target: { url: target } });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(requests, 0, "verified login controls must not wait on the language model");
+    assert.ok(Date.now() - started < 8000);
+    assert.equal((await browserLoginStatus(input)).authenticated, true);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 
 test("hidden old error and a trade-password dialog do not expire a valid trading session", async () => {
@@ -145,4 +164,35 @@ test("snapshot checkbox rejects a disabled associated input or a replaced label"
   assert.equal((await browserScanControls({ sessionId })).controls.some(control => control.role === "checkbox"), false);
   await page.reload();
   assert.equal(await resolveSnapshotControl(page, consent.id, { role: "checkbox" }), null);
+});
+
+for (const scenario of ["redraw", "rejected", "ambiguous", "expired", "quotation-landing"]) test(`current public login form: ${scenario}`, async t => {
+  const pattern = "https://smyw.haohandahan.cn/client/**";
+  await page.route(pattern, route => route.fulfill({ contentType: "text/html; charset=utf-8", body: scenario === "quotation-landing" ? loginFixture.replace("location.hash = '#/transcc'", "location.hash = '#/quotationList'") : loginFixture }));
+  t.after(() => page.unroute(pattern));
+  await page.goto(target.replace("transcc", "login"));
+  await page.reload();
+  if (scenario === "ambiguous") await page.locator('input[type="text"]').evaluate(node => node.after(node.cloneNode(true)));
+  if (scenario === "expired") {
+    await page.goto(target);
+    await page.locator("#view").evaluate(node => node.insertAdjacentHTML("beforeend", '<div role="alert">登录已过期，请重新登录</div>'));
+  }
+  const started = Date.now();
+  const result = await browserLoginWithCredential(input, { username: "fixture", password: scenario === "rejected" ? "wrong-fixture-password" : "fixture-password", target: { url: target } });
+  assert.equal(result.ok, !["rejected", "ambiguous"].includes(scenario), JSON.stringify(result));
+  assert.ok(Date.now() - started < 8000, "known controls and explicit rejection do not wait for the model or full success timeout");
+  // Navigation to a new document resets fixture counters after quotation landing.
+  if (scenario === "quotation-landing") {
+    assert.equal(page.url(), target);
+    assert.equal(result.targetReached, true);
+    return;
+  }
+  assert.equal(await page.evaluate(() => window.loginAttempts), scenario === "ambiguous" ? 0 : 1);
+  assert.equal(await page.evaluate(() => window.documentOpens), 0);
+  if (scenario === "ambiguous") assert.equal(await page.locator('input[type="password"]').inputValue(), "");
+  else {
+    assert.equal(await page.evaluate(() => window.agreementChanges), 1);
+    assert.equal(await page.evaluate(() => window.redraws), 2);
+  }
+  if (scenario === "rejected") { assert.equal(result.code, "LOGIN_REJECTED"); assert.equal(result.stage, "verify"); }
 });

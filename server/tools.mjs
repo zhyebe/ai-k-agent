@@ -33,6 +33,13 @@ function hostnameOf(value) {
   try { return new URL(String(value || "")).hostname; } catch { return ""; }
 }
 
+function safeUrl(value) {
+  try {
+    const parsed = new URL(String(value || ""));
+    return `${parsed.origin}${parsed.pathname}${parsed.hash}`;
+  } catch { return ""; }
+}
+
 async function pageHasSessionAuth(page, adapter) {
   const keys = Array.isArray(adapter?.login?.sessionStorageKeys) ? adapter.login.sessionStorageKeys.map(String).filter(Boolean) : [];
   if (!keys.length || typeof page.evaluate !== "function") return false;
@@ -152,6 +159,26 @@ function planActionForField(actions, field) {
     || actions.find((action) => String(action?.label || "").includes(field === "username" ? "手机" : field === "password" ? "密码" : field));
 }
 
+function recognizedLoginPlan(snapshot, adapter) {
+  if (!snapshot.ok || (adapter.id === "haohan-readonly" && !isLoginUrl(snapshot.url))) return null;
+  const controls = snapshot.controls || [];
+  const text = control => [control.label, control.placeholder, control.name].filter(Boolean).join(" ");
+  const usernames = controls.filter(control => control.role === "textbox" && control.type !== "password"
+    && /手机|账号|账户|用户名|phone|mobile|username|account|email/i.test(text(control)));
+  const passwords = controls.filter(control => control.role === "textbox" && control.type === "password" && !/交易|支付/.test(text(control)));
+  const submits = controls.filter(control => control.role === "button" && /^(登录|登入|log\s*in|sign\s*in)$/i.test(String(control.label || "").replace(/\s+/g, "")));
+  const checkboxes = controls.filter(control => control.role === "checkbox");
+  const consents = checkboxes.filter(control => /同意|协议|agreement|consent/i.test(text(control)));
+  if (usernames.length !== 1 || passwords.length !== 1 || submits.length !== 1 || consents.length > 1
+    || checkboxes.length !== consents.length) return null;
+  return { ok: true, snapshot, actions: [
+    { type: "fill", field: "username", controlId: usernames[0].id },
+    { type: "fill", field: "password", controlId: passwords[0].id },
+    ...(consents.length ? [{ type: "accept_agreement", field: "consent", controlId: consents[0].id }] : []),
+    { type: "click", field: "submit", controlId: submits[0].id },
+  ] };
+}
+
 async function agentTradeConfirmation(page, box, provider, context = {}) {
   if (!provider) return null;
   const plan = await requestLiveBrowserPlan(page, provider, {
@@ -204,27 +231,6 @@ async function pageHasLoginSuccess(page, adapter) {
   return pageHasSessionAuth(page, adapter);
 }
 
-async function prepareLoginForm(page, adapter) {
-  const selector = String(adapter?.login?.consentSelector || "").trim();
-  if (!selector) return;
-  const consent = await optionalVisibleLocator(page, selector);
-  if (!consent) return;
-  let checked = false;
-  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
-  if (checked) return;
-  try {
-    await consent.evaluate((element) => element.click());
-  } catch {}
-  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
-  if (checked) return;
-  const visibleControl = consent.locator("xpath=ancestor::*[self::label or @role='checkbox'][1]").locator(".el-checkbox__inner, [role='checkbox']").first();
-  try {
-    if (await visibleControl.count() > 0) await visibleControl.click({ timeout: 1500 });
-  } catch {}
-  try { checked = await consent.isChecked({ timeout: 1200 }); } catch {}
-  if (!checked) throw new Error("LOGIN_CONSENT_REQUIRED");
-}
-
 async function loginErrorText(page, adapter) {
   const selectors = Array.isArray(adapter?.login?.errorSelectors) && adapter.login.errorSelectors.length
     ? adapter.login.errorSelectors
@@ -232,7 +238,10 @@ async function loginErrorText(page, adapter) {
   const messages = [];
   for (const selector of selectors) {
     try {
-      const values = await page.locator(selector).allTextContents();
+      const values = await page.locator(selector).evaluateAll(nodes => nodes.filter(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(node).visibility !== "hidden";
+      }).map(node => node.textContent || ""));
       for (const value of values) {
         const normalized = String(value || "").replace(/\s+/g, " ").trim();
         if (normalized && !messages.includes(normalized)) messages.push(normalized);
@@ -343,6 +352,8 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
   const resolvedAdapterId = adapterId || credential?.target?.adapterId;
   const adapter = getConnectorAdapter(resolvedAdapterId);
   if (!adapterCanLogin(resolvedAdapterId) || adapter.reviewStatus !== "APPROVED") return { ok: false, code: "LOGIN_FLOW_REQUIRES_TARGET_ADAPTER", message: "目标站点登录字段需要已审核的连接器适配器", adapterId: resolvedAdapterId || "" };
+  const startedAt = Date.now();
+  let stage = "prepare";
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const page = await getBrowserPage(sessionId);
     if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", message: "请先导航到目标页面" };
@@ -357,73 +368,66 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
         } catch { return { ok: false, code: "CREDENTIAL_TARGET_INVALID", message: "凭据目标地址无效" }; }
       }
       const aiProvider = browserProvider || provider;
-      let aiPlan = null;
-      if (aiProvider) {
-        aiPlan = await requestLiveBrowserPlan(page, aiProvider, {
-          goal: "LOGIN",
-          mode: "login",
+      stage = "navigate";
+      // The approved login route is known. Do not ask a model to inspect an
+      // expired trading screen before opening the actual sign-in form.
+      const loginFormVisible = Boolean(await optionalVisibleLocator(page, adapter.login.passwordSelector));
+      if (adapter.login.entryUrl && !isLoginUrl(currentUrl) && !loginFormVisible) {
+        const loginUrl = new URL(adapter.login.entryUrl);
+        if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
+        await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+      }
+      stage = "locate";
+      await firstVisibleLocator(page, adapter.login.passwordSelector, { timeout: 5000, label: "LOGIN_PASSWORD" });
+      const snapshot = await scanBrowserPage(page);
+      let plan = recognizedLoginPlan(snapshot, adapter);
+      if (!plan && aiProvider) {
+        stage = "model_locate";
+        plan = await requestLiveBrowserPlan(page, aiProvider, {
+          goal: "LOGIN", mode: "login",
           instructions: "选择当前页面登录账号字段、密码字段、协议复选框（若存在）和登录提交按钮。只返回当前快照 controlId；不要输入密码值。",
         });
-        const hasPassword = aiPlan.ok && aiPlan.actions.some((action) => String(action?.field || "").toLowerCase() === "password");
-        const hasSubmit = aiPlan.ok && aiPlan.actions.some((action) => String(action?.field || "").toLowerCase() === "submit" || String(action?.type || "").toLowerCase() === "submit");
-        if ((!hasPassword || !hasSubmit) && adapter.login.entryUrl) {
-          const loginUrl = new URL(adapter.login.entryUrl);
-          if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
-          await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
-          aiPlan = await requestLiveBrowserPlan(page, aiProvider, {
-            goal: "LOGIN",
-            mode: "login",
-            instructions: "选择当前页面登录账号字段、密码字段、协议复选框（若存在）和登录提交按钮。只返回当前快照 controlId；不要输入密码值。",
-          });
-        }
-        if (!aiPlan.ok) return { ok: false, code: aiPlan.code || "BROWSER_ACTION_PLAN_INVALID", message: "AI 未能从当前页面选择登录控件", credentialRef, adapterId: adapter.id };
-        const actions = aiPlan.actions;
-        const usernameAction = planActionForField(actions, "username");
-        const passwordAction = planActionForField(actions, "password");
-        const submitAction = actions.find((action) => String(action?.field || "").toLowerCase() === "submit" || String(action?.type || "").toLowerCase() === "submit")
-          || actions.find((action) => String(action?.type || "").toLowerCase() === "click" && /登录|sign\s*in|log\s*in/i.test(String(action?.label || "")));
-        if (!usernameAction || !passwordAction || !submitAction
-          || !await fillPlannedControl(page, usernameAction, String(credential.username || ""), { role: "textbox" })
-          || !await fillPlannedControl(page, passwordAction, String(credential.password || ""), { role: "textbox" })) {
-          return { ok: false, code: "LOGIN_CONTROLS_NOT_FOUND", message: "AI 选择的登录控件已变化或不可见", credentialRef, adapterId: adapter.id };
-        }
-        const consentAction = actions.find((action) => String(action?.field || "").toLowerCase() === "consent" || String(action?.type || "").toLowerCase() === "accept_agreement")
-          || actions.find((action) => String(action?.type || "").toLowerCase() === "click" && /同意|协议|agreement|consent/i.test(String(action?.label || "")));
-        if (consentAction && !await clickPlannedControl(page, consentAction, { role: "checkbox" })) {
-          return { ok: false, code: "LOGIN_CONSENT_NOT_FOUND", message: "AI 选择的协议控件已变化或不可见", credentialRef, adapterId: adapter.id };
-        }
-        if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: page.url() };
-        if (!await clickPlannedControl(page, submitAction, { role: "button" })) return { ok: false, code: "LOGIN_SUBMIT_NOT_FOUND", message: "AI 选择的登录按钮已变化或不可见", credentialRef, adapterId: adapter.id };
-      } else {
-        // Compatibility path for local fixtures and older callers that do not
-        // provide a configured browser AI provider.
-        const loginFormVisible = Boolean(await optionalVisibleLocator(page, adapter.login.passwordSelector)
-          && await optionalVisibleLocator(page, adapter.login.submitSelector));
-        if (adapter.login.entryUrl && !loginFormVisible) {
-          const loginUrl = new URL(adapter.login.entryUrl);
-          if (loginUrl.origin !== new URL(currentUrl).origin || !isAllowedDomain(loginUrl.href)) return { ok: false, code: "LOGIN_TARGET_MISMATCH" };
-          await page.goto(loginUrl.href, { waitUntil: "domcontentloaded", timeout: 20000 });
-        }
-        const username = await firstVisibleLocator(page, adapter.login.usernameSelector, { timeout: 12000, label: "LOGIN_USERNAME" });
-        const password = await firstVisibleLocator(page, adapter.login.passwordSelector, { timeout: 12000, label: "LOGIN_PASSWORD" });
-        const submitButton = await firstVisibleLocator(page, adapter.login.submitSelector, { timeout: 12000, label: "LOGIN_SUBMIT" });
-        await username.fill(String(credential.username || ""), { timeout: 12000 });
-        await password.fill(String(credential.password || ""), { timeout: 12000 });
-        await prepareLoginForm(page, adapter);
-        if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: currentUrl };
-        await submitButton.click({ timeout: 12000 });
       }
+      if (!plan?.ok) return { ok: false, code: plan?.code || "LOGIN_CONTROLS_NOT_FOUND", message: "当前登录控件无法唯一确认", credentialRef, adapterId: adapter.id, stage };
+      const actions = plan.actions;
+      const usernameAction = planActionForField(actions, "username");
+      const passwordAction = planActionForField(actions, "password");
+      const submitAction = actions.find(action => String(action?.field || "").toLowerCase() === "submit" || String(action?.type || "").toLowerCase() === "submit")
+        || actions.find(action => String(action?.type || "").toLowerCase() === "click" && /登录|sign\s*in|log\s*in/i.test(String(action?.label || "")));
+      stage = "fill";
+      const fieldOptions = { role: "textbox", snapshot: plan.snapshot };
+      if (!usernameAction || !passwordAction || !submitAction
+        || !await fillPlannedControl(page, usernameAction, String(credential.username || ""), fieldOptions)
+        || !await fillPlannedControl(page, passwordAction, String(credential.password || ""), fieldOptions)) {
+        return { ok: false, code: "LOGIN_CONTROLS_NOT_FOUND", message: "登录字段已变化或不可见", credentialRef, adapterId: adapter.id, stage };
+      }
+      stage = "consent";
+      const consentAction = actions.find(action => String(action?.field || "").toLowerCase() === "consent" || String(action?.type || "").toLowerCase() === "accept_agreement")
+        || actions.find(action => String(action?.type || "").toLowerCase() === "click" && /同意|协议|agreement|consent/i.test(String(action?.label || "")));
+      if (consentAction && !await clickPlannedControl(page, consentAction, { role: "checkbox", snapshot: plan.snapshot })) {
+        return { ok: false, code: "LOGIN_CONSENT_NOT_FOUND", message: "登录协议控件已变化或不可见", credentialRef, adapterId: adapter.id, stage };
+      }
+      if (submit === false) return { ok: true, credentialRef, adapterId: adapter.id, authenticated: false, requiresApproval: false, code: "LOGIN_FILLED_NOT_SUBMITTED", url: page.url() };
+      const priorError = await loginErrorText(page, adapter);
+      stage = "submit";
+      if (!await clickPlannedControl(page, submitAction, { role: "button", snapshot: plan.snapshot })) return { ok: false, code: "LOGIN_SUBMIT_NOT_FOUND", message: "登录按钮已变化或不可见", credentialRef, adapterId: adapter.id, stage };
+      stage = "verify";
       const deadline = Date.now() + Math.max(5000, Number(adapter.login.successTimeoutMs) || 20000);
       let authenticated = false;
       while (Date.now() < deadline) {
         authenticated = await pageHasLoginSuccess(page, adapter);
         if (authenticated) break;
+        const detail = await loginErrorText(page, adapter);
+        if (detail && detail !== priorError && /失败|错误|不正确|不存在|锁定|频繁|验证码|异常|拒绝/.test(detail)) {
+          return { ok: false, code: "LOGIN_REJECTED", message: `网站拒绝登录：${detail}`, credentialRef, adapterId: adapter.id, stage, executionDurationMs: Date.now() - startedAt };
+        }
         await page.waitForTimeout(250);
       }
       if (!authenticated) {
         const detail = await loginErrorText(page, adapter);
         return { ok: false, code: "LOGIN_NOT_CONFIRMED", message: detail ? `登录提交后仍未确认：${detail}` : "登录提交后未确认进入目标页面", credentialRef, adapterId: adapter.id, url: page.url() };
       }
+      stage = "navigate_after_login";
       const navigation = await navigateAfterLogin(page, adapter, credential, targetUrl);
       if (!await pageHasLoginSuccess(page, adapter)) return { ok: false, authenticated: false, code: "LOGIN_NOT_CONFIRMED", message: "返回目标页后登录尚未恢复，将自动重试", url: page.url() };
       return { ok: true, credentialRef, adapterId: adapter.id, authenticated: true, url: page.url(), ...navigation };
@@ -434,7 +438,12 @@ export async function browserLoginWithCredential({ sessionId = "default", creden
         }
         continue;
       }
-      return { ok: false, code: "LOGIN_FAILED", message: error.message, credentialRef, adapterId: adapter.id };
+      const modelTimeout = stage === "model_locate" && /timeout|timed out|aborted/i.test(String(error.message));
+      let errorMessage = String(error.message || "LOGIN_FAILED");
+      for (const value of [credential.password, credential.username].filter(Boolean)) errorMessage = errorMessage.split(String(value)).join("[redacted]");
+      return { ok: false, code: modelTimeout ? "LOGIN_MODEL_TIMEOUT" : "LOGIN_FAILED",
+        message: modelTimeout ? "登录控件识别超时：AI 未响应，尚未提交登录" : `登录${({ navigate: "页面加载", locate: "控件定位", fill: "字段填写", consent: "协议勾选", submit: "按钮点击", verify: "结果确认", navigate_after_login: "后页面跳转" })[stage] || "操作"}失败：${errorMessage}`,
+        credentialRef, adapterId: adapter.id, stage, executionDurationMs: Date.now() - startedAt };
     }
   }
   return { ok: false, code: "LOGIN_FAILED", message: "登录重试失败", credentialRef, adapterId: adapter.id };
