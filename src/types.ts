@@ -325,7 +325,9 @@ export interface TradingSession {
 }
 
 export interface Task {
-  rescueSession?: { status: "ACTIVE" | "EXITING" | "COMPLETE"; netPnl?: number | null; originalPositionIds: string[]; rescuePositionIds: string[] } | null;
+  rescueSession?: { status: "ACTIVE" | "EXITING" | "COMPLETE"; netPnl?: number | null; originalPositionIds: string[]; rescuePositionIds: string[];
+    groups?: { id: string; status: "ACTIVE" | "EXITING" | "COMPLETE"; legacy?: boolean; netPnl?: number | null;
+      originalPositionIds: string[]; rescuePositionIds: string[]; rescueOrders: { pendingId: string; positionIds: string[] }[] }[] } | null;
   id: string;
   name: string;
   status: TaskStatus;

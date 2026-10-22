@@ -110,7 +110,8 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
       assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
       assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
-      assert.match(prompt, /全账户净利>=0立即全部离场/);
+      assert.match(prompt, /本组净利>=0立即整组离场/);
+      assert.match(prompt, /两笔独立救单/);
       assert.match(prompt, /原LONG按entry-bid、原SHORT按ask-entry测算/);
       assert.match(prompt, /保留原亏损单，另开同品种反向SELL\/BUY/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);

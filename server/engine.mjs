@@ -500,7 +500,7 @@ export function enforceProfitProbability(decision) {
 }
 
 export function buildPendingAction(task, decision, { now = Date.now(), replacePendingId } = {}) {
-  const intent = rescueEntryIntent(decision, task.market, now);
+  const intent = rescueEntryIntent(decision, task.market, now, task);
   if (!decision.exitType) validateRescueEntry(task, intent, replacePendingId);
   const auto = isAutoTakeover(task, decision);
   const preview = suggestOrderPreview(task, decision, { enforceQuantityLimit: isLiveTask(task) });
@@ -919,7 +919,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (task.pendingAction.exitType && task.pendingAction.exitType !== "SCHEDULED_CLOSE" && !exitGuard?.rescueRecovery
     && task.pendingAction.targetPositionIds?.some(id => activeRescuePositionIds(task).has(id))) {
     task.pendingAction.status = "CANCELLED";
-    task.pendingAction.message = "救单组不单独平盈利腿，等待全账户净利>=0整体离场";
+    task.pendingAction.message = "救单组不单独平盈利腿，等待本组净利>=0整体离场";
     persistTask(task);
     throw new Error("RESCUE_GROUP_EXIT_HELD");
   }
@@ -1885,7 +1885,7 @@ function decisionExecutionPolicy(task) {
     exitsAutomatic: true, cancellationsAutomatic: true,
     lossExit: "ai_trend_and_recovery", fixedLossAmountStop: false,
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
-    rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true, blockNewEntriesUntilFlat: true, oneRescuePerOriginal: true }, entryMarketRegimeRequired: true,
+    rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true, blockNewEntriesUntilFlat: true, rescueOrdersPerOriginal: 2, recoveryScope: "RESCUE_GROUP", recoveryNetPnlAtLeast: 0 }, entryMarketRegimeRequired: true,
     conditionalExits: true, profitPointExit: { minPoints: POSITION_MIN_PROFIT_POINTS, maxPoints: POSITION_MAX_PROFIT_POINTS, unit: "directional_price_difference", unknownFees: "net_unknown", knownNegativeNetAtCeiling: "STOP_LOSS" }, sessionClose: sessionCloseWindow(task),
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2669,7 +2669,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     const staleDecision = decisionExpired(task);
     let rescueEntryBlock = null;
     if (["BUY", "SELL"].includes(task.decision.action) && !task.decision.exitType) {
-      try { validateRescueEntry(task, rescueEntryIntent(task.decision, exitMarket)); }
+      try { validateRescueEntry(task, rescueEntryIntent(task.decision, exitMarket, Date.now(), task)); }
       catch (error) {
         if (!["INVALID_RESCUE_TARGET", "RESCUE_ALREADY_PENDING", "RESCUE_ENTRY_LOCKED", "RESCUE_EXIT_IN_PROGRESS"].includes(error.message)) throw error;
         rescueEntryBlock = error.message;
@@ -2981,7 +2981,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
     }
     const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
-    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length || rescueSubmitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : missingPlans ? `${market.account.positions.length} 笔持仓已核实，普通单监控1～4点，救单组等待账户净利>=0整体退出；每单位亏损3点自动反向救单` : `已核实 ${market.account.positions.length} 笔持仓，普通单监控1～4点、亏损3点反向救单；救单组按账户净利>=0整体退出` };
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length || rescueSubmitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : `${market.account.positions.length} 笔持仓已核实，普通单按原1～4点策略离场；亏损3点反向下两笔救单，每组净利>=0整组离场，救单期间禁止普通新开仓` };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔持仓动作未完成；${task.exitMonitor.message}` };
     if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
     persistTask(task);

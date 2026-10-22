@@ -798,20 +798,22 @@ test("legacy persisted fixed-amount stops cannot be confirmed after upgrade", as
   assert.equal(f.task.pendingAction.status, "REJECTED");
 });
 
-for (const side of ["LONG", "SHORT"]) test(`${side}: confirmed rescue blocks further entries even after loss expands and runtime is restored`, async () => {
+for (const side of ["LONG", "SHORT"]) test(`${side}: two rescue orders block a third and ordinary entries even after restart`, async () => {
   const f = setup(`repeat-rescue-${side}`, [{ ...long("original"), side, orderPrice: side === "LONG" ? 108 : 102, roundTripFee: 0 }], { autoDecisionEnabled: true });
   const decision = { action: side === "LONG" ? "SELL" : "BUY", marketRegime: side === "LONG" ? "DOWN" : "UP", entryPurpose: "RESCUE",
     rescuePositionIds: ["original"], targetSymbol: "DGKZ", bullishProfitProbability: 0.6, bearishProfitProbability: 0.6 };
   f.task.pendingAction = buildPendingAction(f.task, decision);
   const runtime = { ...f.runtime, submitSuggestionForm: async input => {
     f.submitted.push(input);
-    f.market.account.positions.push({ ...long("rescue-1"), side: side === "LONG" ? "SHORT" : "LONG", orderPrice: side === "LONG" ? 105 : 106, roundTripFee: 0 });
+    f.market.account.positions.push({ ...long(`rescue-${f.submitted.length}`), side: side === "LONG" ? "SHORT" : "LONG", orderPrice: side === "LONG" ? 105 : 106, roundTripFee: 0 });
     return { ok: true, submitted: true };
   } };
   await confirmPendingAction(f.task.id, { source: "auto_timeout", runtime });
   assert.throws(() => buildPendingAction(f.task, decision), /RESCUE_ALREADY_PENDING/);
-  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  await runPositionExitCycle(f.task.id, { runtime });
   assert.equal(f.task.rescueSession.status, "ACTIVE");
+  assert.equal(f.submitted.length, 2);
+  await runPositionExitCycle(f.task.id, { runtime });
   assert.equal(f.task.pendingAction.status, "CONFIRMED");
   assert.throws(() => buildPendingAction(f.task, decision), /RESCUE_ENTRY_LOCKED/);
   f.task.rescueSession = compactTaskRuntime(JSON.parse(JSON.stringify(compactTaskRuntime(f.task)))).rescueSession;
@@ -832,19 +834,24 @@ for (const purpose of ["NORMAL", "RESCUE"]) test(`${purpose}: account break-even
   await confirmPendingAction(f.task.id, { source: "auto_timeout", runtime: { ...f.runtime, submitSuggestionForm: async () => ({ ok: true, submitted: true }) } });
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.equal(f.task.rescueSession, undefined, "intent is not a filled rescue");
-  f.market.account.positions.push({ ...long("rescue"), side: "SHORT", orderPrice: 100.7, roundTripFee: 0.1 });
+  f.market.account.positions.push({ ...long("rescue"), side: "SHORT", orderPrice: 100.8, roundTripFee: 0.1 });
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   if (purpose === "NORMAL") {
     assert.equal(f.task.rescueSession, undefined);
     assert.deepEqual(f.submitted, []);
   } else {
+    assert.equal(f.task.rescueSession.status, "ACTIVE", "one rescue cannot trigger the new three-leg recovery");
+    assert.equal(f.task.pendingAction.rescueTrigger.rescueOrderNumber, 2);
+    f.market.account.positions.push({ ...long("rescue-2"), side: "SHORT", orderPrice: 100, roundTripFee: 0.1 });
+    await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.task.rescueSession.status, "EXITING");
     assert.ok(Math.abs(f.task.rescueSession.netPnl) < 1e-10);
-    assert.deepEqual(f.submitted.map(p => p.targetPositionIds[0]), ["original", "rescue"]);
-    assert.ok(f.submitted.every(p => p.exitGuard.rescueRecovery));
+    const exits = f.submitted.filter(p => p.exitType);
+    assert.deepEqual(exits.map(p => p.targetPositionIds[0]), ["original", "rescue", "rescue-2"]);
+    assert.ok(exits.every(p => p.exitGuard.rescueRecovery));
     await runPositionExitCycle(f.task.id, { runtime: f.runtime });
     assert.equal(f.task.rescueSession.status, "COMPLETE");
-    assert.equal(f.submitted.length, 2);
+    assert.equal(f.submitted.length, 4);
   }
 });
 
@@ -857,7 +864,7 @@ test("partial rescue fill remains active after cancellation of its aged remainde
   f.market.account.openOrders = [{ orderId: "remainder", remainingQuantity: 1, orderTime: new Date(Date.now() - 121000).toISOString() }];
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.deepEqual(f.cancelled, ["remainder"]);
-  assert.equal(f.task.pendingAction.status, "CANCELLED");
+  assert.equal(f.task.pendingAction.rescueTrigger.rescueOrderNumber, 2, "after auditing a partial first order, complete the second order once");
   assert.equal(f.task.rescueSession.status, "ACTIVE");
   assert.deepEqual(f.task.rescueSession.rescuePositionIds, ["rescue"]);
 });
@@ -945,7 +952,7 @@ test("automatic rescue retries a definite click failure and survives persistence
   assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original"]);
 });
 
-test("automatic rescue never appends orders after a confirmed fill and further loss", async () => {
+test("automatic rescue completes two orders and never appends a third after further loss", async () => {
   const f = setup("rescue-repeat-host", [{ ...long("original"), orderPrice: 108 }]);
   const runtime = { ...f.runtime, submitSuggestionForm: async input => {
     f.submitted.push(input);
@@ -954,16 +961,16 @@ test("automatic rescue never appends orders after a confirmed fill and further l
   } };
   await runPositionExitCycle(f.task.id, { runtime });
   await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted.length, 2);
   assert.equal(f.task.rescueSession.status, "ACTIVE");
   f.market.orderBook.bids[0].price = 104.9;
   await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted.length, 2);
   await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted.length, 2);
   f.market.orderBook = { bids: [{ price: 108, volume: 100 }], asks: [{ price: 109, volume: 100 }] };
   await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.filter(s => !s.exitType).length, 1);
+  assert.equal(f.submitted.filter(s => !s.exitType).length, 2);
 });
 
 test("AI HOLD cannot cancel an automatic rescue while its browser submission is in flight", async () => {
@@ -1000,6 +1007,27 @@ test("rescue transport interruption remains unverified instead of creating dupli
   assert.equal(f.task.pendingAction.status, "UNVERIFIED");
   await runPositionExitCycle(f.task.id, { runtime });
   assert.equal(calls, 1);
+});
+
+test("an unknown second rescue stays locked across restart and is never replaced by a third", async () => {
+  const f = setup("second-rescue-transport", [{ ...long("original"), orderPrice: 108, roundTripFee: 0 }]);
+  let calls = 0;
+  const runtime = { ...f.runtime, submitSuggestionForm: async input => {
+    calls++;
+    f.market.account.positions.push({ ...long(`rescue-${calls}`), side: "SHORT", orderPrice: input.price, roundTripFee: 0 });
+    if (calls === 2) throw new Error("DESKTOP_DISCONNECTED_AFTER_DISPATCH");
+    return { ok: true, submitted: true };
+  } };
+  await runPositionExitCycle(f.task.id, { runtime });
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(calls, 2);
+  assert.equal(f.task.pendingAction.status, "UNVERIFIED");
+  Object.assign(f.task, JSON.parse(JSON.stringify(compactTaskRuntime(f.task))));
+  for (let i = 0; i < 3; i++) await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(calls, 2);
+  assert.equal(f.task.pendingAction.status, "CONFIRMED");
+  assert.equal(f.task.rescueSession.groups[0].rescueOrders.length, 2);
+  assert.throws(() => buildPendingAction(f.task, { action: "BUY", targetSymbol: "DGKZ" }), /RESCUE_ENTRY_LOCKED/);
 });
 
 for (const side of ["LONG", "SHORT"]) test(`${side} rescue profit at one point per unit stays with its losing original until account recovery`, async () => {
@@ -1046,7 +1074,7 @@ test("AI batch profit exits retain only ordinary holdings and matching browser g
   assert.deepEqual(f.market.account.positions.map(p => p.positionOrderId), ["original", "rescue"]);
 });
 
-test("an initial batch of n losing holdings receives exactly n opposite rescues, then all new entries stay locked", async () => {
+test("an initial batch of n losing holdings receives exactly 2n opposite rescues, then all new entries stay locked", async () => {
   const originals = Array.from({ length: 3 }, (_, i) => ({ ...long(`original-${i}`), orderPrice: 108 + i, roundTripFee: 0 }));
   const f = setup("initial-rescue-batch", originals);
   const runtime = { ...f.runtime, submitSuggestionForm: async input => {
@@ -1054,14 +1082,15 @@ test("an initial batch of n losing holdings receives exactly n opposite rescues,
     f.market.account.positions.push({ ...long(`hedge-${f.submitted.length}`), side: "SHORT", orderPrice: input.price, roundTripFee: 0 });
     return { ok: true, submitted: true };
   } };
-  for (let i = 0; i < 6; i++) await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.length, 3);
+  for (let i = 0; i < 8; i++) await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.length, 6);
   assert.ok(f.submitted.every(input => input.action === "SELL" && input.quantity === 1 && !input.exitType));
-  assert.equal(f.market.account.positions.length, 6);
+  assert.equal(f.market.account.positions.length, 9);
   assert.equal(f.task.rescueSession.originalPositionIds.length, 3);
+  assert.ok(f.task.rescueSession.groups.every(g => g.rescueOrders.length === 2 && g.rescuePositionIds.length === 2));
   f.market.orderBook.bids[0].price = 90;
   for (let i = 0; i < 3; i++) await runPositionExitCycle(f.task.id, { runtime });
-  assert.equal(f.submitted.length, 3);
+  assert.equal(f.submitted.length, 6);
   const result = await runAnalysis(f.task.id, "", { runtime: { ...runtime,
     openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => f.market,
     requestDecision: async () => ({ action: "BUY", targetSymbol: "DGKZ", marketRegime: "UP", bullishProfitProbability: 0.7, bearishProfitProbability: 0.3, riskFlags: [], evidenceIds: [] }),
@@ -1077,6 +1106,43 @@ test("an older ordinary entry cannot be confirmed after a rescue starts", async 
   f.task.rescueSession = { status: "ACTIVE", originalPositionIds: ["original"], rescuePositionIds: ["rescue"] };
   await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /RESCUE_ENTRY_LOCKED/);
   assert.equal(f.submitted.length, 0);
+});
+
+test("each three-order group recovers independently while ordinary profit exits continue and entries stay locked", async () => {
+  const f = setup("independent-three-leg-groups", [
+    { ...long("original-a"), orderPrice: 108, roundTripFee: 0 },
+    { ...long("original-b"), orderPrice: 114, roundTripFee: 0 },
+  ]);
+  const runtime = { ...f.runtime, submitSuggestionForm: async input => {
+    if (input.exitType) return f.runtime.submitSuggestionForm(input);
+    f.submitted.push(input);
+    f.market.account.positions.push({ ...long(`rescue-${f.submitted.length}`), side: "SHORT", orderPrice: input.price, roundTripFee: 0 });
+    return { ok: true, submitted: true };
+  } };
+  for (let i = 0; i < 6; i++) await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.submitted.length, 4);
+  const [a, b] = ["original-a", "original-b"].map(id => f.task.rescueSession.groups.find(g => g.originalPositionIds.includes(id)));
+  f.market.orderBook = { bids: [{ price: 100, volume: 100 }], asks: [{ price: 101, volume: 100 }] };
+  f.market.account.positions.push({ ...long("ordinary"), orderPrice: 99, roundTripFee: 0 });
+  f.market.account.realtimeValueChange = -999;
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(a.status, "EXITING");
+  assert.equal(a.triggerNetPnl, 0);
+  assert.equal(b.status, "ACTIVE");
+  assert.equal(b.netPnl, -6);
+  assert.deepEqual(f.submitted.filter(p => p.exitType).map(p => p.targetPositionIds[0]).sort(),
+    ["original-a", ...a.rescuePositionIds, "ordinary"].sort());
+  assert.ok(f.market.account.positions.every(p => ["original-b", ...b.rescuePositionIds].includes(p.positionOrderId)));
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(a.status, "COMPLETE");
+  const normal = { action: "BUY", targetSymbol: "DGKZ", marketRegime: "UP", bullishProfitProbability: 0.7, bearishProfitProbability: 0.3 };
+  assert.throws(() => buildPendingAction(f.task, normal), /RESCUE_ENTRY_LOCKED/);
+  f.market.orderBook = { bids: [{ price: 94, volume: 100 }], asks: [{ price: 95, volume: 100 }] };
+  await runPositionExitCycle(f.task.id, { runtime });
+  await runPositionExitCycle(f.task.id, { runtime });
+  assert.equal(f.task.rescueSession.status, "COMPLETE");
+  assert.doesNotThrow(() => buildPendingAction(f.task, normal));
+  assert.equal(f.submitted.filter(p => !p.exitType).length, 4);
 });
 
 test("startup opposing positions lock entries until every leg and order clears, then permit a fresh rescue cycle", async () => {

@@ -1152,6 +1152,20 @@ for (const side of ["LONG", "SHORT"]) for (const loss of [2.99, 3]) {
   });
 }
 
+for (const side of ["LONG", "SHORT"]) test(`${side}: the second rescue completes a started group even below three loss points`, async t => {
+  t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
+  await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
+    .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
+  await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: side === "LONG" ? "SELL" : "BUY",
+    symbol: "DGKZ", symbolName: "测试商品", quantity: 1, price: side === "LONG" ? 100 : 101,
+    rescueTrigger: { type: "LOSS_POINTS", threshold: 3, heldSide: side, entryPrice: side === "LONG" ? 101 : 100,
+      positionId: "original", completesRescueGroup: true, rescueOrderNumber: 2 } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal((await page.evaluate(() => window.entries)).length, 1);
+  assert.deepEqual(await page.evaluate(() => window.exits), []);
+});
+
 test("rescue cancels its confirmation if the loss retreats below three points after the entry click", async t => {
   t.after(() => page.goto("http://127.0.0.1/trade-fixture"));
   await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture
