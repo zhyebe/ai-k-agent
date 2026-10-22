@@ -59,5 +59,11 @@ jobs:
             cd /opt/axiom-agent
             export GIT_SSH_COMMAND='ssh -i /root/.ssh/axiom-github -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
             git fetch origin "$REF"
+            if ! git diff --quiet HEAD -- package-lock.json; then
+              LOCK_BACKUP="/opt/axiom-agent/.deploy/${{ github.run_id }}/package-lock.local.patch"
+              git diff --binary HEAD -- package-lock.json > "$LOCK_BACKUP"
+              test -s "$LOCK_BACKUP"
+              git restore --source=HEAD --staged --worktree -- package-lock.json
+            fi
             git checkout --detach "$REF"
             bash scripts/remote/deploy-images.sh "/opt/axiom-agent/.deploy/${{ github.run_id }}/deployment-images.tar.gz"
