@@ -28,11 +28,11 @@ for (const action of ["BUY", "SELL"]) {
 }
 
 for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
-  test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with old long/short holdings and their exit plans`, async t => {
+  test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with ordinary holdings and their exit plans`, async t => {
     let now = Date.now();
     t.mock.method(Date, "now", () => now);
     const id = `multi-entry-${automatic}-${action}`;
-    const positions = ["买入", "卖出"].map((side, i) => ({ positionOrderId: `old-${i}`, symbol: "DGKZ", side, quantity: 1, frozenQuantity: 0, orderPrice: 100 }));
+    const positions = Array.from({ length: 2 }, (_, i) => ({ positionOrderId: `old-${i}`, symbol: "DGKZ", side: action === "BUY" ? "买入" : "卖出", quantity: 1, frozenQuantity: 0, orderPrice: 100 }));
     const task = { id, ownerUserId: id, mode: "LIVE", autoDecisionEnabled: automatic, status: "MONITORING", monitoringEnabled: true,
       target: { type: "website", connectorId: "connector_haohan_readonly", browserSessionId: id, url: "https://smyw.haohandahan.cn/client/#/transcc" },
       rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: "HOLD", evidenceIds: [], riskFlags: [] } };

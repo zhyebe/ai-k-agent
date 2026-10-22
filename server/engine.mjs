@@ -5,7 +5,7 @@ import { approvedKnowledgeForAnalysis, approvedSkillsForContext, buildApprovedEx
 import { DEFAULT_AUTO_DECISION_COUNTDOWN_SEC, executeDecision, isAutomaticAction, isLiveTask, isTradingSwitchOn, shouldSubmitLiveOrder, suggestOrderPreview } from "./execution.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
 import { CURRENT_ORDER_WAIT_MS, currentOrderCancellationPlan } from "./order-cancellation-policy.mjs";
-import { activeRescuePositionIds, automaticRescueCandidates, isAutomaticRescue, rescueProtectedPositionIds, observeRescueFill, rescueEntryIntent, rescueExitCandidates, validateRescueEntry } from "./rescue-policy.mjs";
+import { activeRescuePositionIds, automaticRescueCandidates, isAutomaticRescue, rescueProtectedPositionIds, observeRescueFill, observeStartupRescue, rescueBatchPositionIds, rescueEntryIntent, rescueExitCandidates, validateRescueEntry } from "./rescue-policy.mjs";
 import { blockingMissingFields } from "./market.mjs";
 import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
@@ -514,6 +514,7 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     decisionRunId: decision.runId || null,
     ...intent,
+    rescueBatchPositionIds: intent.entryPurpose === "RESCUE" ? rescueBatchPositionIds(task, task.market) : [],
     rescueTrigger: isAutomaticRescue(decision) ? decision.rescueTrigger : null,
     action,
     orderType: decision.orderType || "MARKET",
@@ -905,6 +906,7 @@ function reconcilePendingPosition(task, market) {
     task.pendingAction = reconciled;
     task.nextTrigger = reconciled.message;
   }
+  observeStartupRescue(task, market);
   persistTask(task);
 }
 
@@ -912,7 +914,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
-  if (!task.pendingAction.exitType && task.rescueSession?.status === "EXITING") throw new Error("RESCUE_EXIT_IN_PROGRESS");
+  if (!task.pendingAction.exitType) validateRescueEntry(task, task.pendingAction, task.pendingAction.id);
   const exitGuard = task.pendingAction.exitGuard;
   if (task.pendingAction.exitType && task.pendingAction.exitType !== "SCHEDULED_CLOSE" && !exitGuard?.rescueRecovery
     && task.pendingAction.targetPositionIds?.some(id => activeRescuePositionIds(task).has(id))) {
@@ -1479,6 +1481,7 @@ export function startTask(taskId) {
     task.pendingAction = null;
   }
   task.monitoringEnabled = true;
+  task.rescueStartupScanned = false;
   task.monitorFailureCount = 0;
   task.lastObservedFingerprint = "";
   task.lastAnalyzedFingerprint = "";
@@ -1882,7 +1885,7 @@ function decisionExecutionPolicy(task) {
     exitsAutomatic: true, cancellationsAutomatic: true,
     lossExit: "ai_trend_and_recovery", fixedLossAmountStop: false,
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
-    rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true }, entryMarketRegimeRequired: true,
+    rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true, blockNewEntriesUntilFlat: true, oneRescuePerOriginal: true }, entryMarketRegimeRequired: true,
     conditionalExits: true, profitPointExit: { minPoints: POSITION_MIN_PROFIT_POINTS, maxPoints: POSITION_MAX_PROFIT_POINTS, unit: "directional_price_difference", unknownFees: "net_unknown", knownNegativeNetAtCeiling: "STOP_LOSS" }, sessionClose: sessionCloseWindow(task),
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2668,7 +2671,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (["BUY", "SELL"].includes(task.decision.action) && !task.decision.exitType) {
       try { validateRescueEntry(task, rescueEntryIntent(task.decision, exitMarket)); }
       catch (error) {
-        if (!["INVALID_RESCUE_TARGET", "RESCUE_ALREADY_PENDING", "RESCUE_LOSS_NOT_EXPANDED", "RESCUE_EXIT_IN_PROGRESS"].includes(error.message)) throw error;
+        if (!["INVALID_RESCUE_TARGET", "RESCUE_ALREADY_PENDING", "RESCUE_ENTRY_LOCKED", "RESCUE_EXIT_IN_PROGRESS"].includes(error.message)) throw error;
         rescueEntryBlock = error.message;
         task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), rescueEntryBlock])];
       }
@@ -2718,7 +2721,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
-      const boundaryMessage = rescueEntryBlock ? ({ INVALID_RESCUE_TARGET: "补救目标、方向或当前亏损未核实，继续分析", RESCUE_ALREADY_PENDING: "前笔补救尚未核实完成，继续管理持仓和委托", RESCUE_LOSS_NOT_EXPANDED: "原单亏损未较上次补救扩大，继续监控", RESCUE_EXIT_IN_PROGRESS: "救单正在整体离场，完成前不新开仓" })[rescueEntryBlock]
+      const boundaryMessage = rescueEntryBlock ? ({ INVALID_RESCUE_TARGET: "补救目标、方向或当前亏损未核实，继续分析", RESCUE_ALREADY_PENDING: "前笔补救尚未核实完成，继续管理持仓和委托", RESCUE_ENTRY_LOCKED: "救单尚未全部离场，禁止新开仓，继续监控整体恢复", RESCUE_EXIT_IN_PROGRESS: "救单正在整体离场，完成前不新开仓" })[rescueEntryBlock]
         : sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析" : closingEntryBlocked ? "已进入收盘清仓窗口，禁止新开仓" : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI 结果已超过原行情有效期，重新分析" : positionChangedDuringAnalysis ? "分析期间持仓动作已执行，丢弃旧动作" : actionMessage;
       completeWorkflow(task, "action", boundaryMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "action", message: boundaryMessage });

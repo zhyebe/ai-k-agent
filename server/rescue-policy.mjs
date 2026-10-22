@@ -4,6 +4,35 @@ const identity = item => [item?.symbol, item?.symbolName, item?.instrumentId].fi
 
 export const RESCUE_LOSS_POINTS = 3;
 
+const pendingRescues = task => [task.pendingAction, ...(task.unsettledActions || [])].filter(p => p
+  && !p.exitType && p.entryPurpose === "RESCUE"
+  && (["WAITING", "SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status) || p.cancellationAwaitingAudit));
+
+export function rescueEntryLocked(task) {
+  return ["ACTIVE", "EXITING"].includes(task.rescueSession?.status) || pendingRescues(task).length > 0;
+}
+
+export function rescueBatchPositionIds(task, market) {
+  return (task.rescueSession?.status === "ACTIVE" ? task.rescueSession.batchOriginalPositionIds : null)
+    || pendingRescues(task)[0]?.rescueBatchPositionIds
+    || (market.account?.positions || []).filter(p => p.positionOrderId && Number(p.quantity) > 0).map(p => p.positionOrderId);
+}
+
+export function observeStartupRescue(task, market) {
+  if (task.rescueStartupScanned || market.account?.positionsVerified !== true) return;
+  task.rescueStartupScanned = true;
+  if (rescueEntryLocked(task)) return;
+  const positions = (market.account.positions || []).filter(p => p.positionOrderId && Number(p.quantity) > 0);
+  const paired = positions.filter(p => ["LONG", "SHORT"].includes(heldDirection(p))
+    && positions.some(other => heldDirection(other) === (heldDirection(p) === "LONG" ? "SHORT" : "LONG")
+      && identity(p).some(value => identity(other).includes(value))));
+  if (!paired.length) return;
+  task.rescueSession = { status: "ACTIVE", startedAt: market.observedAt, source: "startup_positions",
+    originalPositionIds: paired.filter(p => heldDirection(p) === "LONG").map(p => p.positionOrderId),
+    rescuePositionIds: paired.filter(p => heldDirection(p) === "SHORT").map(p => p.positionOrderId),
+    batchOriginalPositionIds: [], lastRescueByPosition: {} };
+}
+
 export function isAutomaticRescue(decision) {
   return decision?.entryPurpose === "RESCUE" && !decision.exitType
     && decision.rescueTrigger?.type === "LOSS_POINTS" && decision.rescueTrigger.threshold === RESCUE_LOSS_POINTS;
@@ -65,7 +94,7 @@ export function automaticRescueCandidates(task, market, now = Date.now()) {
       validateRescueEntry(task, rescueEntryIntent(decision, market, now), retry?.id);
       candidates.push({ position, decision, replacePendingId: retry?.id });
     } catch (error) {
-      if (!["RESCUE_ALREADY_PENDING", "RESCUE_LOSS_NOT_EXPANDED"].includes(error.message)) throw error;
+      if (!["RESCUE_ALREADY_PENDING", "RESCUE_ENTRY_LOCKED"].includes(error.message)) throw error;
     }
   }
   return candidates.sort((a, b) => b.decision.rescueTrigger.lossPoints - a.decision.rescueTrigger.lossPoints);
@@ -96,19 +125,17 @@ export function rescueEntryIntent(decision, market, now = Date.now()) {
 
 export function validateRescueEntry(task, intent, pendingId) {
   if (task.rescueSession?.status === "EXITING") throw new Error("RESCUE_EXIT_IN_PROGRESS");
-  if (intent.entryPurpose !== "RESCUE") return;
-  const outstanding = [task.pendingAction, ...(task.unsettledActions || [])];
-  if (outstanding.some(p => p && p.id !== pendingId && ["WAITING", "SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status)
-    && p.entryPurpose === "RESCUE" && intent.rescuePositionIds.some(id => p.rescuePositionIds?.includes(id))))
-    throw new Error("RESCUE_ALREADY_PENDING");
-  if (task.rescueSession?.status !== "ACTIVE") return;
-  for (const id of intent.rescuePositionIds) {
-    if (!task.rescueSession.originalPositionIds.includes(id)) continue;
-    const previous = task.rescueSession.lastRescueByPosition?.[id];
-    const current = intent.rescueLossReferences[id];
-    if (!previous || previous.entryPrice !== current.entryPrice || previous.heldSide !== current.heldSide
-      || !(current.lossPoints > previous.lossPoints)) throw new Error("RESCUE_LOSS_NOT_EXPANDED");
+  if (intent.entryPurpose !== "RESCUE") {
+    if (rescueEntryLocked(task)) throw new Error("RESCUE_ENTRY_LOCKED");
+    return;
   }
+  if (pendingRescues(task).some(p => p.id !== pendingId))
+    throw new Error("RESCUE_ALREADY_PENDING");
+  const session = task.rescueSession;
+  const batch = session?.status === "ACTIVE" ? session.batchOriginalPositionIds || []
+    : pendingRescues(task).find(p => p.id !== pendingId)?.rescueBatchPositionIds;
+  if (batch && intent.rescuePositionIds.some(id => !batch.includes(id)
+    || activeRescuePositionIds(task).has(id))) throw new Error("RESCUE_ENTRY_LOCKED");
 }
 
 export function observeRescueFill(task, market, pending) {
@@ -135,6 +162,7 @@ export function observeRescueFill(task, market, pending) {
     ...previous, status: previous?.status || "ACTIVE", startedAt: previous?.startedAt || market.observedAt,
     originalPositionIds: [...new Set([...(previous?.originalPositionIds || []), ...pending.rescuePositionIds])],
     rescuePositionIds: [...new Set([...(previous?.rescuePositionIds || []), ...added.map(p => p.positionOrderId)])],
+    batchOriginalPositionIds: previous?.batchOriginalPositionIds || pending.rescueBatchPositionIds || pending.rescuePositionIds,
     lastRescueByPosition: { ...previous?.lastRescueByPosition, ...pending.rescueLossReferences },
   };
 }
@@ -145,14 +173,8 @@ export function rescueExitCandidates(task, market, now = Date.now()) {
   if (market.account?.positionsVerified !== true) { session.netPnl = null; return []; }
   const positions = (market.account.positions || []).filter(p => Number(p.quantity) > 0);
   const unresolvedEntry = [task.pendingAction, ...(task.unsettledActions || [])].some(p => p && !p.exitType
-    && ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status));
-  const relatedIds = [...session.originalPositionIds, ...session.rescuePositionIds];
-  if (session.status === "ACTIVE" && !positions.some(p => relatedIds.includes(p.positionOrderId))
-    && !unresolvedEntry && market.account.openOrdersVerified === true && !market.account.openOrders?.length) {
-    session.status = "COMPLETE";
-    session.completedAt = new Date(now).toISOString();
-    return [];
-  }
+    && (["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status)
+      || (p.entryPurpose === "RESCUE" && p.status === "WAITING") || p.cancellationAwaitingAudit));
   if (!positions.length) {
     if (market.account.openOrdersVerified === true && !market.account.openOrders?.length && !unresolvedEntry) {
       session.status = "COMPLETE";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { observeRescueFill, rescueEntryIntent, rescueExitCandidates } from "../server/rescue-policy.mjs";
+import { automaticRescueCandidates, observeRescueFill, observeStartupRescue, rescueEntryIntent, rescueEntryLocked, rescueExitCandidates, validateRescueEntry } from "../server/rescue-policy.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
 
 const now = Date.parse("2026-10-21T10:00:00+08:00");
@@ -102,10 +102,80 @@ test("recovery needs aggregate same-side depth and unresolved entries prevent co
   assert.equal(task.rescueSession.status, "EXITING");
 });
 
-test("closed rescue participants do not carry recovery rules into later ordinary positions", () => {
+test("closed rescue participants keep the lock until the whole account is flat", () => {
   const task = {}, market = snapshot([original, rescue]);
   observeRescueFill(task, market, pending);
   market.account.positions = [position("ordinary", "LONG", 100)];
-  assert.deepEqual(rescueExitCandidates(task, market, now), []);
+  assert.equal(rescueExitCandidates(task, market, now).length, 1);
+  assert.equal(task.rescueSession.status, "EXITING");
+  assert.equal(rescueEntryLocked(task), true);
+  market.account.positions = [];
+  rescueExitCandidates(task, market, now);
   assert.equal(task.rescueSession.status, "COMPLETE");
+  assert.equal(rescueEntryLocked(task), false);
+});
+
+for (const status of ["WAITING", "SUBMITTING", "AWAITING_FILL", "UNVERIFIED"]) test(`a ${status} rescue blocks ordinary entries before fill reconciliation`, () => {
+  for (const slot of ["pendingAction", "unsettledActions"]) {
+    const order = { ...pending, status };
+    const task = { [slot]: slot === "pendingAction" ? order : [order] };
+    assert.throws(() => validateRescueEntry(task, { entryPurpose: "NORMAL" }), /RESCUE_ENTRY_LOCKED/);
+  }
+});
+
+test("a cancelled rescue remains locked until its possible partial fill is audited", () => {
+  const task = { pendingAction: { ...pending, status: "CANCELLED", cancellationAwaitingAudit: true } };
+  assert.equal(rescueEntryLocked(task), true);
+  task.pendingAction.cancellationAwaitingAudit = false;
+  assert.equal(rescueEntryLocked(task), false);
+});
+
+test("startup recognizes same-instrument opposing holdings without inventing pairs across instruments", () => {
+  const task = {};
+  const market = snapshot([original, rescue]);
+  market.account.positionsVerified = false;
+  observeStartupRescue(task, market);
+  assert.equal(task.rescueStartupScanned, undefined);
+  market.account.positionsVerified = true;
+  observeStartupRescue(task, market);
+  assert.equal(task.rescueSession.source, "startup_positions");
+  assert.equal(rescueEntryLocked(task), true);
+  assert.deepEqual(automaticRescueCandidates(task, market, now), []);
+  const other = {};
+  observeStartupRescue(other, snapshot([original, { ...rescue, symbol: "B" }]));
+  assert.equal(rescueEntryLocked(other), false);
+  observeStartupRescue(other, market);
+  assert.equal(rescueEntryLocked(other), false, "ordinary opposing fills after startup do not reclassify the task");
+});
+
+test("the initial batch rescues each original once and never adds new positions", () => {
+  const task = {};
+  const market = snapshot([original, position("second", "LONG", 105), rescue]);
+  observeRescueFill(task, market, { ...pending, rescueBatchPositionIds: ["loss", "second"] });
+  assert.deepEqual(automaticRescueCandidates(task, market, now).map(c => c.position.positionOrderId), ["second"]);
+  market.account.positions.push(position("late", "LONG", 110));
+  assert.deepEqual(automaticRescueCandidates(task, market, now).map(c => c.position.positionOrderId), ["second"]);
+  assert.throws(() => validateRescueEntry(task, rescueEntryIntent({ action: "SELL", targetSymbol: "A", entryPurpose: "RESCUE", rescuePositionIds: ["loss"] }, market, now)), /RESCUE_ENTRY_LOCKED/);
+  assert.throws(() => validateRescueEntry(task, { entryPurpose: "NORMAL" }), /RESCUE_ENTRY_LOCKED/);
+});
+
+test("restored partial rescue locks survive incomplete position and current-order observations", () => {
+  const task = {};
+  observeRescueFill(task, snapshot([original, { ...rescue, quantity: 0.5 }]), pending);
+  const restored = JSON.parse(JSON.stringify(compactTaskRuntime(task)));
+  const market = snapshot([]);
+  market.account.positionsVerified = false;
+  rescueExitCandidates(restored, market, now);
+  assert.equal(rescueEntryLocked(restored), true);
+  market.account.positionsVerified = true;
+  market.account.openOrdersVerified = false;
+  rescueExitCandidates(restored, market, now);
+  assert.equal(rescueEntryLocked(restored), true);
+  market.account.openOrdersVerified = true;
+  market.account.openOrders = [{ orderId: "remaining" }];
+  rescueExitCandidates(restored, market, now);
+  assert.equal(rescueEntryLocked(restored), true);
+  market.account.openOrders = [];
+  rescueExitCandidates(restored, market, now);
+  assert.doesNotThrow(() => validateRescueEntry(restored, { entryPurpose: "NORMAL" }));
 });
