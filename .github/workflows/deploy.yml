@@ -65,5 +65,11 @@ jobs:
               test -s "$LOCK_BACKUP"
               git restore --source=HEAD --staged --worktree -- package-lock.json
             fi
+            if ! git diff --quiet HEAD -- .github/workflows/deploy.yml; then
+              WORKFLOW_BACKUP="/opt/axiom-agent/.deploy/${{ github.run_id }}/deploy-workflow.local.patch"
+              git diff --binary HEAD -- .github/workflows/deploy.yml > "$WORKFLOW_BACKUP"
+              test -s "$WORKFLOW_BACKUP"
+              git restore --source=HEAD --staged --worktree -- .github/workflows/deploy.yml
+            fi
             git checkout --detach "$REF"
             bash scripts/remote/deploy-images.sh "/opt/axiom-agent/.deploy/${{ github.run_id }}/deployment-images.tar.gz"
