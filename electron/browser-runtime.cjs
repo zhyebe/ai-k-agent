@@ -61,13 +61,14 @@ function browserOperationPriority(method) {
 }
 
 async function prepareBrowserActionWindow(sessionId, method) {
-  if (!["browserLogin", "fillSuggestionForm", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry"].includes(method)) return;
+  if (!["openMarketBrowser", "observeMarket", "observeExecutionMarket", "browserLogin", "fillSuggestionForm", "submitSuggestionForm", "cancelOpenOrders", "continueManualEntry"].includes(method)) return;
   const host = activeSessions.get(sessionId);
   if (!host) return;
   await host.evaluate(({ BrowserWindow }) => {
     for (const window of BrowserWindow.getAllWindows()) {
-      // A minimized Windows surface can stop producing stable frames even
-      // with timer throttling disabled. Restore it before Playwright actions;
+      // Account collection switches tabs and pages too. A minimized surface
+      // can stop stable frames even with timer throttling disabled. Restore it
+      // before each DOM phase, including reads preceding Playwright actions;
       // keep the usual visibility, hit-target and stability checks intact.
       if (window.isMinimized()) window.restore();
       if (!window.isVisible()) window.showInactive();
@@ -92,6 +93,7 @@ function enqueueSessionOperation(sessionId, method, signal, deadlineAt, operatio
     }
   };
   signal.addEventListener("abort", removeOnAbort, { once: true });
+  job.removeOnAbort = removeOnAbort;
   state.pending.push(job);
   state.pending.sort((left, right) => right.priority - left.priority || left.sequence - right.sequence);
   const drain = async () => {
@@ -101,13 +103,14 @@ function enqueueSessionOperation(sessionId, method, signal, deadlineAt, operatio
       while (state.pending.length) {
         const next = state.pending.shift();
         if (next.signal.aborted) {
+          next.signal.removeEventListener("abort", next.removeOnAbort);
           next.reject(next.signal.reason || new Error("DESKTOP_BROWSER_CALL_CANCELLED"));
           continue;
         }
         next.started = true;
         try { next.resolve(await next.operation()); }
         catch (error) { next.reject(error); }
-        finally { next.signal.removeEventListener("abort", removeOnAbort); }
+        finally { next.signal.removeEventListener("abort", next.removeOnAbort); }
       }
     } finally {
       state.running = false;
@@ -121,11 +124,33 @@ function enqueueSessionOperation(sessionId, method, signal, deadlineAt, operatio
 async function executeBrowserCall(app, message, apiBaseUrl, signal) {
   if (!message.userId) throw new Error("DESKTOP_BROWSER_USER_REQUIRED");
   const sessionId = scopedSession(message, apiBaseUrl);
+  const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "observeExecutionMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
+    && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
   const withBrowser = async (operation) => {
     return enqueueSessionOperation(sessionId, message.method, signal, message.deadlineAt, async () => {
       signal.throwIfAborted();
       if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
-      return operation();
+      const { browser } = await loadModules(app);
+      signal.throwIfAborted();
+      let closing;
+      const abort = () => {
+        if (shouldCloseOnAbort() && !closing) {
+          closing = browser.closeBrowserSession(sessionId);
+          closing.catch(() => {});
+        }
+      };
+      // Only the operation owning the DOM queue may close this browser.
+      // A full collection waiting on network data must not abort another
+      // operation's trade, or close it again after its own queue phase ends.
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        await prepareBrowserActionWindow(sessionId, message.method);
+        signal.throwIfAborted();
+        return await operation();
+      } finally {
+        signal.removeEventListener("abort", abort);
+        if (closing) await closing;
+      }
     });
   };
   const execute = async () => {
@@ -133,56 +158,45 @@ async function executeBrowserCall(app, message, apiBaseUrl, signal) {
     if (Date.now() >= message.deadlineAt) throw new Error("DESKTOP_BROWSER_CALL_EXPIRED");
     const { browser, market, tools, analysis } = await loadModules(app);
     signal.throwIfAborted();
-    await prepareBrowserActionWindow(sessionId, message.method);
-    signal.throwIfAborted();
     const input = { ...message.input, sessionId, ...(message.provider ? { browserProvider: message.provider } : {}) };
-    const shouldCloseOnAbort = () => !(["openMarketBrowser", "observeMarket", "observeExecutionMarket", "readTradeControls", "browserLoginStatus"].includes(message.method)
-      && ["DESKTOP_DISCONNECTED", "DESKTOP_RECONNECTED"].includes(signal.reason?.message));
-    const abort = () => { if (shouldCloseOnAbort()) browser.closeBrowserSession(sessionId).catch(() => {}); };
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(message.method)) {
-        const task = { ...input.task, target: { ...input.task?.target, browserSessionId: sessionId } };
-        const result = await market[message.method](task, input.connector, { ...(message.options || {}), withBrowser });
-        signal.throwIfAborted();
-        // The public session ID stays stable across desktop installs and reconnects.
-        if (result.sessionId) result.sessionId = input.task?.target?.browserSessionId || `task:${input.task?.id}`;
-        if (input.show && activeSessions.has(sessionId)) {
-          await activeSessions.get(sessionId).evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) { window.show(); window.focus(); } });
-        }
-        if (message.method === "observeMarket" && result.ok) {
-          const compact = analysis.compactCollectedMarket(result);
-          // The API server owns decision validity. Pass its call-start stamp
-          // through the desktop runtime so client clock skew cannot make the
-          // next AI result appear older/newer than the snapshot used.
-          if (message.input?.serverObservedAt) compact.observedAt = message.input.serverObservedAt;
-          collectedMarkets.set(sessionId, compact);
-          return compact;
-        }
-        return result;
+    if (["openMarketBrowser", "observeMarket", "observeExecutionMarket"].includes(message.method)) {
+      const task = { ...input.task, target: { ...input.task?.target, browserSessionId: sessionId } };
+      const result = await market[message.method](task, input.connector, { ...(message.options || {}), withBrowser });
+      signal.throwIfAborted();
+      // The public session ID stays stable across desktop installs and reconnects.
+      if (result.sessionId) result.sessionId = input.task?.target?.browserSessionId || `task:${input.task?.id}`;
+      if (input.show && activeSessions.has(sessionId)) {
+        await activeSessions.get(sessionId).evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) { window.show(); window.focus(); } });
       }
-      if (message.method === "browserLogin") return await tools.browserLoginWithCredential(input, message.credential);
-      if (message.method === "browserLoginStatus") return await tools.browserLoginStatus(input);
-      if (message.method === "browserScanControls") return await tools.browserScanControls(input);
-      if (message.method === "fillSuggestionForm") return await tools.fillSuggestionForm(input);
-      if (message.method === "continueManualEntry") return await tools.continueManualEntry(input);
-      if (message.method === "readTradeControls") return await tools.readTradeControls(input);
-      if (message.method === "cancelOpenOrders") return await tools.cancelOpenOrders(input);
-      if (message.method === "closeBrowserSession") return await browser.closeBrowserSession(sessionId);
-      if (message.method === "submitSuggestionForm") {
-        if (!input.confirmationId) throw new Error("TRADE_CONFIRMATION_REQUIRED");
-        const key = `${sessionId}:${input.confirmationId}`;
-        if (confirmations.has(key)) throw new Error("TRADE_CONFIRMATION_ALREADY_USED");
-        if (confirmations.size >= 10000) throw new Error("TRADE_CONFIRMATION_LIMIT");
-        const result = await tools.submitSuggestionForm(input);
-        if (!signal.aborted && result?.ok && result?.submitted) confirmations.add(key);
-        return result;
+      if (message.method === "observeMarket" && result.ok) {
+        const compact = analysis.compactCollectedMarket(result);
+        // The API server owns decision validity. Pass its call-start stamp
+        // through the desktop runtime so client clock skew cannot make the
+        // next AI result appear older/newer than the snapshot used.
+        if (message.input?.serverObservedAt) compact.observedAt = message.input.serverObservedAt;
+        collectedMarkets.set(sessionId, compact);
+        return compact;
       }
-      throw new Error("BROWSER_METHOD_UNKNOWN");
-    } finally {
-      signal.removeEventListener("abort", abort);
-      if (signal.aborted && shouldCloseOnAbort()) await browser.closeBrowserSession(sessionId);
+      return result;
     }
+    if (message.method === "browserLogin") return await tools.browserLoginWithCredential(input, message.credential);
+    if (message.method === "browserLoginStatus") return await tools.browserLoginStatus(input);
+    if (message.method === "browserScanControls") return await tools.browserScanControls(input);
+    if (message.method === "fillSuggestionForm") return await tools.fillSuggestionForm(input);
+    if (message.method === "continueManualEntry") return await tools.continueManualEntry(input);
+    if (message.method === "readTradeControls") return await tools.readTradeControls(input);
+    if (message.method === "cancelOpenOrders") return await tools.cancelOpenOrders(input);
+    if (message.method === "closeBrowserSession") return await browser.closeBrowserSession(sessionId);
+    if (message.method === "submitSuggestionForm") {
+      if (!input.confirmationId) throw new Error("TRADE_CONFIRMATION_REQUIRED");
+      const key = `${sessionId}:${input.confirmationId}`;
+      if (confirmations.has(key)) throw new Error("TRADE_CONFIRMATION_ALREADY_USED");
+      if (confirmations.size >= 10000) throw new Error("TRADE_CONFIRMATION_LIMIT");
+      const result = await tools.submitSuggestionForm(input);
+      if (!signal.aborted && result?.ok && result?.submitted) confirmations.add(key);
+      return result;
+    }
+    throw new Error("BROWSER_METHOD_UNKNOWN");
   };
   // Only DOM phases of full collection need the same-session queue. Its slow
   // read-only history requests must leave room for position/exit observations.

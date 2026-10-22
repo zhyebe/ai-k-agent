@@ -9,9 +9,9 @@ import { createProvider } from "../server/provider.mjs";
 
 import { positionProfitExit } from "../server/exit-policy.mjs";
 
-import { tradeFixture, refreshingTradeFixture } from "./fixtures/trade-page.mjs";
+import { tradeFixture, refreshingTradeFixture, redrawNextControl } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
-import { activateTradeControl, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
+import { activateTradeControl, completeTradeDialogs, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
 
 let browser;
 let page;
@@ -30,6 +30,38 @@ after(async () => {
 });
 afterEach(async () => {
   assert.equal(await page.evaluate(() => window.historyVisits), 0, "automation must never open historical orders");
+});
+
+test("a confirmation redrawn after discovery is reacquired without waiting on its detached token", async t => {
+  await page.reload();
+  page.setDefaultTimeout(600);
+  t.after(() => page.setDefaultTimeout(30000));
+  await page.evaluate(redrawNextControl, ".el-dialog button");
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", price: 21, quantity: 2,
+    exitType: "TAKE_PROFIT", orderType: "LIMIT", targetPositionIds: ["P-1"] });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
+});
+
+test("confirmation replaced during quote verification is rescanned and verified again before one click", async () => {
+  await page.reload();
+  await page.evaluate(() => transfer("P-1", 2));
+  let checks = 0;
+  const result = await completeTradeDialogs(page, { exitType: "TAKE_PROFIT", orderType: "LIMIT", price: 21,
+    canConfirm: async () => {
+      checks++;
+      if (checks === 1) await page.locator(".el-dialog button").first().evaluate(node => {
+        const replacement = node.cloneNode(true);
+        replacement.removeAttribute("data-axiom-control");
+        replacement.onclick = node.onclick;
+        node.replaceWith(replacement);
+      });
+      return { ok: true };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(checks, 2);
+  assert.deepEqual(await page.evaluate(() => window.exits), [{ id: "P-1", price: "21", quantity: "2" }]);
 });
 
 test("a reordered holding keeps its exact identity instead of clicking the old row index", async () => {

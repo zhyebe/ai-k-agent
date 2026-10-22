@@ -83,4 +83,18 @@ export function enableRefreshingOrderSelection() {
   };
   bind();
 }
-export const refreshingTradeFixture = tradeFixture.replace("</body>", `<script>(${enableRefreshingOrderSelection.toString()})()</script></body>`);
+// One Vue-style replacement between semantic discovery and the next action.
+export function redrawNextControl(selector) {
+  const observer = new MutationObserver(records => {
+    const node = records.map(record => record.target).find(node => node.matches(selector) && node.hasAttribute("data-axiom-control"));
+    if (!node) return;
+    observer.disconnect();
+    const replacement = node.cloneNode(true);
+    replacement.removeAttribute("data-axiom-control");
+    replacement.onclick = node.onclick;
+    node.replaceWith(replacement);
+    window.controlRedraws = (window.controlRedraws || 0) + 1;
+  });
+  observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-axiom-control"] });
+}
+export const refreshingTradeFixture = tradeFixture.replace("</body>", `<script>(${enableRefreshingOrderSelection.toString()})(); window.redrawNextControl = ${redrawNextControl.toString()};</script></body>`);

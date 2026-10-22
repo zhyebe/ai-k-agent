@@ -18,7 +18,7 @@ function loadRuntime(file, replacements = {}, extra = "") {
   return module.exports;
 }
 
-test("browser writes restore a hidden minimized surface before acting; observations keep its state", async () => {
+test("browser writes restore a hidden minimized surface before acting; passive control scans keep its state", async () => {
   const events = [];
   const window = {
     minimized: true, visible: false,
@@ -44,6 +44,37 @@ test("browser writes restore a hidden minimized surface before acting; observati
   const result = await runtime.executeBrowserCall({}, { ...message, method: "submitSuggestionForm" }, "https://example.test", new AbortController().signal);
   assert.equal(result.ok, true);
   assert.deepEqual(events, ["restore", "show", "submit"]);
+});
+
+test("account collection restores the surface for each DOM phase, including after its network wait", async () => {
+  const window = {
+    minimized: true, visible: false,
+    isMinimized() { return this.minimized; }, isVisible() { return this.visible; },
+    restore() { this.minimized = false; }, showInactive() { this.visible = true; },
+  };
+  const runtime = loadRuntime("browser-runtime.cjs", {}, `
+    module.exports.useModules = value => { modulesPromise = Promise.resolve(value); };
+    module.exports.useHost = (message, host) => activeSessions.set(scopedSession(message, "https://example.test"), host);
+  `);
+  let phases = 0;
+  const checkSurface = () => { phases++; assert.equal(window.minimized, false); assert.equal(window.visible, true); return { ok: true }; };
+  runtime.useModules({
+    browser: {}, analysis: { compactCollectedMarket: value => value },
+    market: {
+      observeMarket: async (_task, _connector, { withBrowser }) => {
+        await withBrowser(checkSurface);
+        window.minimized = true; window.visible = false;
+        return withBrowser(checkSurface);
+      },
+      observeExecutionMarket: async () => checkSurface(),
+    },
+  });
+  const message = { userId: "owner", input: { task: { id: "one", target: {} } }, deadlineAt: Date.now() + 10000 };
+  runtime.useHost(message, { evaluate: async fn => fn({ BrowserWindow: { getAllWindows: () => [window] } }) });
+  await runtime.executeBrowserCall({}, { ...message, method: "observeMarket" }, "https://example.test", new AbortController().signal);
+  window.minimized = true; window.visible = false;
+  await runtime.executeBrowserCall({}, { ...message, method: "observeExecutionMarket" }, "https://example.test", new AbortController().signal);
+  assert.equal(phases, 3);
 });
 
 test("connecting the same desktop session twice keeps its socket and active browser call", async (t) => {
@@ -261,4 +292,65 @@ test("logout during history waits prevents every later DOM read and cache write"
   finish.resolve();
   await assert.rejects(operation, /DESKTOP_CALL_CANCELLED/);
   assert.equal(refreshed, false);
+});
+
+test("timing out collection outside the DOM queue cannot close a concurrent trade", async () => {
+  const historyStarted = deferred(), finishHistory = deferred(), tradeStarted = deferred(), finishTrade = deferred();
+  let closes = 0, submissions = 0;
+  const runtime = loadRuntime("browser-runtime.cjs", {}, "\nmodule.exports.useModules = value => { modulesPromise = Promise.resolve(value); };\n");
+  runtime.useModules({
+    browser: { closeBrowserSession: async () => { closes++; } },
+    analysis: { compactCollectedMarket: value => value },
+    market: { observeMarket: async (_task, _connector, { withBrowser }) => {
+      await withBrowser(async () => {});
+      historyStarted.resolve();
+      await finishHistory.promise;
+      return withBrowser(async () => { throw new Error("expired collection must not touch DOM"); });
+    } },
+    tools: { submitSuggestionForm: async () => { submissions++; tradeStarted.resolve(); await finishTrade.promise; return { ok: true, submitted: true }; } },
+  });
+  const message = { userId: "owner", input: { sessionId: "task:one", task: { id: "one", target: { browserSessionId: "task:one" } }, confirmationId: "once" }, deadlineAt: Date.now() + 10000 };
+  const controller = new AbortController();
+  const collection = runtime.executeBrowserCall({}, { ...message, method: "observeMarket" }, "https://example.test", controller.signal);
+  const rejected = assert.rejects(collection, /DESKTOP_CALL_EXPIRED/);
+  await historyStarted.promise;
+  const trade = runtime.executeBrowserCall({}, { ...message, method: "submitSuggestionForm" }, "https://example.test", new AbortController().signal);
+  await tradeStarted.promise;
+  controller.abort(new Error("DESKTOP_CALL_EXPIRED"));
+  finishHistory.resolve();
+  finishTrade.resolve();
+  await rejected;
+  assert.equal((await trade).ok, true);
+  assert.equal(closes, 0, "a read-only network wait does not own the browser being used by the trade");
+  assert.equal(submissions, 1);
+});
+
+test("window preparation cancellation closes once and releases the queue only after cleanup", async () => {
+  const preparing = deferred(), finishPreparation = deferred(), finishClose = deferred();
+  let closes = 0, submissions = 0, reads = 0;
+  const runtime = loadRuntime("browser-runtime.cjs", {}, `
+    module.exports.useModules = value => { modulesPromise = Promise.resolve(value); };
+    module.exports.useHost = (message, host) => activeSessions.set(scopedSession(message, "https://example.test"), host);
+  `);
+  runtime.useModules({
+    browser: { closeBrowserSession: async () => { closes++; finishPreparation.resolve(); await finishClose.promise; } },
+    tools: { submitSuggestionForm: async () => { submissions++; }, readTradeControls: async () => { reads++; return { ok: true }; } },
+  });
+  const message = { userId: "owner", input: { sessionId: "task:one", confirmationId: "never-click" }, deadlineAt: Date.now() + 10000 };
+  runtime.useHost(message, { evaluate: async () => { preparing.resolve(); await finishPreparation.promise; } });
+  const controller = new AbortController();
+  const trade = runtime.executeBrowserCall({}, { ...message, method: "submitSuggestionForm" }, "https://example.test", controller.signal);
+  const rejected = assert.rejects(trade, /DESKTOP_CALL_EXPIRED/);
+  await preparing.promise;
+  const next = runtime.executeBrowserCall({}, { ...message, method: "readTradeControls" }, "https://example.test", new AbortController().signal);
+  controller.abort(new Error("DESKTOP_CALL_EXPIRED"));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closes, 1);
+  assert.equal(submissions, 0);
+  assert.equal(reads, 0);
+  finishClose.resolve();
+  await rejected;
+  assert.equal((await next).ok, true);
+  assert.equal(reads, 1);
+  assert.equal(closes, 1);
 });

@@ -58,7 +58,14 @@ module.exports = async function inspectBrowser({ app }, input) {
       await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
       await page.reload();
       await runtime.setSmokeWindowState(state);
+      const observationStartedAt = Date.now();
+      const observed = await call("observeExecutionMarket", {
+        task: { id: "fixture", symbol: "DGKZ", timeframe: "1m", target: { browserSessionId: sessionId } },
+        connector: { reviewStatus: "APPROVED", adapterId: "haohan-readonly", capabilities: ["read_visible_market"] },
+      });
+      if (!observed.ok || !observed.account?.positionsVerified) throw new Error(JSON.stringify({ state, phase: "observe-before-trade", durationMs: Date.now() - observationStartedAt, ...observed }));
       for (const action of ["BUY", "SELL"]) {
+        await page.evaluate(() => window.redrawNextControl(".el-message-box button"));
         const result = await call("submitSuggestionForm", { sessionId, confirmationId: `smoke-${state}-${action}`, action, price: 100, quantity: 1, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ state, action, ...result }));
       }
@@ -70,6 +77,7 @@ module.exports = async function inspectBrowser({ app }, input) {
         }
       });
       for (const side of ["LONG", "SHORT"]) {
+        await page.evaluate(() => window.redrawNextControl(".el-dialog button"));
         const position = { positionOrderId: side === "LONG" ? "P-1" : "P-10", symbol: "DGKZ", symbolName: "测试商品", side, quantity: side === "LONG" ? 2 : 1, orderPrice: side === "LONG" ? 98 : 103 };
         const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true }, orderBook };
         const candidate = positionProfitExit(position, market);
@@ -77,7 +85,7 @@ module.exports = async function inspectBrowser({ app }, input) {
         const result = await call("submitSuggestionForm", { sessionId, confirmationId: `smoke-${state}-${side}`, ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: position.quantity, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ state, side, ...result }));
       }
-      background.push({ state, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits, historyVisits: window.historyVisits })) });
+      background.push({ state, observationVerified: observed.account.positionsVerified, windowsAfter: await runtime.setSmokeWindowState("inspect"), ...await page.evaluate(() => ({ entries: window.entries, exits: window.exits, historyVisits: window.historyVisits, controlRedraws: window.controlRedraws })) });
     }
     await runtime.setSmokeWindowState("visible");
     await page.screenshot({ path: input.screenshot });

@@ -6,6 +6,21 @@ const ROWS = "tr, [role='row'], .el-table__row, .position-row";
 let controlSequence = 0;
 const controlToken = () => `control-${Date.now()}-${++controlSequence}`;
 
+// Token selectors refer to one observed DOM node. Vue may replace that node;
+// never auto-wait for a detached token that cannot reappear. The caller scans
+// the current scoped controls again before any click.
+async function controlState(control) {
+  return control.evaluateAll(nodes => {
+    if (nodes.length !== 1) return null;
+    const node = nodes[0];
+    return {
+      disabled: node.matches(":disabled") || Boolean(node.closest('[aria-disabled="true"]')),
+      active: node.getAttribute("aria-selected") === "true"
+        || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active"),
+    };
+  });
+}
+
 async function findControl(root, labels, selector = BUTTONS, allowPartial = true) {
   const token = controlToken();
   const found = await root.locator(selector).evaluateAll((nodes, { wanted, token, allowPartial }) => {
@@ -38,10 +53,9 @@ export async function activateTradeControl(page, label) {
       await page.waitForTimeout(150);
       continue;
     }
-    const active = ["当前委托", "持仓明细"].includes(label) && await control.evaluate((node) => {
-      return node.getAttribute("aria-selected") === "true"
-        || node.matches(".head_l_btns.s, .header_l_item.s, .el-tabs__item.is-active");
-    }).catch(() => false);
+    const state = await controlState(control);
+    if (!state) continue;
+    const active = ["当前委托", "持仓明细"].includes(label) && state.active;
     // The trading site refreshes tab data when a tab is mounted. Avoid clicking
     // an already active tab: its live DOM is already updating by itself.
     if (active) return true;
@@ -133,7 +147,7 @@ export async function clickTradeEntry(page, action) {
       continue;
     }
     try {
-      await acceptTradeAgreement(control);
+      if (!await acceptTradeAgreement(control)) continue;
       await control.scrollIntoViewIfNeeded({ timeout: 2500 });
       await control.click({ timeout: 5000 });
       return { clicked: true, label: labels[0] };
@@ -144,21 +158,24 @@ export async function clickTradeEntry(page, action) {
   }
   if (!lastError) return { clicked: false, code: "SUBMIT_BUTTON_NOT_FOUND", tried: labels };
   const current = await findControl(page, labels).catch(() => null);
-  const disabled = current ? await current.isDisabled().catch(() => false) : false;
+  const disabled = current ? (await controlState(current))?.disabled : false;
   return { clicked: false, code: disabled ? "SUBMIT_BUTTON_DISABLED" : "SUBMIT_CLICK_FAILED", message: lastError.message, tried: labels };
 }
 
 async function acceptTradeAgreement(control) {
   // Clicking both input and label toggles agreement back off.
-  await control.evaluate((button) => {
+  return control.evaluateAll((nodes) => {
+    if (nodes.length !== 1) return false;
+    const button = nodes[0];
     let root = button.parentElement;
     while (root && !root.querySelector(".cotract, .el-checkbox")) root = root.parentElement;
-    if (!root) return;
+    if (!root) return true;
     const checkbox = [...root.querySelectorAll("input[type='checkbox']")].find((input) => {
       const box = input.closest(".cotract, .el-checkbox, label") || input;
       return box.getBoundingClientRect().width > 0 && box.getBoundingClientRect().height > 0;
     });
     if (checkbox && !checkbox.checked) checkbox.click();
+    return true;
   });
 }
 
@@ -296,16 +313,20 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       }
       const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"], BUTTONS, false)
         || (resolveConfirmation ? await resolveConfirmation(box) : null);
-      if (!control || await control.isDisabled()) { failureCode = control ? "TRADE_CONFIRM_DISABLED" : "TRADE_CONFIRM_NOT_FOUND"; continue; }
+      const state = control ? await controlState(control) : null;
+      if (!state || state.disabled) { failureCode = state ? "TRADE_CONFIRM_DISABLED" : "TRADE_CONFIRM_NOT_FOUND"; continue; }
       if (canConfirm) {
         const guard = await canConfirm(dialogPrice);
         if (!guard.ok) {
           const cancel = await findControl(box, ["取消", "关闭"]);
-          if (cancel && !await cancel.isDisabled()) await cancel.click({ timeout: 1500 });
+          const cancelState = cancel ? await controlState(cancel) : null;
+          if (cancelState && !cancelState.disabled) await cancel.click({ timeout: 1500 });
           return { ...guard, confirmed };
         }
       }
-      const fresh = await control.evaluate((node, token) => {
+      const fresh = await control.evaluateAll((nodes, token) => {
+        if (nodes.length !== 1) return false;
+        const node = nodes[0];
         if (node.dataset.axiomTradeConfirmation === token) return false;
         node.dataset.axiomTradeConfirmation = token;
         return true;
@@ -334,7 +355,8 @@ export async function dismissTransferDialogs(page, token) {
   for (const box of await page.locator("[data-axiom-transfer-dialog]:visible").all()) {
     if (await box.getAttribute("data-axiom-transfer-dialog") !== token) continue;
     const cancel = await findControl(box, ["取消", "关闭"], BUTTONS, false);
-    if (!cancel || await cancel.isDisabled()) throw new Error("TRANSFER_DIALOG_DISMISS_FAILED");
+    const state = cancel ? await controlState(cancel) : null;
+    if (!state || state.disabled) throw new Error("TRANSFER_DIALOG_DISMISS_FAILED");
     await cancel.click({ timeout: 1500 });
     await box.waitFor({ state: "hidden", timeout: 1500 });
   }
@@ -345,6 +367,7 @@ export async function dismissOrderCancellationDialogs(page) {
     const text = (await box.innerText()).replace(/\s+/g, "");
     if (!/撤单|撤销.*委托/.test(text) || /所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
     const control = await findControl(box, ["取消", "关闭"]);
-    if (control && !await control.isDisabled()) await control.click({ timeout: 1500 });
+    const state = control ? await controlState(control) : null;
+    if (state && !state.disabled) await control.click({ timeout: 1500 });
   }
 }
