@@ -58,7 +58,7 @@ scripts/setup-git-deploy.sh
 
 | 项目 | 要求 |
 |---|---|
-| 运行时 | Node.js 20+ |
+| 运行时 | Node.js 22.23.4（22.x 最低安全版本）；其他分支使用 24.22.1+ / 26.12.1+ |
 | 数据库 | MySQL 8（推荐）或 MongoDB 6+ |
 | 反向代理 | Nginx 或等价，终止 TLS |
 | 浏览器 | 客户端内置 Electron Chromium；API 镜像不安装 Chromium |

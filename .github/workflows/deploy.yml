@@ -30,8 +30,8 @@ jobs:
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.sha }}
         run: |
-          docker build --build-arg NODE_IMAGE=node:20-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-api:$IMAGE_VERSION" .
-          docker build --target admin --build-arg NODE_IMAGE=node:20-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-nginx:$IMAGE_VERSION" .
+          docker build --build-arg NODE_IMAGE=node:22.23.4-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-api:$IMAGE_VERSION" .
+          docker build --target admin --build-arg NODE_IMAGE=node:22.23.4-bookworm-slim --build-arg NGINX_IMAGE=nginx:1.27-alpine -t "axiom-agent-nginx:$IMAGE_VERSION" .
           docker save "axiom-agent-api:$IMAGE_VERSION" "axiom-agent-nginx:$IMAGE_VERSION" | gzip -1 > deployment-images.tar.gz
       - name: Transfer built images
         uses: appleboy/scp-action@v1.0.0

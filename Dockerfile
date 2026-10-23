@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=docker.m.daocloud.io/library/node:20-bookworm
+ARG NODE_IMAGE=docker.m.daocloud.io/library/node:22.23.4-bookworm-slim
 ARG NGINX_IMAGE=docker.m.daocloud.io/library/nginx:1.27-alpine
 
 FROM ${NODE_IMAGE} AS build

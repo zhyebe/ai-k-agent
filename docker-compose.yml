@@ -44,7 +44,7 @@ services:
     build:
       context: .
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm}
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22.23.4-bookworm-slim}
     restart: unless-stopped
     logging: *bounded-logging
     env_file: .env
@@ -82,7 +82,7 @@ services:
       context: .
       target: admin
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:20-bookworm}
+        NODE_IMAGE: ${NODE_IMAGE:-docker.m.daocloud.io/library/node:22.23.4-bookworm-slim}
         NGINX_IMAGE: ${NGINX_IMAGE:-docker.m.daocloud.io/library/nginx:1.27-alpine}
     restart: unless-stopped
     logging: *bounded-logging
