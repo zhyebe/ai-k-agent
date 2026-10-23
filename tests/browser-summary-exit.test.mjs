@@ -94,7 +94,9 @@ test('loss at -2 points requires matching fresh AI EXIT authorization before bro
  await page.evaluate(() => { document.querySelector('#summary [data-side="LONG"]').cells[2].textContent='102'; });
  const targetSummary={symbol:'DGKZ',symbolName:'测试商品',side:'LONG',quantity:3,averagePrice:102};
  const expiresAt=new Date(Date.now()+30000).toISOString();
- const value={...input('LONG'),exitType:'STOP_LOSS',targetSummary,exitGuard:{summary:true,expiresAt,aiAuthorization:{id:'loss-ai',decision:'EXIT',signature:summarySignature(targetSummary),reviewType:'STOP_LOSS',expiresAt}}};
+ const end=Date.now();
+ const lossObservation={signature:summarySignature(targetSummary),startedAt:end-30000,lastObservedAt:end,samples:[-30000,-20000,-10000,0].map(offset=>({observedAt:end+offset,price:100}))};
+ const value={...input('LONG'),exitType:'STOP_LOSS',targetSummary,exitGuard:{summary:true,expiresAt,aiAuthorization:{id:'loss-ai',lossObservation,decision:'EXIT',signature:summarySignature(targetSummary),reviewType:'STOP_LOSS',expiresAt}}};
  assert.equal((await submitSuggestionForm({...value,exitGuard:{summary:true}})).code,'AI_SUMMARY_EXIT_REQUIRED');
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[]);
  const result=await submitSuggestionForm(value);

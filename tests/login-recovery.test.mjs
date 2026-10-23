@@ -79,7 +79,8 @@ for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects 
     assert.equal(f.calls.includes("loss-review"), false);
   } else {
     assert.equal(submitted, undefined);
-    assert.equal(f.calls.includes("loss-review"), entryPrice >= 105);
+    assert.equal(f.calls.includes("loss-review"), false, "recovered login starts loss observation before requesting AI");
+    if (entryPrice >= 105) assert.equal(f.task.summaryLossObservations.length, 1);
   }
 });
 

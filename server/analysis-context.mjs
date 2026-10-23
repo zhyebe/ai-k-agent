@@ -160,7 +160,7 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "核实空仓和当前委托清零，采集行情交给AI；AI明确BUY/SELL且所选方向盈利概率>=40%且AI判断价格有盈利空间才入场，手动提示并由用户点击，自动模式直接执行。入场后只监控本轮持仓；盈利>=1点程序立即整行离场，不等待AI；亏损<=-2点请求AI判断EXIT/HOLD，EXIT才在持仓汇总整行转让。清零后立即开启下一轮，不在持仓期间追加普通单。",
+    summary: "核实空仓和当前委托清零，采集行情交给AI；AI明确BUY/SELL且所选方向盈利概率>=40%且AI判断价格有盈利空间才入场，手动提示并由用户点击，自动模式直接执行。入场后只监控本轮持仓；盈利>=1点程序立即整行离场，不等待AI；亏损<=-2点先连续观察30秒排查闪K，再请求AI判断EXIT/HOLD，EXIT才在持仓汇总整行转让。清零后立即开启下一轮，不在持仓期间追加普通单。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "AI_EXIT_REVIEW", "EXIT", "NEXT_ROUND"],
     aiCompletes: ["ANALYZE", "ENTRY_DIRECTION", "EXIT_DECISION"],
     hostCompletes: ["OBSERVE_PAGE", "EXECUTE_AI_ENTRY", "MONITOR_SUMMARY", "EXECUTE_AI_EXIT", "VERIFY_FLAT"],
@@ -168,12 +168,12 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
       timing: "空仓核实后，所选方向>=40%（含40%，40%～45%及以上均允许）仅代表可下单；AI判断当前可成交价或明确限价有合适盈利空间后决定BUY/SELL，否则可HOLD并说明价格依据。程序不强制下单，不从概率或指标推导方向。",
       whileHolding: "本轮持仓和委托清零前禁止新开仓。" },
     exit: { whileHolding: true, positionList: ["持仓汇总", "转让"], decisionMode: "PROGRAM_PROFIT_AI_LOSS",
-      immediateProfitPoints: 1, reviewLossPoints: -2, profitUnit: "DIRECTIONAL_PRICE_POINTS",
+      immediateProfitPoints: 1, reviewLossPoints: -2, lossObservationMs: 30000, profitUnit: "DIRECTIONAL_PRICE_POINTS",
       onExitDecision: "SUMMARY_TRANSFER", automaticInBothEntryModes: true },
     noSecondEntryWhileHolding: true,
   },
   kline: {
-    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；AI主动、大胆预测最可能的主场景，明确下一K及随后1～3根K价格路径、合适入场价与失效位；普通指标分歧用诚实概率和反证表达，不等待完美信号，预测方向不等于下单；程序按持仓汇总及当前可成交价执行盈利1点立即离场，亏损-2点触发AI判断，不等定K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
+    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；AI主动、大胆预测最可能的主场景，明确下一K及随后1～3根K价格路径、合适入场价与失效位；普通指标分歧用诚实概率和反证表达，不等待完美信号，预测方向不等于下单；程序按持仓汇总及当前可成交价执行盈利1点立即离场，亏损-2点先连续观察30秒排查闪K，再触发AI判断。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
     periodMs: LIVE_KLINE_PERIOD_MS,
     printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,
@@ -183,7 +183,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     doNotWaitForMinuteCloseAt00: true,
     liveQuotesMayUpdateEverySecond: true,
     flashK: {
-      summary: "闪K是未确认盘中事件，可能反映主动拉盘、砸盘、试盘或扫单，结合真实报价、逐笔和深度分析，不能一律判假、删除或忽略。未确认OHLC不进入已确认历史指标；新鲜bid/ask盈利>=1点立即离场，亏损<=-2点请求AI判断，不等K稳定。单次跳价不能证明操盘者身份或意图。",
+      summary: "闪K是突然上拉或下拉但尚未定K的盘中事件，无须等回弹才保留，可能反映主动拉盘、砸盘、试盘或扫单，结合真实报价、逐笔和深度分析，不能一律判假、删除或忽略。未确认OHLC不进入已确认历史指标；新鲜bid/ask盈利>=1点立即离场，亏损<=-2点先连续观察30秒；恢复阈值内、采样中断或新闪K重置观察，确认持续亏损后才请求AI判断。单次跳价不能证明操盘者身份或意图。",
       excludeTransientDisplayPriceFromAnalysis: false,
       analyzeTransientEvents: true,
       priceSpikeAloneProvesFlash: false,

@@ -41,7 +41,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
 
       assert.match(prompt, /不乘数量，不是金额/);
       assert.match(prompt, /盈利点差>=1时程序立即整行离场/);
-      assert.match(prompt, /亏损点差<=-2时独立AI请求/);
+      assert.match(prompt, /亏损点差<=-2时先连续观察30秒排查闪K，再独立AI请求/);
       const context = JSON.parse(messages.at(-1).content);
       assert.equal(context.account.realtimeValueChange, amount);
       assert.equal(context.account.dayPnl, 99);

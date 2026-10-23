@@ -36,7 +36,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /多单点差=当前bid-均价；空单点差=均价-当前ask/);
   assert.match(content, /点差不乘数量，不是盈亏金额/);
   assert.match(content, /盈利点差>=1时，程序立即整行离场，不等待AI，超过1点也立即执行/);
-  assert.match(content, /亏损点差<=-2时，交给独立AI请求判断EXIT离场还是HOLD继续持仓/);
+  assert.match(content, /亏损点差<=-2时，程序先连续观察30秒排查闪K，再交给独立AI请求判断EXIT离场还是HOLD继续持仓/);
   assert.match(content, /持仓汇总对应商品方向整行“转让”，一次提交整行数量/);
   assert.match(content, /持仓及当前委托全部核实清零才结束本轮/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);

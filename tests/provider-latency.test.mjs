@@ -26,7 +26,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.equal(system.split("唯一当前交易流程").length - 1, 1);
     assert.match(system, /选定方向盈利概率>=40%/);
     assert.match(system, /盈利点差>=1时程序立即整行离场，不等待AI/);
-    assert.match(system, /亏损点差<=-2时独立AI请求决定EXIT或HOLD/);
+    assert.match(system, /亏损点差<=-2时先连续观察30秒排查闪K，再独立AI请求决定EXIT或HOLD/);
     assert.match(system, /下一根及随后1～3根K/);
     const rounds = messages.filter(m => m.content.includes('"type":"prior_monitoring_round"')).map(m => JSON.parse(m.content));
     const decisions = messages.filter(m => ["assistant", "model"].includes(m.role)).map(m => JSON.parse(m.content));

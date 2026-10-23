@@ -325,6 +325,7 @@ export interface TradingSession {
 }
 
 export interface Task {
+  summaryLossObservations?: Array<{ key: string; signature: string; startedAt: number; lastObservedAt: number; flashEventId?: string; samples: Array<{ observedAt: number; price: number; pnlPoints: number }> }>;
   summaryExitReviews?: Array<{ id: string; key: string; pnlPoints: number; status: "REQUESTING" | "REVIEWED" | "FAILED"; decision?: "EXIT" | "HOLD"; rationale?: string }>;
   id: string;
   name: string;

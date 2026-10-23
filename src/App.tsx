@@ -233,7 +233,7 @@ const consoleStatusCopy = (task: Task) => {
   if (task.monitoringEnabled) {
     if (task.status === "MONITORING") {
       return task.mode === "LIVE"
-        ? (task.autoDecisionEnabled ? "AI 自动入场；盈利立即离场，亏损交给 AI 判断" : "手动入场；盈利立即离场，亏损交给 AI 判断")
+        ? (task.autoDecisionEnabled ? "AI 自动入场；盈利立即离场，亏损观察30秒后交给 AI 判断" : "手动入场；盈利立即离场，亏损观察30秒后交给 AI 判断")
         : "Agent 正在持续读取行情，数据变化后启动新一轮分析";
     }
     return "本轮出现问题，Agent 将继续重试，不会因单轮失败结束";
@@ -427,11 +427,11 @@ function UserLogin({ onSignedIn, initialError = "" }: { onSignedIn: (user: Works
           <div className="auth-heading">
           <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
           <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用已开通的账号登录。LIVE 实盘由 AI 决定入场；盈利 1 点立即离场，亏损 -2 点由 AI 判断。</p>
+          <p>使用已开通的账号登录。LIVE 实盘由 AI 决定入场；盈利 1 点立即离场，亏损 -2 点先观察30秒排查闪K，再由 AI 判断。</p>
           </div>
           <div className="auth-safety">
             <ShieldCheck size={17} />
-            <div className="auth-safety-copy"><strong>自动下单</strong><span>AI 决定入场；盈利 1 点程序直接离场，亏损 -2 点交给 AI；持仓汇总整行操作。</span></div>
+            <div className="auth-safety-copy"><strong>自动下单</strong><span>AI 决定入场；盈利 1 点程序直接离场，亏损 -2 点先观察30秒排查闪K，再交给 AI；持仓汇总整行操作。</span></div>
             <code>CONFIRM</code>
           </div>
           {window.axiomDesktop && <div className="auth-service-settings">
@@ -1337,7 +1337,8 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>空仓核实后，所选方向盈利概率 ≥40%（含40%，40%～45%也允许），由 AI 判断当前价或限价是否有合适盈利空间，再决定下单或观望；盈利 ≥1 点立即整行离场；亏损 ≤-2 点交给 AI 判断是否离场。</p>
+        <p><strong>本轮规则</strong>空仓核实后，所选方向盈利概率 ≥40%（含40%，40%～45%也允许），由 AI 判断当前价或限价是否有合适盈利空间，再决定下单或观望；盈利 ≥1 点立即整行离场；亏损 ≤-2 点先观察30秒排查闪K，再交给 AI 判断是否离场。</p>
+        {task.summaryLossObservations?.filter(observation => observation.lastObservedAt - observation.startedAt < 30000).map(observation => <p key={observation.key}><strong>{observation.key}</strong> 亏损观察 {Math.floor((observation.lastObservedAt - observation.startedAt) / 1000)}/30 秒 · 排查未定K闪价，持续亏损确认后交给 AI。</p>)}
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
         {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
         <p><strong>{decision.action === "HOLD" ? "观望依据" : "主判断"}</strong>{decision.analysisSummary || "本轮未提供判断说明"}</p>

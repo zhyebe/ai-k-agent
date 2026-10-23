@@ -1,3 +1,5 @@
+import { detectFlashK } from "./flash-k.mjs";
+
 // Observation evidence belongs to a browser session and instrument, never to
 // the model or the wall clock alone. Re-reading a cached snapshot adds no time.
 const observations = new Map();
@@ -65,6 +67,10 @@ export function markObservedMarketCandles(market, scope, { observe = true } = {}
         timeframe: snapshot.timeframe || book.timeframe, observedAt: book.observedAt || market.observedAt, observe });
     }
     if (book.timeframes?.[book.timeframe]) book.history = book.timeframes[book.timeframe].history;
+    const chart = book.timeframes?.["1m"] || book;
+    book.flashK = detectFlashK({ ...book, scope, observe, timeframe: chart.timeframe || book.timeframe,
+      history: chart.history || [], latest: { price: chart.history?.at(-1)?.close },
+      now: Date.parse(book.observedAt || market.observedAt) });
   };
   for (const book of market.books || []) mark(book);
   mark(market);

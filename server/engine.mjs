@@ -13,7 +13,7 @@ import { normalizeUnitProbability } from "./provider.mjs";
 import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
-import { summaryExitCandidates, summaryExitAllowsPrice, summaryKey, summaryExitReviewContexts, SUMMARY_PROFIT_POINTS, SUMMARY_LOSS_POINTS, SUMMARY_REVIEW_TTL_MS } from "./summary-exit-policy.mjs";
+import { summaryExitCandidates, summaryExitAllowsPrice, summaryKey, summaryExitReviewContexts, SUMMARY_PROFIT_POINTS, SUMMARY_LOSS_POINTS, SUMMARY_REVIEW_TTL_MS, observeSummaryLosses, confirmedSummaryLoss, SUMMARY_LOSS_OBSERVATION_MS } from "./summary-exit-policy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -914,6 +914,7 @@ function reconcilePendingPosition(task, market) {
     }
     task.unsettledActions = (task.unsettledActions || []).filter(p => !["RECONCILED", "CANCELLED"].includes(p.status));
     task.summaryExitReviews = [];
+    task.summaryLossObservations = [];
   }
   persistTask(task);
 }
@@ -1530,6 +1531,8 @@ export function stopTask(taskId) {
   task.monitoringEnabled = false;
   task.nextPollAt = null;
   task.nextTrigger = "已停止观察";
+  task.summaryLossObservations = [];
+  task.summaryExitReviews = [];
   task.exitPlans = [];
   clearPendingAction(task, { persist: false });
   stopController(taskId);
@@ -1899,7 +1902,7 @@ function decisionExecutionPolicy(task) {
     minimumProbability: MIN_PROFIT_PROBABILITY, emptyOnly: true,
     exitsAutomatic: true, exitDecision: "PROGRAM_PROFIT_AI_LOSS", cancellationsAutomatic: true,
     summaryExitReview: { profitPoints: SUMMARY_PROFIT_POINTS, lossPoints: SUMMARY_LOSS_POINTS,
-      unit: "DIRECTIONAL_PRICE_POINTS", execution: "SUMMARY_TRANSFER" },
+      unit: "DIRECTIONAL_PRICE_POINTS", lossObservationMs: SUMMARY_LOSS_OBSERVATION_MS, execution: "SUMMARY_TRANSFER" },
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2797,11 +2800,15 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
 }
 
 function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
-  const contexts = summaryExitReviewContexts(market, now).filter(context => context.reviewType === "STOP_LOSS");
-  task.summaryExitReviews = (task.summaryExitReviews || []).filter(record => contexts.some(c => c.key === record.key
-    && c.signature === record.signature && c.reviewType === record.reviewType));
+  const observations = observeSummaryLosses(task, market, now);
+  const contexts = summaryExitReviewContexts(market, now)
+    .map(context => ({ ...context, lossObservation: observations.find(record => record.key === context.key) }))
+    .filter(context => context.reviewType === "STOP_LOSS" && confirmedSummaryLoss(context.lossObservation, context.summary, now));
+  const sameEpisode = (record, startedAt) => observations.some(observation => observation.key === record.key
+    && observation.signature === record.signature && observation.startedAt === startedAt);
+  task.summaryExitReviews = (task.summaryExitReviews || []).filter(record => sameEpisode(record, record.lossObservation?.startedAt));
   for (const [key, run] of summaryReviewRuns) {
-    if (run.taskId === task.id && !contexts.some(c => c.key === run.key && c.signature === run.signature && c.reviewType === run.reviewType)) {
+    if (run.taskId === task.id && !sameEpisode(run, run.startedAt)) {
       run.abort.abort(new Error("SUMMARY_REVIEW_INVALIDATED"));
       summaryReviewRuns.delete(key);
     }
@@ -2815,24 +2822,30 @@ function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
     if (previous?.status === "FAILED" && now - Date.parse(previous.requestedAt) < 5000) continue;
     const observedAt = new Date(context.quote.observedAt).toISOString();
     const record = { id: `exit-review:${task.id}:${context.key}:${now}`, key: context.key, signature: context.signature,
-      reviewType: context.reviewType, quotePrice: context.quote.price, pnlPoints: context.pnlPoints,
+      reviewType: context.reviewType, quotePrice: context.quote.price, pnlPoints: context.pnlPoints, lossObservation: structuredClone(context.lossObservation),
       status: "REQUESTING", requestedAt: new Date(now).toISOString(), observedAt,
       expiresAt: new Date(Date.parse(observedAt) + SUMMARY_REVIEW_TTL_MS).toISOString() };
     task.summaryExitReviews = [...task.summaryExitReviews.filter(r => r.key !== context.key), record];
     const generation = taskGeneration(task), abort = new AbortController();
-    const run = { taskId: task.id, key: context.key, signature: context.signature, reviewType: context.reviewType, abort };
+    const run = { taskId: task.id, key: context.key, signature: context.signature, reviewType: context.reviewType, startedAt: context.lossObservation.startedAt, abort };
     summaryReviewRuns.set(key, run);
     const current = () => !abort.signal.aborted && !task.stopLocked && monitoringIntent(task)
       && taskGeneration(task) === generation && task.summaryExitReviews.includes(record);
     const snapshot = positionMarketSnapshot(market, context.summary);
     const history = positionMarketSnapshot(task.market, context.summary);
+    const evidence = buildLayeredAnalysisMarket({ ...history, ...snapshot,
+      history: snapshot?.history?.length ? snapshot.history : history?.history || [],
+      timeframes: snapshot?.history?.length ? snapshot.timeframes || {} : history?.timeframes || {},
+    }, now);
     Promise.resolve().then(async () => {
       if (!current()) return;
       const provider = findProviderForUser(String(task.providerId || ""), String(task.ownerUserId || ""));
       const result = await runtime.requestSummaryExitDecision(provider, {
         observedAt, reviewType: context.reviewType, pnlPoints: context.pnlPoints, summary: context.summary,
+        lossObservation: record.lossObservation,
         market: { observedAt: snapshot?.observedAt || market.observedAt, orderBook: snapshot?.orderBook || snapshot?.pageView?.orderBook,
-          history: history?.history || [], historyObservedAt: history?.observedAt || null },
+          history: evidence.history || [], historyObservedAt: snapshot?.history?.length ? snapshot.observedAt : history?.observedAt || null,
+          flashK: evidence.flashK || null, intrabarEvidence: evidence.intrabarEvidence || null },
         previousReview: previous ? { decision: previous.decision, rationale: previous.rationale, pnlPoints: previous.pnlPoints, observedAt: previous.observedAt } : null,
       }, { signal: abort.signal, timeoutMs: 30000 });
       if (!current()) return;
@@ -2916,6 +2929,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
       task.market = { ...task.market, account: market.account };
       reconcilePendingPosition(task, market);
+      scheduleSummaryExitReviews(task, market, runtime, currentTime());
     }
     const candidates = summaryExitCandidates(task, market, currentTime());
     const submitted = [];
@@ -2959,10 +2973,11 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     }
     task.exitMonitor = { status: submitted.length ? "AWAITING_FILL"
       : market.account.positionSummariesVerified !== true ? "SUMMARY_UNVERIFIED"
-      : (task.summaryExitReviews || []).some(r => r.status === "REQUESTING") ? "AI_REVIEWING" : "WATCHING",
+      : (task.summaryExitReviews || []).some(r => r.status === "REQUESTING") ? "AI_REVIEWING"
+      : task.summaryLossObservations?.some(r => r.lastObservedAt - r.startedAt < SUMMARY_LOSS_OBSERVATION_MS) ? "LOSS_OBSERVING" : "WATCHING",
       checkedAt: market.observedAt, message: market.account.positionSummariesVerified !== true
         ? "持仓汇总未核实，继续读取，不猜测离场"
-        : "持仓汇总监控：盈利≥1点立即整行离场；亏损≤-2点由AI决定离场或持仓，清零后开始下一轮" };
+        : "持仓汇总监控：盈利≥1点立即整行离场；亏损≤-2点先连续观察30秒排查闪K，再由AI决定离场或持仓，清零后开始下一轮" };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: "ERROR", failures, message: `${failures.length}笔离场未完成；${task.exitMonitor.message}` };
     persistTask(task);
     return { submitted };
