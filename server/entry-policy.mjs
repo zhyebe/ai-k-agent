@@ -1,4 +1,4 @@
-export const MIN_PROFIT_PROBABILITY = 0.45;
+export const MIN_PROFIT_PROBABILITY = 0.4;
 
 export function normalizeMarketRegime(value) {
   const regime = String(value || "").trim().toUpperCase();
@@ -15,17 +15,6 @@ export function hasDirectionalProbabilities(decision) {
     const unit = /[%％]/.test(text) || numeric > 1 ? numeric / 100 : numeric;
     return Number.isFinite(unit) && unit >= 0 && unit <= 1;
   });
-}
-
-// Call after probability normalization. This validates the AI action; it never selects a side.
-export function entryProbabilityConflict(decision) {
-  if (!hasDirectionalProbabilities(decision)) return false;
-  const bullish = Number(decision.bullishProfitProbability);
-  const bearish = Number(decision.bearishProfitProbability);
-  if (decision.action === "HOLD") return bullish >= MIN_PROFIT_PROBABILITY || bearish >= MIN_PROFIT_PROBABILITY;
-  if (decision.action === "BUY") return bullish < MIN_PROFIT_PROBABILITY;
-  if (decision.action === "SELL") return bearish < MIN_PROFIT_PROBABILITY;
-  return false;
 }
 
 // One round owns the account until its holdings and current orders are clear.

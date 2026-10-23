@@ -1116,8 +1116,8 @@ function MetricCard({ label, value, detail, change, tone, icon }: { label: strin
 const timeframeLabels: Record<string, string> = { fs: "分时", "1m": "1 分", "3m": "3 分", "5m": "5 分", "10m": "10 分", "15m": "15 分", "30m": "30 分", "1h": "60 分", "2h": "2 小时", "4h": "4 小时", "1d": "日线", "1w": "周线", "1mo": "月线" };
 const marketNumber = (value: number | null | undefined, digits = 2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits }) : "--";
 const profitProbabilityLabel = (value: number) => {
-  const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
-  return (Math.floor(percent * 100) / 100).toFixed(2).replace(/\.?0+$/, "");
+  const probability = Math.max(0, Math.min(1, Number(value || 0)));
+  return (Math.floor(probability * 10000) / 100).toFixed(2).replace(/\.?0+$/, "");
 };
 
 type BoardIdentity = { instrumentId?: string | null; symbol?: string; symbolName?: string };
@@ -1337,7 +1337,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>空仓核实后，任一方向盈利概率 ≥45%（含45%），由 AI 选择达标方向入场；两侧均低于45%才观望；盈利 ≥1 点立即整行离场；亏损 ≤-2 点交给 AI 判断是否离场。</p>
+        <p><strong>本轮规则</strong>空仓核实后，所选方向盈利概率 ≥40%（含40%，40%～45%也允许），由 AI 判断当前价或限价是否有合适盈利空间，再决定下单或观望；盈利 ≥1 点立即整行离场；亏损 ≤-2 点交给 AI 判断是否离场。</p>
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
         {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
         <p><strong>{decision.action === "HOLD" ? "观望依据" : "主判断"}</strong>{decision.analysisSummary || "本轮未提供判断说明"}</p>

@@ -83,16 +83,17 @@ test("AI HOLD displays missing confidence distinctly from an explicit zero", asy
   assert.match(await panel.locator(".decision-action").innerText(), /0% 置信度/);
 });
 
-test("entry probability display keeps values below 45% below the boundary", async t => {
+test("entry probability display keeps values below 40% below the boundary", async t => {
   const { page, navigate } = await openPage(t);
   const sample = structuredClone(workspace);
   sample.tasks = [{ ...sample.tasks[0], stopLocked: true, monitoringEnabled: false,
-    decision: { ...sample.tasks[0].decision, action: "HOLD", riskFlags: [], bullishProfitProbability: 0.4499, bearishProfitProbability: 0.45 } }];
+    decision: { ...sample.tasks[0].decision, action: "HOLD", riskFlags: [], bullishProfitProbability: 0.3999, bearishProfitProbability: 0.4 } }];
   await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
   await navigate();
   const panel = page.locator(".decision-panel");
   await panel.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
-  assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["44.99%", "45%"]);
+  assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["39.99%", "40%"]);
+  assert.match(await panel.getByLabel("判断与未来预测").innerText(), /≥40%.*40%～45%也允许.*AI 判断当前价或限价.*下单或观望/);
 });
 
 test("HOLD displays future paths and distinguishes AI observation from an entry block", async t => {

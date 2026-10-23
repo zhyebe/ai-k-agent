@@ -160,12 +160,12 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "核实空仓和当前委托清零，采集行情交给AI；AI明确BUY/SELL且所选方向盈利概率>=45%才入场，手动提示并由用户点击，自动模式直接执行。入场后只监控本轮持仓；盈利>=1点程序立即整行离场，不等待AI；亏损<=-2点请求AI判断EXIT/HOLD，EXIT才在持仓汇总整行转让。清零后立即开启下一轮，不在持仓期间追加普通单。",
+    summary: "核实空仓和当前委托清零，采集行情交给AI；AI明确BUY/SELL且所选方向盈利概率>=40%且AI判断价格有盈利空间才入场，手动提示并由用户点击，自动模式直接执行。入场后只监控本轮持仓；盈利>=1点程序立即整行离场，不等待AI；亏损<=-2点请求AI判断EXIT/HOLD，EXIT才在持仓汇总整行转让。清零后立即开启下一轮，不在持仓期间追加普通单。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "AI_EXIT_REVIEW", "EXIT", "NEXT_ROUND"],
     aiCompletes: ["ANALYZE", "ENTRY_DIRECTION", "EXIT_DECISION"],
     hostCompletes: ["OBSERVE_PAGE", "EXECUTE_AI_ENTRY", "MONITOR_SUMMARY", "EXECUTE_AI_EXIT", "VERIFY_FLAT"],
-    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_ONLY", minimumProbability: 0.45,
-      timing: "空仓核实后任一方向>=45%（含45%）即由AI选择达标方向返回顶层BUY/SELL；两侧均<45%才因概率不足HOLD。不增加震荡或突破门槛，程序不从概率或指标推导方向。",
+    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_ONLY", minimumProbability: 0.4,
+      timing: "空仓核实后，所选方向>=40%（含40%，40%～45%及以上均允许）仅代表可下单；AI判断当前可成交价或明确限价有合适盈利空间后决定BUY/SELL，否则可HOLD并说明价格依据。程序不强制下单，不从概率或指标推导方向。",
       whileHolding: "本轮持仓和委托清零前禁止新开仓。" },
     exit: { whileHolding: true, positionList: ["持仓汇总", "转让"], decisionMode: "PROGRAM_PROFIT_AI_LOSS",
       immediateProfitPoints: 1, reviewLossPoints: -2, profitUnit: "DIRECTIONAL_PRICE_POINTS",

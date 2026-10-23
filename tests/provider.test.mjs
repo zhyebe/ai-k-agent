@@ -697,7 +697,7 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.equal(seen[0].body.model, "claude-custom");
     assert.ok(seen[0].body.system);
     const prompt = seen[0].body.system;
-    assert.match(prompt, /选定方向盈利概率>=45%/);
+    assert.match(prompt, /选定方向盈利概率>=40%/);
     assert.match(prompt, /盈利点差>=1时程序立即整行离场，不等待AI/);
     assert.match(prompt, /亏损点差<=-2时独立AI请求决定EXIT或HOLD/);
     assert.match(prompt, /Price response outranks static displayed depth/);
@@ -904,7 +904,7 @@ for (const [bullish, bearish, selectedAction, management] of [
     const result = await requestDecision({ apiKey: "test", baseUrl: "https://provider.example.test" }, context, { fastAnalysis: true });
     assert.equal(bodies.length, 1);
     const messages = bodies[0].messages;
-    assert.match(messages[0].content, /选定方向盈利概率>=45%/);
+    assert.match(messages[0].content, /选定方向盈利概率>=40%/);
     assert.match(messages[0].content, /下一根及随后1～3根K/);
     assert.equal(result.action, "HOLD");
     assert.equal(result.exitType, null);

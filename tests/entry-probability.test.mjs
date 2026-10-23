@@ -12,74 +12,42 @@ const envelope = (format, value) => {
 };
 
 for (const format of ["chat", "responses", "anthropic", "gemini"]) {
-  for (const [bullish, bearish, action] of [[0.44, 0.45, "SELL"], [0.45, 0.44, "BUY"], [0.7, 0.45, "SELL"]]) {
-    test(`${format}: AI corrects HOLD at ${bullish}/${bearish} and chooses ${action} itself`, async t => {
-      const bodies = [];
-      t.mock.method(globalThis, "fetch", async (_url, options) => {
-        bodies.push(JSON.parse(options.body));
+  for (const [action, bullish, bearish, orderType] of [
+    ["BUY", 0.4, 0.8, "MARKET"], ["SELL", 0.8, 0.42, "LIMIT"],
+    ["BUY", 0.45, 0.8, "LIMIT"], ["SELL", 0.8, 0.6, "MARKET"],
+    ["HOLD", 0.4, 0.42, "MARKET"], ["HOLD", 0.6, 0.8, "MARKET"],
+  ]) {
+    test(`${format}: AI owns ${action} at ${bullish}/${bearish} and ${orderType} price without forced correction`, async t => {
+      let calls = 0;
+      const reason = action === "HOLD" ? "主判断：震荡，概率达标但当前价格无合适盈利空间，继续观察" : "主判断：偏跌，所选价格有盈利空间";
+      t.mock.method(globalThis, "fetch", async () => {
+        calls++;
         return new Response(JSON.stringify(envelope(format, {
-          action: bodies.length === 1 ? "HOLD" : action, bullish_profit_probability: bullish, bearish_profit_probability: bearish,
-          analysis_summary: bodies.length === 1 ? "震荡偏弱，两侧概率约0.44-0.45不足45%，HOLD。" : "已达入场概率门槛",
+          action, bullish_profit_probability: bullish, bearish_profit_probability: bearish,
+          order_type: orderType, ...(orderType === "LIMIT" ? { entry_price: 101, target_price: 101 } : {}), analysis_summary: reason,
         })));
       });
-      const result = await requestDecision({ ...provider, apiFormat: format }, { account: flat, experiencePrompt: "approved evidence", market: { fingerprint: "same-market" } }, { fastAnalysis: true });
-      assert.equal(bodies.length, 2);
+      const result = await requestDecision({ ...provider, apiFormat: format }, { account: flat }, { fastAnalysis: true });
+      assert.equal(calls, 1);
       assert.equal(result.action, action);
       assert.equal(result.bullishProfitProbability, bullish);
       assert.equal(result.bearishProfitProbability, bearish);
-      const correction = JSON.stringify(bodies[1]);
-      assert.match(correction, /INCONSISTENT_ACTION_PROBABILITY/);
-      assert.match(correction, /same-market/);
-      assert.match(correction, /approved evidence/);
-      assert.match(correction, /0\.45/);
-      assert.equal(result.modelDiagnostics.attempts[0].decisionError, "INCONSISTENT_ACTION_PROBABILITY");
+      assert.equal(result.orderType, orderType);
+      assert.equal(result.entryPrice, orderType === "LIMIT" ? 101 : null);
+      assert.equal(result.targetPrice, orderType === "LIMIT" ? 101 : null);
+      assert.equal(result.analysisSummary, reason);
+      assert.equal(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"), false);
       assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
     });
   }
 }
 
-for (const correction of [
-  { action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.45 },
-  { action: "BUY", bullish_profit_probability: 0.44, bearish_profit_probability: 0.45 },
-  { action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.4499 },
-  { action: "SELL", bullish_profit_probability: 0.44 },
-]) test(`unresolved probability conflict reports failure instead of inventing an order: ${JSON.stringify(correction)}`, async t => {
+test("JSON repair may return eligible HOLD without forcing another trade request", async t => {
   let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify(envelope("chat", ++calls === 1
-    ? { action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.45 } : correction))));
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: ++calls === 1 ? '{"action":'
+    : JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.45, analysis_summary: "当前无合适入场价" }) } }] })));
   const result = await requestDecision(provider, { account: flat }, { fastAnalysis: true });
   assert.equal(calls, 2);
   assert.equal(result.action, "HOLD");
-  assert.ok(result.riskFlags.includes("INCONSISTENT_ACTION_PROBABILITY"));
-  assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
-  assert.match(result.invalidation, /概率与动作矛盾/);
+  assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
 });
-
-for (const [action, bullish, bearish] of [["HOLD", 0.44, 0.4499], ["BUY", 0.45, 0.8], ["SELL", 0.8, 0.45]]) {
-  test(`consistent ${action} ${bullish}/${bearish} makes one model request`, async t => {
-    let calls = 0;
-    t.mock.method(globalThis, "fetch", async () => { calls++; return new Response(JSON.stringify(envelope("chat", { action, bullish_profit_probability: bullish, bearish_profit_probability: bearish }))); });
-    const result = await requestDecision(provider, { account: flat }, { fastAnalysis: true });
-    assert.equal(result.action, action);
-    assert.equal(calls, 1);
-  });
-}
-
-test("one shared correction budget covers JSON repair and probability conflict", async t => {
-  let calls = 0;
-  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({ choices: [{ message: { content: ++calls === 1 ? '{"action":'
-    : JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.44, bearish_profit_probability: 0.45 }) } }] })));
-  const result = await requestDecision(provider, { account: flat }, { fastAnalysis: true });
-  assert.equal(calls, 2);
-  assert.ok(result.riskFlags.includes("ANALYSIS_INCOMPLETE"));
-});
-
-for (const account of [{ ...flat, positions: [{ quantity: 1 }] }, { ...flat, openOrders: [{ remainingQuantity: 1 }] }, { ...flat, positionsVerified: false }]) {
-  test(`account not ready never requests a forced entry: ${JSON.stringify(account)}`, async t => {
-    let calls = 0;
-    t.mock.method(globalThis, "fetch", async () => { calls++; return new Response(JSON.stringify(envelope("chat", { action: "HOLD", bullish_profit_probability: 0.6, bearish_profit_probability: 0.45 }))); });
-    const result = await requestDecision(provider, { account }, { fastAnalysis: true });
-    assert.equal(result.action, "HOLD");
-    assert.equal(calls, 1);
-  });
-}

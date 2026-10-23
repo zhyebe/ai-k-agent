@@ -22,11 +22,11 @@ test("实盘只限制单笔数量，不把 AI BUY 意图改成 HOLD", () => {
   assert.equal(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"), false);
 });
 
-test("获利概率分档：大于等于 45% 允许方向性提示", () => {
+test("获利概率分档：大于等于 40% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.399), "HOLD");
-  assert.equal(profitSignalTier(0.4), "HOLD");
-  assert.equal(profitSignalTier(0.4001), "HOLD");
-  assert.equal(profitSignalTier(0.44), "HOLD");
+  assert.equal(profitSignalTier(0.4), "EXPLORATORY");
+  assert.equal(profitSignalTier(0.4001), "EXPLORATORY");
+  assert.equal(profitSignalTier(0.44), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6), "EXPLORATORY");
   assert.equal(profitSignalTier(0.6001), "CAUTIOUS");
   assert.equal(profitSignalTier(0.7001), "STANDARD");
@@ -34,7 +34,7 @@ test("获利概率分档：大于等于 45% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
-test("入场所选方向至少45%，不替AI比较多空概率", () => {
+test("入场所选方向至少40%，不替AI比较多空概率", () => {
   for (const action of ["BUY", "SELL"]) {
     for (const probability of [0, 0.03, 0.21, 0.39, 0.399999, 0.4, 0.400001, 0.41, 0.44, 0.45]) {
       for (const otherProbability of [probability, Math.max(0, probability - 0.02), 0.9]) {
@@ -45,11 +45,11 @@ test("入场所选方向至少45%，不替AI比较多空概率", () => {
           bearishProfitProbability: action === "SELL" ? probability : otherProbability,
           riskFlags: [],
         }));
-        assert.equal(decision.action, probability >= 0.45 ? action : "HOLD");
+        assert.equal(decision.action, probability >= 0.4 ? action : "HOLD");
         assert.equal(decision.profitProbability, probability);
-        assert.equal(meetsOrderBoundary(decision), probability >= 0.45);
-        assert.equal(decision.signalTier, probability >= 0.45 ? "AI_RECOGNITION" : "HOLD");
-        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), probability < 0.45);
+        assert.equal(meetsOrderBoundary(decision), probability >= 0.4);
+        assert.equal(decision.signalTier, probability >= 0.4 ? "AI_RECOGNITION" : "HOLD");
+        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), probability < 0.4);
       }
     }
   }
@@ -71,7 +71,7 @@ test("已核实持仓可以立即离场，不要求它仍在入场监测盘口�
 
 for (const autoDecisionEnabled of [false, true]) {
   for (const action of ["BUY", "SELL"]) {
-    for (const probability of [0.45, 0.5, 0.6]) {
+    for (const probability of [0.4, 0.42, 0.45, 0.5, 0.6]) {
       test(`${probability * 100}% ${action}由 AI 决定，遵守${autoDecisionEnabled ? "自动" : "手动"}提交策略`, async () => {
         const taskId = `threshold_${probability}_${action}_${autoDecisionEnabled}_${Date.now()}`;
         const task = insertNorthstarTask(taskId);

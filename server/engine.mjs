@@ -10,7 +10,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { entryProbabilityConflict, entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
+import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryKey, summaryExitReviewContexts, SUMMARY_PROFIT_POINTS, SUMMARY_LOSS_POINTS, SUMMARY_REVIEW_TTL_MS } from "./summary-exit-policy.mjs";
@@ -424,8 +424,8 @@ export function profitSignalLabel(tier) {
 }
 
 function profitProbabilityLabel(value) {
-  const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
-  return (Math.floor(percent * 100) / 100).toFixed(2).replace(/\.?0+$/, "");
+  const probability = Math.max(0, Math.min(1, Number(value || 0)));
+  return (Math.floor(probability * 10000) / 100).toFixed(2).replace(/\.?0+$/, "");
 }
 
 function positivePrice(value) {
@@ -865,7 +865,7 @@ function reconcilePendingPosition(task, market) {
   if (isLiveTask(task) && waiting?.status === "WAITING" && !waiting.exitType
     && ((waiting.entryPurpose && waiting.entryPurpose !== "NORMAL") || !meetsOrderBoundary(waiting))) {
     waiting.status = "CANCELLED";
-    waiting.message = "旧入场建议不符合当前AI方向概率至少45%的普通入场规则，已取消";
+    waiting.message = "旧入场建议不符合当前AI方向概率至少40%的普通入场规则，已取消";
     clearPendingActionTimer(task.id);
   }
   if (market.account?.openOrdersVerified) {
@@ -945,7 +945,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     if (task.pendingAction.entryPurpose && task.pendingAction.entryPurpose !== "NORMAL") throw new Error("RETIRED_ENTRY_PURPOSE");
     const block = entryRoundBlock(task, task.market, { pendingId: task.pendingAction.id });
     if (block) throw new Error(block);
-    if (!meetsOrderBoundary(task.pendingAction)) throw new Error("ENTRY_PROBABILITY_BELOW_45");
+    if (!meetsOrderBoundary(task.pendingAction)) throw new Error("ENTRY_PROBABILITY_BELOW_40");
   }
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
@@ -2528,12 +2528,6 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     assertCurrent();
     actionPhaseLocks.add(taskId);
     decision = enforceProfitProbability(decision);
-    if (isLiveTask(task) && providerSucceeded && !entryRoundBlock(task, market) && decision.action === "HOLD"
-      && !decision.exitType && decision.entryPurpose !== "RESCUE" && !(decision.targetPositionIds || []).length && entryProbabilityConflict(decision)) {
-      providerSucceeded = false;
-      decision = { ...decision, riskFlags: [...new Set([...(decision.riskFlags || []), "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"])],
-        invalidation: "AI概率与动作矛盾：已有方向达到45%却返回HOLD，需重新分析；请更新客户端" };
-    }
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
     if (isLiveTask(task)) {
@@ -2711,7 +2705,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
 
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
       const boundaryMessage = roundEntryBlock ? `本轮尚未结束（${roundEntryBlock}），继续核实持仓与委托`
-        : task.decision.entryBlock?.reason === "LOW_PROFIT_PROBABILITY" ? "AI选定方向盈利概率不足45%，继续观察"
+        : task.decision.entryBlock?.reason === "LOW_PROFIT_PROBABILITY" ? "AI选定方向盈利概率不足40%，继续观察"
         : sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析"
         : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI结果已过期，重新分析"
         : positionChangedDuringAnalysis ? "分析期间持仓动作已执行，丢弃旧动作" : actionMessage;
