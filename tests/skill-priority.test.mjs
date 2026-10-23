@@ -30,6 +30,8 @@ test("priority knowledge stays first for every user even after a newer skill is 
 test("DGKZ/DGJJ priority skill reaches the model in full before other experience", async (t) => {
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
   assert.match(content, /预测当前周期下一根及随后1～3根K/);
+  assert.match(content, /主动、大胆预测/);
+  assert.match(content, /即使HOLD也给出预测路径和具体价格依据/);
   assert.match(content, /普通入场必须由AI明确BUY买多或SELL买空，选定方向盈利概率>=40%才允许/);
   assert.match(content, /多单点差=当前bid-均价；空单点差=均价-当前ask/);
   assert.match(content, /点差不乘数量，不是盈亏金额/);

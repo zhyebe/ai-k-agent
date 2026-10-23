@@ -173,7 +173,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     noSecondEntryWhileHolding: true,
   },
   kline: {
-    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；AI用大趋势与延续路径判断入场；程序按持仓汇总及当前可成交价执行盈利1点立即离场，亏损-2点触发AI判断，不等定K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
+    summary: "标准情况固定每分钟第50秒出K；正常约45秒至50秒之间出现。走完的K只作历史证据，近端预测针对下一根将在第50秒打印的K；AI主动、大胆预测最可能的主场景，明确下一K及随后1～3根K价格路径、合适入场价与失效位；普通指标分歧用诚实概率和反证表达，不等待完美信号，预测方向不等于下单；程序按持仓汇总及当前可成交价执行盈利1点立即离场，亏损-2点触发AI判断，不等定K。报价/逐笔可能每秒更新，不要等整分:00收盘，也不要把已经走完的K当成预测目标。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
     periodMs: LIVE_KLINE_PERIOD_MS,
     printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,
