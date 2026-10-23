@@ -65,9 +65,9 @@ test("direct analysis sends shared approved experience and both order books in o
     assert.equal(context.market.account.positionDeposit, 1000);
     assert.equal(context.market.account.openOrders[0].frozenMargin, 1800);
     assert.equal(context.market.account.openOrders[0].orderDeposit, 3600);
-    assert.match(payload.messages[0].content, /价格点不是金额、百分比或持仓K数/);
-    assert.match(payload.messages[0].content, /赚取可兑现收益并减少损失/);
-    assert.match(payload.messages[0].content, /低位买多、高位买空/);
+    assert.match(payload.messages[0].content, /不乘数量，不是金额/);
+    assert.match(payload.messages[0].content, /盈利点差>=1时程序立即整行离场/);
+    assert.match(payload.messages[0].content, /选定方向盈利概率>=45%/);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);
     assert.equal(context.market.raw, undefined);
     assert.equal(context.market.books[1].raw, undefined);

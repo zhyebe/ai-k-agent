@@ -3,7 +3,7 @@ import test from "node:test";
 import { applyEntryBoundary, bindDecisionToMarket, buildDecisionContext } from "../server/engine.mjs";
 
 const market = { symbol: "A", books: [{ symbol: "A", trend: "range" }, { symbol: "B", trend: "up" }] };
-const bind = decision => applyEntryBoundary(bindDecisionToMarket(decision, market), market);
+const bind = input => { const decision = { bullishProfitProbability: 0.6, bearishProfitProbability: 0.6, ...input }; return applyEntryBoundary(bindDecisionToMarket(decision, market), market); };
 
 for (const action of ["BUY", "SELL"]) {
   for (const orderType of ["MARKET", "LIMIT"]) {
@@ -23,7 +23,7 @@ for (const action of ["BUY", "SELL"]) {
   }
 }
 
-test("only the selected board's current AI regime controls entry; historical range and other boards do not", () => {
+test("AI direction and probability control entry; market regime is supporting evidence", () => {
   const decision = { action: "BUY", targetSymbol: "A", marketRegime: "UP", boardAssessments: [
     { symbol: "A", action: "BUY", marketRegime: "UP" },
     { symbol: "B", action: "HOLD", marketRegime: "RANGE" },
@@ -39,15 +39,14 @@ test("only the selected board's current AI regime controls entry; historical ran
     { symbol: "A", marketRegime: "UP", action: "BUY", confidence: 0.9 },
   ] });
   assert.equal(duplicates.action, "BUY");
-  assert.equal(duplicates.marketRegime, "RANGE");
+  assert.equal(duplicates.marketRegime, "UP");
 });
 
-test("missing/invalid current regime cannot authorize entry or be inferred from free text/history", () => {
-  assert.equal(bind({ action: "BUY", targetSymbol: "A" }).action, "HOLD");
+test("missing current regime does not block a complete AI direction with sufficient probability", () => {
   for (const marketRegime of [undefined, "UNKNOWN", "bogus"]) {
     const result = bind({ action: "BUY", targetSymbol: "A", marketRegime, analysisSummary: "主判断：偏涨" });
-    assert.equal(result.action, "HOLD");
-    assert.ok(result.riskFlags.includes("ENTRY_MARKET_REGIME_UNKNOWN"));
+    assert.equal(result.action, "BUY");
+    assert.equal(result.entryBlock, undefined);
   }
 });
 
@@ -66,9 +65,9 @@ test("an incomplete board assessment does not erase an explicit target regime", 
   assert.equal(blocked.entryBlock, undefined);
 });
 
-test("sideways does not block explicit profit, protective or scheduled exits", () => {
+test("sideways does not block explicit profit or loss exits", () => {
   const positions = [{ positionOrderId: "P1", symbol: "A", side: "LONG", quantity: 2 }];
-  for (const exitType of ["TAKE_PROFIT", "STOP_LOSS", "SCHEDULED_CLOSE"]) {
+  for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
     const decision = { action: "SELL", marketRegime: "RANGE", exitType, targetPositionIds: ["P1"] };
     const snapshot = { ...market, account: { positionsVerified: true, positions } };
     assert.equal(applyEntryBoundary(bindDecisionToMarket(decision, snapshot), snapshot).action, "SELL");
@@ -94,15 +93,5 @@ for (const side of ["LONG", "SHORT"]) {
     assert.equal(context().exitQuoteNetPnl, null);
     snapshot.orderBook = {};
     assert.equal(context().exitQuoteGrossPnl, null, "the last mark is not an exit quote");
-  });
-}
-
-for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"]) {
-  test(`${action} ${orderType}: tagged rescue can be evaluated in RANGE but not UNKNOWN`, () => {
-    const decision = { action, orderType, targetSymbol: "A", marketRegime: "RANGE", entryPurpose: "RESCUE", rescuePositionIds: ["original"] };
-    assert.equal(bind(decision).action, action);
-    assert.equal(bind({ ...decision, rescuePositionIds: [] }).action, action);
-    assert.equal(bind({ ...decision, entryPurpose: "NORMAL" }).action, action);
-    assert.equal(bind({ ...decision, marketRegime: "UNKNOWN" }).action, "HOLD");
   });
 }

@@ -2,23 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSegments, buildRecentMonitoringMarket, describeAnalysisLayers, estimateMarketContextBytes, LIVE_BOARD_STRATEGY, shouldUseSegmentedAnalysis, startOfShanghaiHour, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 
-test("AI owns ordinary entries; program owns summary exits and rescue", () => {
+test("single-round AI entry and immediate profit and AI loss summary exits share one policy", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
-  assert.equal(entry.minimumProbability, null);
+  assert.equal(entry.minimumProbability, 0.45);
+  assert.equal(entry.emptyOnly, true);
   assert.equal(entry.decisionMode, "AI_ONLY");
-  assert.equal(exit.decisionMode, "PROGRAM_ONLY");
-  assert.equal(exit.priority, "BEFORE_ENTRY");
-  assert.deepEqual(exit.summaryProfitPoints, { minimum: 0.5, exitAboveTarget: true });
-  assert.equal(exit.rescueLossPoints, 3);
-  assert.equal(exit.recoveryAmount, -1);
-  assert.equal(exit.recoveryScope, "COMMODITY_LONG_SHORT_SUMMARIES");
-  assert.equal(exit.latchRecoveryExit, true);
+  assert.equal(exit.decisionMode, "PROGRAM_PROFIT_AI_LOSS");
+  assert.equal(exit.immediateProfitPoints, 1);
+  assert.equal(exit.reviewLossPoints, -2);
   assert.equal(exit.automaticInBothEntryModes, true);
   assert.deepEqual(exit.positionList, ["持仓汇总", "转让"]);
-  assert.doesNotMatch(LIVE_BOARD_STRATEGY.loop.summary, /1～4|净金额≤-3/);
-  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.excludeTransientDisplayPriceFromAnalysis, false);
-  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.priceSpikeAloneProvesFlash, false);
-  assert.equal(LIVE_BOARD_STRATEGY.kline.flashK.preserveVerifiedExecutableQuotes, true);
+  assert.equal(LIVE_BOARD_STRATEGY.loop.noSecondEntryWhileHolding, true);
+  assert.equal(Object.hasOwn(exit, "rescueLossPoints"), false);
 });
 
 function history(size, start = 1700000000000, step = 60000) {

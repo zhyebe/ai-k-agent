@@ -98,3 +98,29 @@ export function redrawNextControl(selector) {
   observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-axiom-control"] });
 }
 export const refreshingTradeFixture = tradeFixture.replace("</body>", `<script>(${enableRefreshingOrderSelection.toString()})(); window.redrawNextControl = ${redrawNextControl.toString()};</script></body>`);
+
+// Model an empty account for ordinary-entry execution scenarios.
+export async function clearTradingAccount(page) {
+  await page.evaluate(() => {
+    for (const selector of ['#positions tbody', '#orders tbody']) {
+      const body = document.querySelector(selector);
+      if (body) body.innerHTML = '<tr><td colspan="12">暂无数据</td></tr>';
+    }
+    window.orderPane = name => {
+      if (name === 'history') window.historyVisits++;
+      for (const id of ['positions', 'orders', 'history', 'summary']) { const node = document.getElementById(id); if (node) node.style.display = id === name ? '' : 'none'; }
+    };
+    let summary = document.querySelector('#summary');
+    if (!summary) {
+      summary = document.createElement('section'); summary.id = 'summary'; summary.style.display = 'none';
+      summary.innerHTML = '<table><thead><tr><th>商品名称</th><th>买 | 卖</th><th>订立均价</th><th>存货数量</th><th>委托冻结数量</th></tr></thead><tbody><tr><td colspan="5">暂无数据</td></tr></tbody></table>';
+      document.body.append(summary);
+      const tab = document.createElement('div'); tab.className = 'head_l_btns'; tab.textContent = '持仓汇总';
+      tab.onclick = () => {
+        for (const id of ['positions', 'orders', 'history']) { const node = document.getElementById(id); if (node) node.style.display = 'none'; }
+        summary.style.display = '';
+      };
+      document.body.append(tab);
+    }
+  });
+}

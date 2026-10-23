@@ -5,6 +5,7 @@ import { runAnalysis, runPositionExitCycle, startController, stopController } fr
 import { state } from "../server/store.mjs";
 
 function setup(t) {
+  if (!t.name.startsWith("fast relogin wakes")) t.mock.timers.enable({ apis: ["setTimeout"] });
   const id = `login-${t.name}`;
   const task = { id, ownerUserId: "login-owner", mode: "LIVE", autoDecisionEnabled: true,
     status: "MONITORING", monitoringEnabled: true, stopLocked: false, monitorGeneration: 0,
@@ -17,7 +18,7 @@ function setup(t) {
     latest: { price: 103 }, quote: { price: 103 }, orderBook: { bids: [{ price: 103, volume: 10 }], asks: [{ price: 104, volume: 10 }] },
     account: { positionsVerified: true, positions: [position], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O1", remainingQuantity: 1 }], availableFunds: 10000 } };
   market.account.positionSummariesVerified = true;
-  Object.defineProperty(market.account, "positionSummaries", { enumerable: true, get: () => [{ symbol: "DGKZ", symbolName: "测试商品", side: "LONG", quantity: 1, frozenQuantity: 0, averagePrice: position.orderPrice, realtimeValueChange: 103 - position.orderPrice }] });
+  Object.defineProperty(market.account, "positionSummaries", { enumerable: true, configurable: true, get: () => [{ symbol: "DGKZ", symbolName: "测试商品", side: "LONG", quantity: 1, frozenQuantity: 0, averagePrice: position.orderPrice, realtimeValueChange: 103 - position.orderPrice }] });
   task.market = market;
   state.tasks.unshift(task);
   t.after(() => { stopController(id); state.tasks = state.tasks.filter(item => item !== task); });
@@ -35,6 +36,7 @@ function setup(t) {
       return { action: "HOLD", riskFlags: [], evidenceIds: [], orderAssessments: [{ orderId: "O1", decision: "KEEP" }] };
     },
     cancelOpenOrders: async () => { calls.push("cancel"); market.account.openOrders = []; return { ok: true, results: [{ orderId: "O1", cancelled: true }] }; },
+    requestSummaryExitDecision: async () => { calls.push("loss-review"); return { ok: true, decision: "HOLD", rationale: "继续观察风险" }; },
     submitSuggestionForm: async () => { calls.push("submit"); return { ok: true, submitted: true }; },
   };
   return { task, market, runtime, calls };
@@ -46,7 +48,7 @@ test("expiry during collection reauthenticates and reads fresh positions/orders 
   let reads = 0;
   f.runtime.observeMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   await runAnalysis(f.task.id, "", { runtime: f.runtime });
-  assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "analyze"]);
+  assert.deepEqual(f.calls, ["read", "login", "read", "cancel"]);
   assert.equal(f.task.target.loginStatus, "authenticated");
   assert.equal(f.task.monitoringEnabled, true);
 });
@@ -63,27 +65,21 @@ test("fast position monitor recovers login and executes a qualified summary exit
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-for (const entryPrice of [102, 102.01, 106, 105.99]) test(`fast position monitor recovers login and rechecks price-point profit and automatic rescue without an AI plan: entry ${entryPrice}`, async t => {
+for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects immediate +1 profit and AI -2 loss: entry ${entryPrice}`, async t => {
   const f = setup(t);
   f.market.account.positions[0].orderPrice = entryPrice;
   let reads = 0, submitted;
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
-  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  if (entryPrice === 102 || entryPrice === 102.01) {
-    assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime }); await new Promise(resolve => setImmediate(resolve));
+  if (entryPrice === 102) {
     assert.equal(submitted.exitType, "TAKE_PROFIT");
     assert.deepEqual(submitted.targetPositionIds, []);
     assert.equal(submitted.targetSummary.averagePrice, entryPrice);
-    assert.equal(submitted.exitGuard.summary, true);
-  } else if (entryPrice === 106) {
-    assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
-    assert.equal(submitted.exitType, null);
-    assert.equal(submitted.action, "SELL");
-    assert.deepEqual(f.task.pendingAction.rescuePositionIds, ["P1"]);
+    assert.equal(f.calls.includes("loss-review"), false);
   } else {
-    assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read"]);
     assert.equal(submitted, undefined);
+    assert.equal(f.calls.includes("loss-review"), entryPrice >= 105);
   }
 });
 
@@ -102,7 +98,7 @@ test("simultaneous collection and exit expiry share one automatic login", async 
   finishLogin();
   await Promise.all([analysis, exit]);
   assert.equal(f.calls.filter(call => call === "login").length, 1);
-  assert.ok(f.calls.includes("analyze"));
+  assert.equal(f.calls.includes("analyze"), false, "holding round skips new entry analysis");
 });
 
 test("failed reauthentication keeps monitoring enabled and never analyzes stale account data", async t => {
@@ -127,7 +123,8 @@ test("a second expiry is retried next cycle, without unbounded login loops", asy
 
 test("relogin during slow analysis discards old-session actions and resumes with fresh account data", async t => {
   const f = setup(t);
-  f.market.account.positions[0].orderPrice = 102.6; // Profit below 0.5 isolates stale-session entry/cancel behavior.
+  f.market.account.positions = [];
+  Object.defineProperty(f.market.account, "positionSummaries", { configurable: true, value: [] });
   let first = true;
   f.runtime.requestDecision = async () => {
     if (first) {
@@ -150,6 +147,7 @@ test("relogin during slow analysis discards old-session actions and resumes with
 
 test("fast relogin wakes analysis immediately instead of retaining an old retry backoff", async t => {
   const f = setup(t);
+  f.market.account.positions[0].orderPrice = 102.5;
   f.task.monitorFailureCount = 7;
   f.task.nextPollAt = new Date(Date.now() + 120000).toISOString();
   let ran = false, done;

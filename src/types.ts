@@ -104,7 +104,7 @@ export interface PendingAction {
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
   signalTier?: "AI_RECOGNITION" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
-  status: "WAITING" | "SUBMITTING" | "AWAITING_FILL" | "UNVERIFIED" | "REJECTED" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED";
+  status: "WAITING" | "SUBMITTING" | "AWAITING_FILL" | "UNVERIFIED" | "REJECTED" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED" | "RECONCILED";
   baselinePositionQty?: number;
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
   suggestedQty: number | null;
@@ -325,9 +325,7 @@ export interface TradingSession {
 }
 
 export interface Task {
-  rescueSession?: { status: "ACTIVE" | "EXITING" | "COMPLETE"; netPnl?: number | null; originalPositionIds: string[]; rescuePositionIds: string[];
-    groups?: { id: string; status: "ACTIVE" | "EXITING" | "COMPLETE"; legacy?: boolean; netPnl?: number | null;
-      originalPositionIds: string[]; rescuePositionIds: string[]; rescueOrders: { pendingId: string; positionIds: string[] }[] }[] } | null;
+  summaryExitReviews?: Array<{ id: string; key: string; pnlPoints: number; status: "REQUESTING" | "REVIEWED" | "FAILED"; decision?: "EXIT" | "HOLD"; rationale?: string }>;
   id: string;
   name: string;
   status: TaskStatus;

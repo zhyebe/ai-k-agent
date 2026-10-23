@@ -1,134 +1,145 @@
-import "./fixtures/open-market-clock.mjs";
-import assert from "node:assert/strict";
-import test from "node:test";
-import { runAnalysis, stopController } from "../server/engine.mjs";
-import { requestDecision } from "../server/provider.mjs";
-import { suggestOrderPreview } from "../server/execution.mjs";
-import { state } from "../server/store.mjs";
-
-for (const action of ["BUY", "SELL"]) {
-  test(`${action}: an explicit additional entry survives an omitted existing-position exit plan`, async t => {
-    let calls = 0;
-    t.mock.method(globalThis, "fetch", async () => {
-      calls++;
-      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        action, marketRegime: action === "SELL" ? "DOWN" : "UP", target_symbol: "DGKZ", entry_price: 100, bullish_profit_probability: 0.6, bearish_profit_probability: 0.4,
-        holding_plan: { decision: "HOLD_FOR_TARGET", rationale: "旧仓持有，新机会可以增加一笔" }, exit_plans: [],
-      }) } }] }));
-    });
-    const result = await requestDecision({ apiKey: "fixture", baseUrl: "https://fixture.invalid", model: "deepseek-chat" }, {
-      account: { positionsVerified: true, positions: [{ positionOrderId: "old", side: "买入", quantity: 1 }] },
-      executionPolicy: { conditionalExits: true },
-    }, { fastAnalysis: true });
-    assert.equal(calls, 1, "unrelated plan omissions must not delay a complete new entry with another model call");
-    assert.equal(result.action, action);
-    assert.equal(result.riskFlags.includes("ANALYSIS_INCOMPLETE"), false);
-    assert.ok(result.riskFlags.includes("INCOMPLETE_EXIT_PLAN"), "the omitted plan remains visible for continued monitoring");
-  });
+import './fixtures/open-market-clock.mjs';
+import assert from 'node:assert/strict';
+import test, { afterEach, beforeEach } from 'node:test';
+import { runAnalysis, runPositionExitCycle, stopAllControllers } from '../server/engine.mjs';
+import { state } from '../server/store.mjs';
+import { requestDecision, requestSummaryExitDecision } from '../server/provider.mjs';
+beforeEach(t => t.mock.timers.enable({ apis: ['setTimeout'] }));
+afterEach(stopAllControllers);
+function fixture(t, id, automatic = true, action = 'BUY', probability = 0.6) {
+  const market = { ok: true, symbol: 'A', symbolName: '商品A', timeframe: '1m', observedAt: new Date().toISOString(), fingerprint: id, source: 'test', evidenceId: 'market:test',
+    history: [], historyCount: 0, latest: { price: 100 }, quote: { price: 100 }, books: [], indicators: {}, missingFields: [],
+    orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] },
+    account: { positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [], availableFunds: 10000 } };
+  const task = { id, ownerUserId: id, mode: 'LIVE', autoDecisionEnabled: automatic, status: 'MONITORING', monitoringEnabled: true,
+    target: { type: 'website', connectorId: 'connector_haohan_readonly', browserSessionId: id, url: 'https://smyw.haohandahan.cn/client/#/transcc' },
+    market, rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: 'HOLD', riskFlags: [], evidenceIds: [] } };
+  state.tasks.unshift(task); t.after(() => { state.tasks = state.tasks.filter(item => item !== task); });
+  const submissions = [], forms = [], analyses = [];
+  const runtime = { openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }),
+    observeMarket: async () => ({ ...market, observedAt: new Date().toISOString() }), observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
+    continueManualEntry: async () => ({ continued: false }),
+    fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true }; },
+    submitSuggestionForm: async input => { submissions.push(input); return { ok: true, submitted: true }; },
+    requestSummaryExitDecision: async () => ({ ok: true, decision: 'EXIT', rationale: '本轮兑现' }),
+    requestDecision: async (_provider, context) => { analyses.push(context); return { action, marketRegime: 'UNKNOWN', targetSymbol: 'A',
+      bullishProfitProbability: action === 'BUY' ? probability : 0.9, bearishProfitProbability: action === 'SELL' ? probability : 0.9,
+      orderType: 'MARKET', riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }; } };
+  return { task, market, runtime, submissions, forms, analyses };
 }
-
-for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
-  test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with ordinary holdings without AI exit plans`, async t => {
-    let now = Date.now();
-    t.mock.method(Date, "now", () => now);
-    const id = `multi-entry-${automatic}-${action}`;
-    const positions = Array.from({ length: 2 }, (_, i) => ({ positionOrderId: `old-${i}`, symbol: "DGKZ", side: action === "BUY" ? "买入" : "卖出", quantity: 1, frozenQuantity: 0, orderPrice: 100 }));
-    const task = { id, ownerUserId: id, mode: "LIVE", autoDecisionEnabled: automatic, status: "MONITORING", monitoringEnabled: true,
-      target: { type: "website", connectorId: "connector_haohan_readonly", browserSessionId: id, url: "https://smyw.haohandahan.cn/client/#/transcc" },
-      rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: "HOLD", evidenceIds: [], riskFlags: [] } };
-    state.tasks.unshift(task);
-    t.after(() => { stopController(id); state.tasks = state.tasks.filter(item => item !== task); });
-    const submissions = [], forms = [];
-    const market = () => ({ ok: true, symbol: "DGKZ", timeframe: "1m", observedAt: new Date(now).toISOString(), fingerprint: String(now), source: "test",
-      history: [], historyCount: 0, latest: { price: 100 }, quote: { price: 100 }, books: [], indicators: {}, evidenceId: "market:test",
-      orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] },
-      account: { positionsVerified: true, positions, openOrdersVerified: true, openOrders: [], availableFunds: 10000 } });
-    const runtime = {
-      openMarketBrowser: async () => ({ ok: true }), browserLoginStatus: async () => ({ ok: true, authenticated: true }), observeMarket: async () => market(), observeExecutionMarket: async () => market(),
-      continueManualEntry: async () => ({ continued: false }),
-      fillSuggestionForm: async input => { forms.push(input); return { ok: true, filled: true, submitted: false }; },
-      submitSuggestionForm: async input => { submissions.push(input); return { ok: true, submitted: true }; },
-      requestDecision: async (_provider, context) => {
-        assert.equal(context.strategy.loop.entry.emptyOnly, false);
-        assert.equal(context.strategy.loop.noSecondEntryWhileHolding, false);
-        assert.equal(context.strategy.entryQuantity, 1);
-        return { action, marketRegime: action === "SELL" ? "DOWN" : "UP", targetSymbol: "DGKZ", orderType: "LIMIT", entryPrice: action === "BUY" ? 99 : 101, targetPrice: action === "BUY" ? 99 : 101,
-          bullishProfitProbability: 0.62, bearishProfitProbability: 0.42, riskFlags: [], evidenceIds: [], decisionTtlSec: 300,
-          holdingPlan: { decision: "HOLD_FOR_TARGET" }, exitPlans: positions.map(p => ({ positionId: p.positionOrderId, quantity: 1,
-            heldSide: p.side === "买入" ? "LONG" : "SHORT", takeProfitPrice: p.orderPrice + (p.side === "买入" ? 4 : -4), validForSec: 300 })) };
-      },
-    };
-    for (let round = 0; round < 3; round++) {
-      await runAnalysis(id, "", { runtime });
-      assert.equal(task.decision.action, action);
-      assert.equal(task.exitPlans.length, 0);
-      assert.equal((automatic ? submissions : forms).length, round + 1);
-      const submitted = (automatic ? submissions : forms).at(-1);
-      assert.equal(submitted.quantity, 1);
-      assert.equal(submitted.price, action === "BUY" ? 99 : 101);
-      assert.equal(submitted.exitType || null, null);
-      assert.deepEqual(submitted.targetPositionIds, []);
-      // A new same-K analysis cannot submit or prompt the same opportunity again.
-      await runAnalysis(id, "", { runtime });
-      assert.equal((automatic ? submissions : forms).length, round + 1);
-      // Simulate an exchange fill (a user click in manual mode), retaining old positions.
-      positions.push({ ...positions[0], positionOrderId: `new-${round}`, side: action === "BUY" ? "买入" : "卖出", orderPrice: submitted.price });
-      now += 60000;
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const probability of [0.4499, 0.45, 0.6]) {
+  test(`${automatic ? 'automatic' : 'manual'} ${action} selected probability ${probability}`, async t => {
+    const f = fixture(t, `entry-${automatic}-${action}-${probability}`, automatic, action, probability);
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal((automatic ? f.submissions : f.forms).length, probability >= 0.45 ? 1 : 0);
+    assert.equal(f.task.decision.action, probability >= 0.45 ? action : 'HOLD');
+    assert.equal(f.analyses[0].strategy.loop.entry.emptyOnly, true);
+    assert.equal(f.analyses[0].strategy.loop.entry.minimumProbability, 0.45);
+    if (probability >= 0.45) {
+      await runAnalysis(f.task.id, '', { runtime: f.runtime });
+      assert.equal(f.analyses.length, 1, 'pending entry owns the current round');
+      assert.equal((automatic ? f.submissions : f.forms)[0].action, action, 'program never chooses the higher probability side');
     }
-    assert.equal(submissions.length, automatic ? 3 : 0);
-    assert.equal(forms.length, automatic ? 0 : 3);
-    assert.equal(positions.length, 5);
   });
 }
-
-test("predicted entry price is an explicit LIMIT; MARKET remains immediate at the current market", () => {
-  const task = { mode: "LIVE", market: { latest: { price: 100 } } };
-  assert.equal(suggestOrderPreview(task, { action: "BUY", marketRegime: "UP", orderType: "LIMIT", entryPrice: 98 }).suggestedPrice, 98);
-  assert.equal(suggestOrderPreview(task, { action: "SELL", marketRegime: "DOWN", orderType: "LIMIT", entryPrice: 102 }).suggestedPrice, 102);
-  assert.equal(suggestOrderPreview(task, { action: "BUY", marketRegime: "UP", orderType: "MARKET", entryPrice: 98 }).suggestedPrice, 100);
+for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test(`${stateName} blocks additional entry analysis`, async t => {
+  const f = fixture(t, `round-${stateName}`);
+  if (stateName === 'positions') f.market.account.positions = [{ positionOrderId: 'p', side: 'LONG', quantity: 1, orderPrice: 100 }];
+  if (stateName === 'summaries') f.market.account.positionSummaries = [{ side: 'LONG', quantity: 1, averagePrice: 100 }];
+  if (stateName === 'orders') f.market.account.openOrders = [{ orderId: 'o', remainingQuantity: 1, orderTime: new Date().toISOString() }];
+  if (stateName === 'unverified') f.market.account.positionSummariesVerified = false;
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.analyses.length, 0);
+  assert.equal(f.submissions.length, 0);
+});
+test('AI entry, holdings, immediate profit exit, verified flat, next entry completes a full round in the same K', async t => {
+  const f = fixture(t, 'whole-round');
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+  f.market.account.positions = [{ positionOrderId: 'p', symbol: 'A', symbolName: '商品A', side: 'LONG', quantity: 1, orderPrice: 100, frozenQuantity: 0 }];
+  f.market.account.positionSummaries = [{ symbol: 'A', symbolName: '商品A', side: 'LONG', quantity: 1, averagePrice: 100, frozenQuantity: 0 }];
+  f.market.orderBook.bids[0].price = 101; f.market.orderBook.asks[0].price = 101;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime }); await new Promise(resolve => setImmediate(resolve));
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submissions.length, 2);
+  assert.equal(f.submissions[1].exitType, 'TAKE_PROFIT');
+  f.market.account.positions = []; f.market.account.positionSummaries = [];
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  await runAnalysis(f.task.id, '', { runtime: f.runtime, skipIfUnchanged: true });
+  assert.equal(f.submissions.length, 3);
+  assert.equal(f.submissions[2].exitType, null);
+});
+test('old unresolved rescue cannot lock a freshly verified flat account forever', async t => {
+  const f = fixture(t, 'old-unresolved');
+  f.task.unsettledActions = [{ id: 'old', status: 'AWAITING_FILL', source: 'auto_timeout', action: 'BUY', entryPurpose: 'RESCUE',
+    createdAt: new Date(Date.now() - 86400000).toISOString(), baselinePositionsVerified: true, baselinePositions: {}, suggestedQty: 2 }];
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+  assert.deepEqual(f.task.unsettledActions, []);
+  assert.ok(state.orders.some(order => order.idempotencyKey === 'pending:old' && order.status === 'reconciled_flat'));
+});
+for (const apiFormat of ['chat', 'responses', 'anthropic', 'gemini']) test(`${apiFormat} receives one consistent round policy and dedicated exit decision`, async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const body = JSON.parse(options.body); calls.push(body);
+    const messages = body.input || body.messages || body.contents;
+    const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
+    assert.match(prompt, /盈利.*>=1|盈利点差>=1/);
+    assert.match(prompt, /亏损.*<=-2|亏损点差<=-2/);
+    const value = calls.length === 1 ? { action: 'SELL', bullish_profit_probability: 0.8, bearish_profit_probability: 0.46, analysis_summary: '主判断：偏跌' }
+      : { decision: 'HOLD', rationale: '价格仍有恢复机会，继续监控风险' };
+    const text = JSON.stringify(value);
+    return new Response(JSON.stringify(apiFormat === 'anthropic' ? { content: [{ type: 'text', text }] }
+      : apiFormat === 'responses' ? { output_text: text } : apiFormat === 'gemini' ? { candidates: [{ content: { parts: [{ text }] } }] }
+      : { choices: [{ message: { content: text } }] }));
+  });
+  const provider = { apiKey: 'fixture', apiFormat, baseUrl: 'https://fixture.invalid', model: 'fixture' };
+  const entry = await requestDecision(provider, { market: {} });
+  assert.equal(entry.action, 'SELL');
+  const exit = await requestSummaryExitDecision(provider, { reviewType: 'STOP_LOSS', pnlPoints: -2 });
+  assert.equal(exit.decision, 'HOLD');
+  assert.equal(calls.length, 2);
 });
 
-for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
-  test(`${apiFormat} receives explicit trend, entry timing and independent new-entry instructions`, async t => {
-    let calls = 0;
-    t.mock.method(globalThis, "fetch", async (_url, options) => {
-      calls++;
-      const body = JSON.parse(options.body);
-      const messages = body.input || body.messages || body.contents;
-      const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
-      assert.match(prompt, /预测阶段低位买多 BUY\/买涨/);
-      assert.match(prompt, /预测阶段高位买空 SELL\/买跌/);
-      assert.match(prompt, /旧仓不锁新入场/);
-      assert.match(prompt, /不得把顶层 action 自动改成 HOLD/);
-      assert.match(prompt, /主判断：偏涨\/偏跌\/震荡/);
-      assert.match(prompt, /不要求猜中绝对顶底/);
-      assert.match(prompt, /只要方向和位置匹配且存在有证据支持、可证伪的正净收益路径/);
-      assert.match(prompt, /预测入场价尚未到但限价成交后的预期净收益仍为正时，用同方向 LIMIT/);
-      assert.match(prompt, /持仓和旧委托不是全局入场锁/);
-      assert.match(prompt, /下一 K 或新的价格\/趋势机会必须重新判断并可再次下单/);
-      assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
-      assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
-      assert.match(prompt, /Account totals are not per-commodity summary PnL/);
-      assert.match(prompt, /由程序读取持仓汇总/);
-      assert.match(prompt, /实时货值变化合计>=-1/);
-      assert.match(prompt, /两笔独立救单/);
-      assert.match(prompt, /原多单entry-bid>=3点、原空单ask-entry>=3点/);
-      assert.match(prompt, /保留原单，反向下两笔独立救单/);
-      assert.doesNotMatch(prompt, /程序止盈兜底/);
-      const value = JSON.stringify({ action: "BUY", marketRegime: "UP", order_type: "LIMIT", entry_price: 98, target_price: 98,
-        bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
-        analysis_summary: "主判断：偏涨；预测回踩98后向103，采用限价入场" });
-      const response = apiFormat === "anthropic" ? { content: [{ type: "text", text: value }] }
-        : apiFormat === "responses" ? { output_text: value }
-          : apiFormat === "gemini" ? { candidates: [{ content: { parts: [{ text: value }] } }] }
-            : { choices: [{ message: { content: value } }] };
-      return new Response(JSON.stringify(response));
-    });
-    const decision = await requestDecision({ apiKey: "fixture", apiFormat, baseUrl: "https://fixture.invalid", model: apiFormat === "chat" ? "deepseek-chat" : "fixture" }, { account: { positions: [] }, market: {} });
-    assert.equal(calls, 1);
-    assert.equal(decision.action, "BUY", "a worthwhile forecast entry uses an explicit BUY LIMIT plan");
-    assert.equal(decision.orderType, "LIMIT");
-    assert.equal(decision.entryPrice, 98);
-    assert.match(decision.analysisSummary, /主判断：偏涨/);
-  });
-}
+for (const outcome of ['flat', 'partial-fill', 'unverified', 'cancel-failed']) test(`expired current order: ${outcome} follows verified account state`, async t => {
+  const f = fixture(t, `expired-order-${outcome}`);
+  f.market.account.openOrders = [{ orderId: 'o', orderTime: new Date(Date.now() - 121000).toISOString(), remainingQuantity: 2 }];
+  const cancellations = [];
+  f.runtime.cancelOpenOrders = async ({ orderIds }) => {
+    cancellations.push(orderIds);
+    if (outcome === 'cancel-failed') return { ok: false, results: [{ orderId: 'o', cancelled: false }] };
+    f.market.account.openOrders = [];
+    if (outcome === 'partial-fill') f.market.account.positions = [{ positionOrderId: 'p', quantity: 1, side: 'LONG', orderPrice: 100 }];
+    if (outcome === 'unverified') f.market.account.positionSummariesVerified = false;
+    return { ok: true, results: [{ orderId: 'o', cancelled: true }] };
+  };
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.deepEqual(cancellations, [['o']]);
+  assert.equal(f.analyses.length, outcome === 'flat' ? 1 : 0);
+  assert.equal(f.submissions.length, outcome === 'flat' ? 1 : 0);
+});
+test('unknown entry write stays unresolved and cannot submit again', async t => {
+  const f = fixture(t, 'unknown-entry-write');
+  f.runtime.submitSuggestionForm = async () => { f.submissions.push('started'); throw Error('CONNECTION_LOST'); };
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.task.pendingAction.status, 'UNVERIFIED');
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+});
+
+for (const oldPurpose of ['RESCUE', 'LOW_PROBABILITY']) test(`old waiting ${oldPurpose} cannot keep a flat round locked`, async t => {
+ const f=fixture(t,`old-waiting-${oldPurpose}`);
+ f.task.pendingAction={id:'old-waiting',status:'WAITING',action:'BUY',entryPurpose:oldPurpose==='RESCUE'?'RESCUE':'NORMAL',bullishProfitProbability:0.4,bearishProfitProbability:0.3};
+ await runAnalysis(f.task.id,'',{runtime:f.runtime});
+ assert.equal(f.submissions.length,1);
+ assert.equal(f.submissions[0].exitType,null);
+});
+test('retiring an old flat unresolved action updates its existing order record without inventing a fill', async t => {
+ const f=fixture(t,'old-existing-order');
+ f.task.unsettledActions=[{id:'existing-old',status:'UNVERIFIED',createdAt:new Date(Date.now()-121000).toISOString(),suggestedQty:1,action:'BUY',baselinePositionsVerified:true,baselinePositions:{}}];
+ const order={id:'existing-order',taskId:f.task.id,idempotencyKey:'pending:existing-old',status:'submitted'};
+ state.orders.unshift(order);t.after(()=>{state.orders=state.orders.filter(item=>item!==order);});
+ await runAnalysis(f.task.id,'',{runtime:f.runtime});
+ assert.equal(order.status,'reconciled_flat');
+ assert.deepEqual(f.task.unsettledActions,[]);
+});

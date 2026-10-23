@@ -29,7 +29,7 @@ function insertTask(id, extras = {}) {
     rules: [],
     decision: { action: "BUY", marketRegime: "UP", confidence: 0.8, profitProbability: 0.55, bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, targetPositionPct: 10, maxOrderValuePct: 4, reasonCodes: [], evidenceIds: [], invalidation: "", riskFlags: [], createdAt: new Date().toISOString(), ttlSec: 300 },
     metrics: { equity: 18000, dayPnl: 0, dayPnlPct: 0, exposurePct: 0, riskBudgetPct: 100 },
-    market: { latest: { price: 1800 }, account: { availableFunds: 18000 } },
+    market: { latest: { price: 1800 }, account: { availableFunds: 18000, positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [] } },
     ...extras,
   };
   state.tasks.unshift(task);
@@ -39,7 +39,7 @@ function insertTask(id, extras = {}) {
 test("suggestion preview keeps buy quantity honest and never implies a live order", () => {
   const preview = suggestOrderPreview({
     metrics: { equity: 18000 },
-    market: { latest: { price: 1800 }, account: { availableFunds: 18000 } },
+    market: { latest: { price: 1800 }, account: { availableFunds: 18000, positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [] } },
   }, { action: "BUY", marketRegime: "UP", targetPositionPct: 10, maxOrderValuePct: 8 });
   assert.equal(preview.action, "BUY");
   assert.equal(preview.suggestedPrice, 1800);
@@ -331,8 +331,8 @@ test("live exit submits one whole summary row", async () => {
       action: "SELL", marketRegime: "DOWN",
       exitType: "TAKE_PROFIT",
       targetPositionIds: [],
-      targetSummary: { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", side: "LONG", averagePrice: 1199.5, quantity: 2 },
-      exitGuard: { summary: true, expiresAt: new Date(Date.now() + 30000).toISOString() },
+      targetSummary: { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", side: "LONG", averagePrice: 1199, quantity: 2 },
+      exitGuard: { summary: true, programProfit: true, expiresAt: new Date(Date.now() + 30000).toISOString() },
       targetSymbol: "DGKZ",
       targetSymbolName: "丹桂康砖（二期）",
       confidence: 0.7,
@@ -423,7 +423,7 @@ test("multi-board pending action uses and submits the selected board price and i
     market: {
       symbol: "DGJJ",
       latest: { price: 1800 },
-      account: { availableFunds: 18000 },
+      account: { availableFunds: 18000, positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [] },
       books: [
         { symbol: "DGJJ", symbolName: "丹桂金尖（二期）", instrumentId: "536", latest: { price: 1800 } },
         { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", instrumentId: "537", latest: { price: 1200 } },
@@ -483,7 +483,7 @@ test("switching into live cancels stale paper suggestions", () => {
 
 for (const action of ["BUY", "SELL"]) {
   for (const probability of [undefined, 0.39, 0.4, 0.44]) {
-    test(`live submit checks persisted ${action} probability ${probability} for completeness without a fixed threshold`, async () => {
+    test(`live submit checks persisted ${action} probability ${probability} must meet the 45% boundary`, async () => {
       const task = insertTask(`task_probability_guard_${action}_${probability}_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
       task.decision = {
         ...task.decision,
@@ -499,16 +499,10 @@ for (const action of ["BUY", "SELL"]) {
         submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
       } });
       try {
-        if (probability !== undefined) {
-          await submit();
-          assert.equal(submitted, 1);
-          assert.equal(task.pendingAction.status, "AWAITING_FILL");
-        } else {
-          await assert.rejects(submit, /INCOMPLETE_DIRECTIONAL_PROBABILITIES/);
-          assert.equal(submitted, 0);
-          assert.equal(task.pendingAction.status, "WAITING");
-          assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
-        }
+        await assert.rejects(submit, /ENTRY_PROBABILITY_BELOW_45/);
+        assert.equal(submitted, 0);
+        assert.equal(task.pendingAction.status, "WAITING");
+        assert.equal(state.orders.filter(order => order.taskId === task.id).length, 0);
       } finally {
         state.tasks = state.tasks.filter((item) => item.id !== task.id);
       }

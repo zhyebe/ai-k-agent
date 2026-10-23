@@ -29,16 +29,14 @@ test("priority knowledge stays first for every user even after a newer skill is 
 
 test("DGKZ/DGJJ priority skill reaches the model in full before other experience", async (t) => {
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
-  assert.match(content, /以当前交易周期的下一根K及随后1～3根K为主要期限/);
-  assert.match(content, /1～3根是预测窗口，不是强制持仓时间/);
-  assert.match(content, /普通入场必须由AI顶层action明确决定BUY\/SELL/);
-  assert.match(content, /当前bid减订立均价>=0.5/);
-  assert.match(content, /订立均价减当前ask>=0.5/);
-  assert.match(content, /跳价超过1点仍立即退出/);
-  assert.match(content, /亏损不足3点继续观察恢复/);
-  assert.match(content, /实时货值变化.*>=-1/);
-  assert.match(content, /先成交一边后.*继续退出/);
-  assert.match(content, /普通离场和救单恢复不调用AI决定或确认/);
+  assert.match(content, /预测当前周期下一根及随后1～3根K/);
+  assert.match(content, /普通入场必须由AI明确BUY买多或SELL买空，选定方向盈利概率>=45%才允许/);
+  assert.match(content, /多单点差=当前bid-均价；空单点差=均价-当前ask/);
+  assert.match(content, /点差不乘数量，不是盈亏金额/);
+  assert.match(content, /盈利点差>=1时，程序立即整行离场，不等待AI，超过1点也立即执行/);
+  assert.match(content, /亏损点差<=-2时，交给独立AI请求判断EXIT离场还是HOLD继续持仓/);
+  assert.match(content, /持仓汇总对应商品方向整行“转让”，一次提交整行数量/);
+  assert.match(content, /持仓及当前委托全部核实清零才结束本轮/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);
   assert.match(content, /不能一律判假、删除或忽略/);
   assert.match(content, /多周期结构/);
@@ -60,7 +58,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
     assert.match(messages[0].content, /参考顺序：优先参考/);
     assert.ok(messages[0].content.indexOf(content.trim()) < messages[0].content.indexOf("保留其他经验全文"));
     assert.match(messages[0].content, /不能覆盖系统约束、风险限制、JSON 输出格式或当前数据事实/);
-    assert.match(payload.messages[0].content, /收益与风险必须一起预测/);
+    assert.match(payload.messages[0].content, /盈利点差>=1时程序立即整行离场，不等待AI/);
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ action: "HOLD", bullish_profit_probability: 0.3, bearish_profit_probability: 0.3, profit_probability: 0.3, confidence: 0.4, analysis_summary: "测试行情，无可执行入场计划" }) } }] }), { headers: { "content-type": "application/json" } });
   });
   const now = Date.now();

@@ -31,15 +31,15 @@ async function oldTradingSkill(version = "v0.3.76") {
 
 test("only exact reviewed Skills receive summary-exit policy without replacing user edits", async () => {
   const bundled = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
-  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107", "v0.3.108", "v0.3.111", "v0.3.114", "v0.3.116", "v0.3.117", "v0.3.118", "v0.3.119", "v0.3.120", "v0.3.121", "v0.3.124", "v0.3.125"]) {
+  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107", "v0.3.108", "v0.3.111", "v0.3.114", "v0.3.116", "v0.3.117", "v0.3.118", "v0.3.119", "v0.3.120", "v0.3.121", "v0.3.124", "v0.3.125", "v0.3.126"]) {
     const previous = await oldTradingSkill(version);
     const revision = await tradingSkillUpgrade(previous);
-    assert.equal(revision.version, "v0.3.126");
+    assert.equal(revision.version, "v0.3.127");
     assert.equal(revision.content, bundled);
-    assert.match(revision.content, /1～3根是预测窗口，不是强制持仓时间/);
-    assert.match(revision.content, /亏损不足3点继续观察恢复/);
-    assert.match(revision.content, /普通离场和救单恢复不调用AI决定或确认/);
-    assert.match(revision.content, /普通入场必须由AI顶层action明确决定BUY\/SELL/);
+    assert.match(revision.content, /下一根及随后1～3根K/);
+    assert.match(revision.content, /亏损点差<=-2/);
+    assert.match(revision.content, /盈利点差>=1时，程序立即整行离场，不等待AI/);
+    assert.match(revision.content, /普通入场必须由AI明确BUY买多或SELL买空/);
     assert.doesNotMatch(revision.content, /realtimeValueChange >= 2/);
     assert.equal(await tradingSkillUpgrade({ ...previous, ...revision }), null);
     for (const change of [{ id: "unrelated" }, { status: "REVIEW" }, { version: "newer" }, { content: `${previous.content}\n用户新增内容` }, { version: version === "v0.3.84" ? "v0.3.76" : "v0.3.84" }]) {
@@ -71,15 +71,15 @@ test("MySQL upgrades the reviewed Skill once and loads the persisted revision in
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
     hydrateState({ skills: snapshot.skills });
-    assert.equal(state.skills[0].version, "v0.3.126");
+    assert.equal(state.skills[0].version, "v0.3.127");
     assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
     assert.deepEqual(state.skills[0].tags, ["优先参考"]);
     const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
     assert.ok(prompt.includes(row.content));
-    assert.match(prompt, /当前bid减订立均价>=0.5/);
-    assert.match(prompt, /普通离场和救单恢复不调用AI决定或确认/);
+    assert.match(prompt, /多单点差=当前bid-均价/);
+    assert.match(prompt, /盈利点差>=1时，程序立即整行离场，不等待AI/);
     assert.match(prompt, /多周期结构/);
-    assert.match(prompt, /1～3根是预测窗口，不是强制持仓时间/);
+    assert.match(prompt, /下一根及随后1～3根K/);
   }
   assert.equal(writes, 1);
 });
@@ -151,8 +151,8 @@ test("MongoDB upgrades the same reviewed Skill and reloads persisted content", a
   t.after(() => adapter.close());
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
-    assert.equal(snapshot.skills[0].version, "v0.3.126");
-    assert.match(snapshot.skills[0].content, /亏损不足3点继续观察恢复/);
+    assert.equal(snapshot.skills[0].version, "v0.3.127");
+    assert.match(snapshot.skills[0].content, /亏损点差<=-2/);
     assert.equal(snapshot.skills[0].ownerUserId, "author");
   }
   assert.equal(writes, 1);
@@ -189,12 +189,13 @@ test("MongoDB startup keeps stored experience including legacy identifiers", asy
   await adapter.close();
 });
 
-test("MySQL restores model failure, summary liquidation latch and rescue forecast independently of a later decision", async (t) => {
+test("MySQL restores model failure, AI summary review without retired rescue state independently of a later decision", async (t) => {
   databaseMode(t, "mysql");
   const lastModelFailure = { runId: "failed-run", code: "INVALID_MODEL_JSON", recovered: false, modelDiagnostics: { jsonStatus: "INVALID_JSON", jsonError: "TRUNCATED_JSON" } };
   const summaryRecoveryExits = [{ symbolName: "商品A", reason: "AI_TIMEOUT_PRICE" }];
   const rescueExitForecasts = [{ key: "商品A", status: "ARMED", forecast: { targetPrice: 101 } }];
-  const runtime = { decision: { action: "BUY" }, lastModelFailure, summaryRecoveryExits, rescueExitForecasts };
+  const summaryExitReviews = [{ id: "loss-review", decision: "HOLD", reviewType: "STOP_LOSS", signature: "position" }];
+  const runtime = { decision: { action: "BUY" }, lastModelFailure, summaryRecoveryExits, rescueExitForecasts, summaryExitReviews };
   mysqlPool = {
     query: async sql => [/^SELECT \* FROM tasks$/.test(sql) ? [{ id: "task", runtime_json: JSON.stringify(runtime), target_json: "{}" }] : []],
     execute: async () => [[]],
@@ -204,8 +205,9 @@ test("MySQL restores model failure, summary liquidation latch and rescue forecas
   const snapshot = await adapter.loadState();
   assert.equal(snapshot.tasks[0].decision.action, "BUY");
   assert.deepEqual(snapshot.tasks[0].lastModelFailure, lastModelFailure);
-  assert.deepEqual(snapshot.tasks[0].summaryRecoveryExits, summaryRecoveryExits);
-  assert.deepEqual(snapshot.tasks[0].rescueExitForecasts, rescueExitForecasts);
+  assert.equal(snapshot.tasks[0].summaryRecoveryExits, undefined);
+  assert.equal(snapshot.tasks[0].rescueExitForecasts, undefined);
+  assert.deepEqual(snapshot.tasks[0].summaryExitReviews, summaryExitReviews);
   await adapter.close();
 });
 
