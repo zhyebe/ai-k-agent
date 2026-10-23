@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { compactTaskRuntime, shouldPersistAuditEvent } from "../server/persistence.mjs";
 
+test("confidence remains unknown across persistence without erasing an explicit zero", () => {
+  for (const confidence of [undefined, null, 0, 0.7]) {
+    const runtime = compactTaskRuntime({ decision: { action: "HOLD", confidence } });
+    const restored = compactTaskRuntime(JSON.parse(JSON.stringify(runtime)));
+    assert.equal(restored.decision.confidence, confidence ?? null);
+  }
+});
+
 test("enabled provider is a desktop preference and excluded from durable task runtime", () => {
   assert.equal("providerId" in compactTaskRuntime({ providerId: "stepfun-local-selection" }), false);
 });

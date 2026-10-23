@@ -8,6 +8,25 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
+test("missing confidence stays unknown while explicit zero and AI HOLD are preserved", async t => {
+  let output;
+  let prompt;
+  t.mock.method(globalThis, "fetch", async (_url, options) => {
+    prompt = JSON.parse(options.body).messages[0].content;
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }));
+  });
+  for (const [confidence, expected] of [[undefined, null], [null, null], ["", null], ["invalid", null], [0, 0], [0.7, 0.7], ["70%", 0.7]]) {
+    output = { action: "HOLD", bullish_profit_probability: 0.46, bearish_profit_probability: 0.38, confidence };
+    const result = await requestDecision({ apiKey: "fixture", baseUrl: "https://fixture.invalid", model: "fixture" }, {}, { fastAnalysis: true });
+    assert.equal(result.action, "HOLD");
+    assert.equal(result.bullishProfitProbability, 0.46);
+    assert.equal(result.confidence, expected);
+    const previous = buildConversationMessages({ recentRounds: [{ decision: result }] });
+    assert.equal(JSON.parse(previous[1].content).confidence, expected);
+  }
+  assert.match(prompt, /confidence.*0.*1/);
+});
+
 test("camelCase model decisions retain summary, per-board regimes and forecast while HOLD", async t => {
   const output = { action: "HOLD", marketRegime: "RANGE", analysisSummary: "主判断：震荡，1322–1331区间往返，暂不入场",
     bullishProfitProbability: 0.42, bearishProfitProbability: 0.42,
@@ -518,7 +537,7 @@ test("thinking-only token exhaustion reports the failure instead of presenting i
   })));
   const result = await requestDecision({ apiKey: "test", baseUrl: "https://api.stepfun.com/step_plan/v1/messages", apiFormat: "anthropic", fullUrlMode: true, model: "step-5-preview" }, {});
   assert.equal(result.action, "HOLD");
-  assert.equal(result.confidence, 0);
+  assert.equal(result.confidence, null);
   assert.deepEqual(result.riskFlags, ["EMPTY_MODEL_RESPONSE", "MODEL_OUTPUT_LIMIT"]);
   assert.match(result.invalidation, /输出额度上限/);
 });

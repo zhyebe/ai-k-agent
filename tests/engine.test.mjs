@@ -96,6 +96,7 @@ for (const autoDecisionEnabled of [false, true]) {
         try {
           await runMonitoringCycle(taskId, { runtime });
           assert.equal(task.decision.action, action);
+          assert.match(getAgentOutput(taskId).find(item => item.kind === "decision").message, /置信度未提供/);
           assert.equal(task.pendingAction.action, action);
           assert.equal(task.pendingAction.suggestedQty, 1);
           assert.equal(task.pendingAction.formFilled, true);

@@ -38,7 +38,7 @@ function compactRound(round = {}) {
       targetSymbol: String(decision.targetSymbol || ""),
       targetSymbolName: String(decision.targetSymbolName || ""),
       targetInstrumentId: String(decision.targetInstrumentId || ""),
-      confidence: Number(decision.confidence || 0),
+      confidence: normalizeConfidence(decision.confidence),
       profitProbability: normalizeUnitProbability(decision.profitProbability ?? decision.profit_probability),
       bullishProfitProbability: normalizeUnitProbability(decision.bullishProfitProbability ?? decision.bullish_profit_probability),
       bearishProfitProbability: normalizeUnitProbability(decision.bearishProfitProbability ?? decision.bearish_profit_probability),
@@ -578,7 +578,7 @@ function normalizeDecision(value) {
       instrumentId: boundedText(item?.instrument_id ?? item?.instrumentId, 120),
       action: normalizeAction(item?.action) || "HOLD",
       marketRegime: normalizeMarketRegime(item?.market_regime ?? item?.marketRegime),
-      confidence: normalizeUnitProbability(item?.confidence),
+      confidence: normalizeConfidence(item?.confidence),
       profitProbability: firstProbability(item?.profit_probability, item?.profitProbability),
       bullishProfitProbability: firstProbability(item?.bullish_profit_probability, item?.bullishProfitProbability),
       bearishProfitProbability: firstProbability(item?.bearish_profit_probability, item?.bearishProfitProbability),
@@ -620,7 +620,7 @@ function normalizeDecision(value) {
       ? Number(value?.stop_loss_price ?? value?.stopLossPrice) : null,
     targetPositionPct: Math.min(100, Math.max(0, Number(value?.target_position_pct ?? value?.targetPositionPct) || 0)),
     maxOrderValuePct: Math.min(100, Math.max(0, Number(value?.max_order_value_pct ?? value?.maxOrderValuePct) || 0)),
-    confidence: normalizeUnitProbability(value?.confidence),
+    confidence: normalizeConfidence(value?.confidence),
     profitProbability: firstProbability(value?.profit_probability, value?.profitProbability, value?.win_probability),
     bullishProfitProbability: firstProbability(value?.bullish_profit_probability, value?.bullishProfitProbability),
     bearishProfitProbability: firstProbability(value?.bearish_profit_probability, value?.bearishProfitProbability),
@@ -811,6 +811,13 @@ export function normalizeUnitProbability(value) {
   return Math.min(1, Math.max(0, unit));
 }
 
+function normalizeConfidence(value) {
+  if (!["number", "string"].includes(typeof value) || String(value).trim() === "") return null;
+  const numeric = Number(String(value).replace(/[%％]/g, "").trim());
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 100) return null;
+  return normalizeUnitProbability(value);
+}
+
 function firstProbability(...values) {
   for (const value of values) {
     if (value === null || value === undefined || value === "") continue;
@@ -929,7 +936,7 @@ export async function requestDecision(provider, context, options = {}) {
       action: "HOLD",
       target_position_pct: 0,
       max_order_value_pct: 0,
-      confidence: 0,
+      confidence: null,
       decision_ttl_sec: 300,
       reason_codes: [],
       evidence_ids: requestContext.evidenceIds || [],
@@ -961,7 +968,7 @@ export async function requestDecision(provider, context, options = {}) {
   }
   const fastAnalysisPrompt = "Return one compact complete JSON object, no markdown or narration. analysis_summary at most 120 Chinese characters. Put action, both directional probabilities, order_type, entry_price and target_price first. Preserve exact instrument IDs and uncertainty.";
   const messages = [
-    { role: "system", content: `${currentTradingPolicy}\n${liveBoardFreshnessPrompt}\n${orderBookPrompt}\n单笔入场数量：${requestContext.strategy?.entryQuantity ?? 1}。${options.fastAnalysis ? fastAnalysisPrompt : ""}` },
+    { role: "system", content: `${currentTradingPolicy}\n${liveBoardFreshnessPrompt}\n${orderBookPrompt}\nReturn confidence as a number from 0 to 1 for your confidence in the chosen action, including HOLD; use null only if it cannot be assessed. Confidence is separate from both directional profit probabilities and is not an entry threshold.\n单笔入场数量：${requestContext.strategy?.entryQuantity ?? 1}。${options.fastAnalysis ? fastAnalysisPrompt : ""}` },
     ...conversationMessages,
     ...(requestContext.executionPolicy?.rulesBlockExecution === false ? [{ role: "system", content: "Live execution fact: context.rules are advisory evidence, including modes named BLOCK or REVIEW; they do not block software submission or request human takeover. Assess their market evidence yourself; do not invent an ATR system block. context.executionPolicy.entryMode describes who clicks a new entry; program-controlled summary exits and timed current-order cancellations are automatic in both entry modes. Keep all market and Skill evidence, honest probabilities and existing entry requirements." }] : []),
     ...(requestContext.experiencePrompt ? [{ role: "user", content: `${experiencePromptIntro}\n\n${requestContext.experiencePrompt}` }] : []),

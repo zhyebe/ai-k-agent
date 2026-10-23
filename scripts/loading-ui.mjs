@@ -62,6 +62,27 @@ async function capture(page, name) {
   await page.screenshot({ path: join(process.env.AXIOM_LOADING_SCREENSHOTS, `${name}.png`), fullPage: true });
 }
 
+test("AI HOLD above 45% displays missing confidence distinctly from an explicit zero", async t => {
+  const { page, navigate } = await openPage(t);
+  const sample = structuredClone(workspace);
+  sample.tasks = [{ ...sample.tasks[0], stopLocked: true, monitoringEnabled: false,
+    decision: { ...sample.tasks[0].decision, action: "HOLD", confidence: null, riskFlags: [],
+      bullishProfitProbability: 0.46, bearishProfitProbability: 0.38,
+      analysisSummary: "主判断：震荡，无突破承接证据，HOLD。" } }];
+  await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+  await navigate();
+  const panel = page.locator(".decision-panel");
+  await panel.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+  assert.match(await panel.locator(".decision-action").innerText(), /置信度未提供/);
+  assert.doesNotMatch(await panel.locator(".decision-action").innerText(), /0%/);
+  assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["46%", "38%"]);
+  assert.equal(await panel.locator(".entry-block").count(), 0);
+  sample.tasks[0].decision.confidence = 0;
+  await page.reload();
+  await panel.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
+  assert.match(await panel.locator(".decision-action").innerText(), /0% 置信度/);
+});
+
 test("HOLD displays future paths and distinguishes AI observation from an entry block", async t => {
   const { page, navigate } = await openPage(t);
   const sample = structuredClone(workspace);

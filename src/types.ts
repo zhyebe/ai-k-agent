@@ -145,7 +145,7 @@ export interface Decision {
   entryPrice?: number | null;
   takeProfitPrice?: number | null;
   stopLossPrice?: number | null;
-  confidence: number;
+  confidence: number | null;
   profitProbability?: number;
   directionalProbabilitiesComplete?: boolean;
   bullishProfitProbability?: number;
@@ -173,7 +173,7 @@ export interface Decision {
     instrumentId?: string;
     action: "BUY" | "SELL" | "HOLD";
     marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
-    confidence: number;
+    confidence: number | null;
     profitProbability?: number;
     bullishProfitProbability?: number;
     bearishProfitProbability?: number;

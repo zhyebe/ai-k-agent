@@ -1299,6 +1299,7 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
 function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
   const decision = task.decision;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
+  const confidenceLabel = decision.confidence != null && Number.isFinite(decision.confidence) ? `${Math.round(decision.confidence * 100)}% 置信度` : "置信度未提供";
   const analysisFailure = decision.riskFlags.find((flag) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"].includes(flag));
   const actionText = analysisFailure ? displayLabel(analysisFailure, riskLabels, "分析未完成") : analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
   const bullishProbability = Number(decision.bullishProfitProbability ?? 0);
@@ -1332,7 +1333,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%` : ""} · ${Math.round(decision.confidence * 100)}% 置信度` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%` : ""} · ${confidenceLabel}` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}

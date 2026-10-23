@@ -1388,7 +1388,7 @@ async function acquireCycle(taskId, { wait = false } = {}) {
 function holdDecision(code, invalidation) {
   return {
     action: "HOLD",
-    confidence: 0,
+    confidence: null,
     profitProbability: 0,
     targetPositionPct: 0,
     maxOrderValuePct: 0,
@@ -2510,7 +2510,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       providerSucceeded = false;
       decision = {
         action: "HOLD",
-        confidence: 0,
+        confidence: null,
         profitProbability: 0,
         targetPositionPct: 0,
         maxOrderValuePct: 0,
@@ -2585,14 +2585,15 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       recovered: providerSucceeded, modelDiagnostics: decision.modelDiagnostics,
     };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
-    completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`);
+    const confidenceLabel = Number.isFinite(decision.confidence) ? `置信度 ${Math.round(decision.confidence * 100)}%` : "置信度未提供";
+    completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${confidenceLabel}` : `模型分析未完成：${decision.invalidation}`);
     appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
       kind: "decision",
       level: providerSucceeded ? "info" : "error",
-      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.entryBlock?.requestedAction || decision.action}${decision.entryBlock ? `；入场拦截 ${decision.entryBlock.reason}，执行 HOLD` : ""}，置信度 ${Math.round((decision.confidence || 0) * 100)}%` : `模型分析未完成：${decision.invalidation}`,
+      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.entryBlock?.requestedAction || decision.action}${decision.entryBlock ? `；入场拦截 ${decision.entryBlock.reason}，执行 HOLD` : ""}，${confidenceLabel}` : `模型分析未完成：${decision.invalidation}`,
       data: { action: decision.action, marketRegime: decision.marketRegime, entryBlock: decision.entryBlock, analysisSummary: decision.analysisSummary, forecastHorizon: decision.forecastHorizon, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], modelDiagnostics: decision.modelDiagnostics, observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
     });
 
