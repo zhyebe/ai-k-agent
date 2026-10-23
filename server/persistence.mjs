@@ -88,6 +88,7 @@ function compactModelDiagnostics(value, includeAttempts = true) {
     ...numbers(value, ["requestBytes", "responseDurationMs", "providerAttempts"]),
     ...(Object.keys(usage).length ? { usage } : {}),
     ...(value.jsonError !== undefined ? { jsonError: value.jsonError } : {}),
+    ...(value.decisionError ? { decisionError: value.decisionError } : {}),
     ...(value.retryError ? { retryError: value.retryError } : {}),
     ...(includeAttempts && Array.isArray(value.attempts) ? { attempts: value.attempts.slice(0, 2).map(item => compactModelDiagnostics(item, false)) } : {}),
   };

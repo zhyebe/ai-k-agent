@@ -10,7 +10,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
+import { entryProbabilityConflict, entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryKey, summaryExitReviewContexts, SUMMARY_PROFIT_POINTS, SUMMARY_LOSS_POINTS, SUMMARY_REVIEW_TTL_MS } from "./summary-exit-policy.mjs";
@@ -425,8 +425,7 @@ export function profitSignalLabel(tier) {
 
 function profitProbabilityLabel(value) {
   const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
-  const label = percent >= 49 && percent < 52 ? percent.toFixed(1) : Math.round(percent).toString();
-  return label.endsWith(".0") ? label.slice(0, -2) : label;
+  return (Math.floor(percent * 100) / 100).toFixed(2).replace(/\.?0+$/, "");
 }
 
 function positivePrice(value) {
@@ -2528,9 +2527,15 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     await positionExitRuns.get(taskId)?.catch(() => {});
     assertCurrent();
     actionPhaseLocks.add(taskId);
+    decision = enforceProfitProbability(decision);
+    if (isLiveTask(task) && providerSucceeded && !entryRoundBlock(task, market) && decision.action === "HOLD"
+      && !decision.exitType && decision.entryPurpose !== "RESCUE" && !(decision.targetPositionIds || []).length && entryProbabilityConflict(decision)) {
+      providerSucceeded = false;
+      decision = { ...decision, riskFlags: [...new Set([...(decision.riskFlags || []), "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"])],
+        invalidation: "AI概率与动作矛盾：已有方向达到45%却返回HOLD，需重新分析；请更新客户端" };
+    }
     analysisCoverage = { ...analysisCoverage, finalDecisionCompleted: providerSucceeded, complete: analysisCoverage.complete && providerSucceeded };
     task.analysisCoverage = analysisCoverage;
-    decision = enforceProfitProbability(decision);
     if (isLiveTask(task)) {
       decision = { ...decision, exitPlans: [], ...((decision.exitType || decision.entryPurpose === "RESCUE" || decision.holdingPlan?.decision === "EXIT_NOW") ? { action: "HOLD", exitType: null, entryPurpose: "NORMAL", targetPositionIds: [],
         holdingPlan: { ...decision.holdingPlan, decision: "HOLD_FOR_TARGET", rationale: "离场由程序按持仓汇总执行" } } : {}) };
@@ -2578,10 +2583,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
     task.decision.positionAudit = { observedAt: market.observedAt, positionsVerified: market.account?.positionsVerified === true, positions: updatePositionTracking(task, market), holdingPlan: decision.holdingPlan || null };
     appendAgentOutput({ taskId, runId: run.id, stage: "analyze", kind: "positions", message: market.account?.positionsVerified === true ? `持仓已核实：${openPositionCount(market)} 笔；离场由程序按持仓汇总监控` : "持仓尚未核实，禁止将缺失数据认定为空仓", data: task.decision.positionAudit });
-    const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && item.jsonStatus !== "COMPLETE_JSON");
+    const modelFailure = (decision.modelDiagnostics?.attempts || [decision.modelDiagnostics]).find(item => item && (item.jsonStatus !== "COMPLETE_JSON" || item.decisionError));
     if (modelFailure) task.lastModelFailure = {
       runId: run.id, providerId: provider?.id || task.providerId || "", createdAt: task.decision.createdAt,
-      code: modelFailure.jsonStatus === "EMPTY_TEXT" ? "EMPTY_MODEL_RESPONSE" : "INVALID_MODEL_JSON",
+      code: modelFailure.decisionError || (modelFailure.jsonStatus === "EMPTY_TEXT" ? "EMPTY_MODEL_RESPONSE" : "INVALID_MODEL_JSON"),
       recovered: providerSucceeded, modelDiagnostics: decision.modelDiagnostics,
     };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";

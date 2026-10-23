@@ -52,6 +52,29 @@ for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test
   assert.equal(f.analyses.length, 0);
   assert.equal(f.submissions.length, 0);
 });
+
+test('45% short probability after AI correction submits exactly one AI-selected short entry', async t => {
+  const f = fixture(t, 'ai-correct-45');
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+    action: ++calls === 1 ? 'HOLD' : 'SELL', bullish_profit_probability: 0.44, bearish_profit_probability: 0.45,
+    target_symbol: 'A', analysis_summary: '主判断：偏跌',
+  }) } }] })));
+  f.runtime.requestDecision = (_provider, context, options) => requestDecision({ apiKey: 'fixture', baseUrl: 'https://fixture.invalid', model: 'fixture' }, context, options);
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(calls, 2);
+  assert.equal(f.submissions.length, 1);
+  assert.equal(f.submissions[0].action, 'SELL');
+});
+
+test('uncorrected HOLD at 45% from an older desktop is an analysis failure, not a successful observation', async t => {
+  const f = fixture(t, 'old-client-hold-45');
+  f.runtime.requestDecision = async () => ({ action: 'HOLD', bullishProfitProbability: 0.44, bearishProfitProbability: 0.45, riskFlags: [], evidenceIds: [] });
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 0);
+  assert.equal(f.task.lastAnalysisSucceeded, false);
+  assert.ok(f.task.decision.riskFlags.includes('INCONSISTENT_ACTION_PROBABILITY'));
+});
 test('AI entry, holdings, immediate profit exit, verified flat, next entry completes a full round in the same K', async t => {
   const f = fixture(t, 'whole-round');
   await runAnalysis(f.task.id, '', { runtime: f.runtime });

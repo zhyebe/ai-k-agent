@@ -165,7 +165,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     aiCompletes: ["ANALYZE", "ENTRY_DIRECTION", "EXIT_DECISION"],
     hostCompletes: ["OBSERVE_PAGE", "EXECUTE_AI_ENTRY", "MONITOR_SUMMARY", "EXECUTE_AI_EXIT", "VERIFY_FLAT"],
     entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_ONLY", minimumProbability: 0.45,
-      timing: "只执行AI顶层BUY/SELL，不从概率或指标推导方向。",
+      timing: "空仓核实后任一方向>=45%（含45%）即由AI选择达标方向返回顶层BUY/SELL；两侧均<45%才因概率不足HOLD。不增加震荡或突破门槛，程序不从概率或指标推导方向。",
       whileHolding: "本轮持仓和委托清零前禁止新开仓。" },
     exit: { whileHolding: true, positionList: ["持仓汇总", "转让"], decisionMode: "PROGRAM_PROFIT_AI_LOSS",
       immediateProfitPoints: 1, reviewLossPoints: -2, profitUnit: "DIRECTIONAL_PRICE_POINTS",

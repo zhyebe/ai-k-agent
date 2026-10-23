@@ -25,7 +25,7 @@ description: 单轮交易；AI决定入场，方向盈利概率至少45%；盈�
 
 预测当前周期下一根及随后1～3根K，给出主方向、证据、预计路径及反证。analysis_summary开头写“主判断：偏涨/偏跌/震荡”。历史趋势和指标作证据，不替代未来预测。市场UP/DOWN/RANGE不额外限制入场，不要求完美极值、所有指标同向或下一K等待。
 
-概率必须诚实；无可信短期优势或关键数据缺失时HOLD。MARKET使用当前可成交价，LIMIT明确entry_price和target_price；不能从候选价、watch_conditions或持仓计划自动推导新单。入场请求返回exit_type=null、target_position_ids=[]、exit_plans=[]、entry_purpose=NORMAL；离场由独立请求返回EXIT/HOLD。
+概率必须基于当前数据诚实评估。空仓与当前委托已核实清零、两侧概率完整时，任一方向>=45%（包含45%和0.45）即达标，AI必须在达标方向中明确选择BUY或SELL；两侧都达标仍由AI选择，不必选概率较高的一侧。只有两侧均<45%才因概率不足HOLD；关键数据缺失无法估计概率时明确缺失，不编造。震荡、偏弱、未突破、价差与指标分歧应计入概率，不能在概率已达标后再作为额外HOLD门槛，不得写0.45不足45%。动作与概率不一致时由同一AI纠正，程序不猜方向；纠正仍矛盾则明确本轮分析失败。MARKET使用当前可成交价，LIMIT明确entry_price和target_price；不能从候选价、watch_conditions或持仓计划自动推导新单。入场请求返回exit_type=null、target_position_ids=[]、exit_plans=[]、entry_purpose=NORMAL；离场由独立请求返回EXIT/HOLD。
 
 ## 指标和有效 K 线
 

@@ -1117,8 +1117,7 @@ const timeframeLabels: Record<string, string> = { fs: "分时", "1m": "1 分", "
 const marketNumber = (value: number | null | undefined, digits = 2) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits }) : "--";
 const profitProbabilityLabel = (value: number) => {
   const percent = Math.max(0, Math.min(100, Number(value || 0) * 100));
-  const label = percent >= 49 && percent < 52 ? percent.toFixed(1) : Math.round(percent).toString();
-  return label.endsWith(".0") ? label.slice(0, -2) : label;
+  return (Math.floor(percent * 100) / 100).toFixed(2).replace(/\.?0+$/, "");
 };
 
 type BoardIdentity = { instrumentId?: string | null; symbol?: string; symbolName?: string };
@@ -1338,7 +1337,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>空仓时由 AI 决定入场，所选方向盈利概率 ≥45%；盈利 ≥1 点立即整行离场；亏损 ≤-2 点交给 AI 判断是否离场。</p>
+        <p><strong>本轮规则</strong>空仓核实后，任一方向盈利概率 ≥45%（含45%），由 AI 选择达标方向入场；两侧均低于45%才观望；盈利 ≥1 点立即整行离场；亏损 ≤-2 点交给 AI 判断是否离场。</p>
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
         {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
         <p><strong>{decision.action === "HOLD" ? "观望依据" : "主判断"}</strong>{decision.analysisSummary || "本轮未提供判断说明"}</p>

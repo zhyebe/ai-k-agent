@@ -10,6 +10,13 @@ test("confidence remains unknown across persistence without erasing an explicit 
   }
 });
 
+test("probability conflict diagnostics survive a restart", () => {
+  const modelDiagnostics = { jsonStatus: "COMPLETE_JSON", decisionError: "INCONSISTENT_ACTION_PROBABILITY" };
+  const runtime = compactTaskRuntime({ decision: { action: "HOLD", modelDiagnostics } });
+  const restored = compactTaskRuntime(JSON.parse(JSON.stringify(runtime)));
+  assert.equal(restored.decision.modelDiagnostics.decisionError, modelDiagnostics.decisionError);
+});
+
 test("enabled provider is a desktop preference and excluded from durable task runtime", () => {
   assert.equal("providerId" in compactTaskRuntime({ providerId: "stepfun-local-selection" }), false);
 });

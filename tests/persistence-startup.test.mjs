@@ -31,10 +31,10 @@ async function oldTradingSkill(version = "v0.3.76") {
 
 test("only exact reviewed Skills receive summary-exit policy without replacing user edits", async () => {
   const bundled = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
-  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107", "v0.3.108", "v0.3.111", "v0.3.114", "v0.3.116", "v0.3.117", "v0.3.118", "v0.3.119", "v0.3.120", "v0.3.121", "v0.3.124", "v0.3.125", "v0.3.126"]) {
+  for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107", "v0.3.108", "v0.3.111", "v0.3.114", "v0.3.116", "v0.3.117", "v0.3.118", "v0.3.119", "v0.3.120", "v0.3.121", "v0.3.124", "v0.3.125", "v0.3.126", "v0.3.128"]) {
     const previous = await oldTradingSkill(version);
     const revision = await tradingSkillUpgrade(previous);
-    assert.equal(revision.version, "v0.3.128");
+    assert.equal(revision.version, "v0.3.130");
     assert.equal(revision.content, bundled);
     assert.match(revision.content, /下一根及随后1～3根K/);
     assert.match(revision.content, /亏损点差<=-2/);
@@ -71,7 +71,7 @@ test("MySQL upgrades the reviewed Skill once and loads the persisted revision in
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
     hydrateState({ skills: snapshot.skills });
-    assert.equal(state.skills[0].version, "v0.3.128");
+    assert.equal(state.skills[0].version, "v0.3.130");
     assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
     assert.deepEqual(state.skills[0].tags, ["优先参考"]);
     const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
@@ -151,7 +151,7 @@ test("MongoDB upgrades the same reviewed Skill and reloads persisted content", a
   t.after(() => adapter.close());
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
-    assert.equal(snapshot.skills[0].version, "v0.3.128");
+    assert.equal(snapshot.skills[0].version, "v0.3.130");
     assert.match(snapshot.skills[0].content, /亏损点差<=-2/);
     assert.equal(snapshot.skills[0].ownerUserId, "author");
   }
