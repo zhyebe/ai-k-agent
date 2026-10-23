@@ -451,6 +451,25 @@ function tableNumber(value) {
   return parsed;
 }
 
+export function parseHaohanPositionSummaries(tables = []) {
+  const summaries = [];
+  for (const table of tables.filter(table => !table.loading)) {
+    const header = table.rows?.find(row => row.some(cell => /^订立均价$/.test(String(cell).trim())));
+    if (!header) continue;
+    const at = (row, pattern) => row[header.findIndex(cell => pattern.test(String(cell).replace(/\s/g, "")))];
+    for (const row of table.rows.slice(table.rows.indexOf(header) + 1)) {
+      if (/暂无数据|合计/.test(row.join(" "))) continue;
+      const symbolName = String(at(row, /^商品名称$/) || "").trim();
+      if (!symbolName) continue;
+      summaries.push({ symbolName, symbol: symbolName.match(/^([A-Z][A-Z0-9_.-]{1,24})(?:\s+|$)/)?.[1] || "",
+        side: String(at(row, /^买[|｜/]卖$|^买卖$/) || "").trim(),
+        averagePrice: tableNumber(at(row, /^订立均价$/)), quantity: tableNumber(at(row, /^存货数量$|^持仓数量$/)),
+        frozenQuantity: tableNumber(at(row, /冻结数量/)), realtimeValueChange: tableNumber(at(row, /^实时货值变化$/)) });
+    }
+  }
+  return summaries;
+}
+
 export function parseHaohanPositions(tables = []) {
   const positions = [];
   for (const table of Array.isArray(tables) ? tables : []) {
@@ -536,6 +555,13 @@ export function parseHaohanOpenOrders(tables = []) {
 }
 
 export function parseHaohanAccount(visibleText, tables = []) {
+  const summaryTables = tables.filter(table => table.kind === "positionSummaries" || table.rows?.some(row => row.includes("订立均价")));
+  const positionSummaries = parseHaohanPositionSummaries(summaryTables);
+  const summaryKeys = positionSummaries.map(row => `${row.symbolName.replace(/\s+/g, "").toLowerCase()}:${/买|多|long/i.test(row.side) ? "LONG" : "SHORT"}`);
+  const positionSummariesVerified = new Set(summaryKeys).size === summaryKeys.length && summaryTables.length > 0 && summaryTables.every(table => !table.loading)
+    && (positionSummaries.length > 0 ? positionSummaries.every(row => row.averagePrice > 0 && row.quantity > 0
+      && row.frozenQuantity !== null && /买|卖|多|空|long|short/i.test(row.side))
+      : summaryTables.every(table => /暂无数据/.test(table.emptyText || "") || table.rows?.some(row => row.some(cell => /暂无数据/.test(cell)))));
   const availableFunds = labeledValue(visibleText, ["可用资金"]);
   const equity = labeledValue(visibleText, ["账户权益", "客户权益", "动态权益"]) ?? availableFunds;
   const realtimeValueChange = labeledValue(visibleText, ["实时货值变化"]);
@@ -567,6 +593,8 @@ export function parseHaohanAccount(visibleText, tables = []) {
     positionEmpty,
     positionsVerified,
     positions,
+    positionSummaries,
+    positionSummariesVerified,
     openOrders,
     openOrdersEmpty,
     openOrdersVerified,

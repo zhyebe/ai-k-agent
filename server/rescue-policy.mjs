@@ -48,7 +48,7 @@ export function observeStartupRescue(task, market) {
   for (const p of paired) {
     if (groups.some(g => groupIds(g).includes(p.positionOrderId))) continue;
     const participants = paired.filter(other => identity(p).some(value => identity(other).includes(value)));
-    groups.push({ id: `startup:${p.positionOrderId}`, status: "ACTIVE", legacy: true,
+    groups.push({ id: `startup:${p.positionOrderId}`, status: "ACTIVE", startedAt: market.observedAt, legacy: true,
       originalPositionIds: participants.filter(p => heldDirection(p) === "LONG").map(p => p.positionOrderId),
       rescuePositionIds: participants.filter(p => heldDirection(p) === "SHORT").map(p => p.positionOrderId), rescueOrders: [] });
   }
@@ -200,7 +200,7 @@ export function observeRescueFill(task, market, pending) {
     && groupIds(g).includes(p.positionOrderId)))) return;
   let group = groups.find(g => g.originalPositionIds.includes(pending.rescuePositionIds[0]));
   if (!group) {
-    group = { id: `rescue:${pending.id}`, status: "ACTIVE", originalPositionIds: [...pending.rescuePositionIds],
+    group = { id: `rescue:${pending.id}`, status: "ACTIVE", startedAt: market.observedAt, originalPositionIds: [...pending.rescuePositionIds],
       rescuePositionIds: [], rescueOrders: [], ...(pending.rescuePositionIds.length !== 1 ? { legacy: true } : {}) };
     groups.push(group);
   }

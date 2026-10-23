@@ -26,12 +26,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.equal(system.split("每轮 analysis_summary 首句明确写").length - 1, 1);
     assert.equal(system.split("入场决策优先级").length - 1, 1);
     assert.match(system, /HOLD 仍填写下一K及随后1～3根K/);
-    assert.match(system, /不等走势已经发生才预测/);
+    assert.match(system, /不等完整趋势形成才预测/);
     assert.doesNotMatch(system, /实时结构支持已进入趋势才重新考虑/);
-    assert.match(system, /短期恢复价、预计到价时间和失效条件/);
-    assert.match(system, /禁止无新证据反复延后恢复时间或放宽止损/);
-    assert.match(system, /短期恢复稍晚先重估/);
-    assert.match(system, /多空统一按每单位有利价格点差设定1～4点目标/);
+    assert.match(system, /救单满10分钟/);
+    assert.match(system, /未来5分钟内可达离场价/);
+    assert.match(system, /5分钟过期重算/);
+    assert.match(system, /普通多单当前bid-订立均价>=0.5点离场/);
     const rounds = messages.filter(m => m.content.includes('"type":"prior_monitoring_round"')).map(m => JSON.parse(m.content));
     const decisions = messages.filter(m => ["assistant", "model"].includes(m.role)).map(m => JSON.parse(m.content));
     assert.equal(rounds.length, 8);

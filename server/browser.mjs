@@ -5,7 +5,7 @@ import path from "node:path";
 import { URL } from "node:url";
 import { extractHaohanPageInstrument, instrumentFromMarketDetail, samePageInstrument, uniquePageInstruments } from "./haohan.mjs";
 import { activateTradeControl } from "./trade-controls.mjs";
-import { collectCurrentOrderTables, collectPositionTables, ensureCurrentAccountView } from "./order-controls.mjs";
+import { collectCurrentOrderTables, collectPositionTables, collectPositionSummaryTables, ensureCurrentAccountView } from "./order-controls.mjs";
 
 const sessions = new Map();
 const sessionLaunches = new Map();
@@ -524,12 +524,13 @@ export async function readVisiblePage(sessionId = "default", { inspectPositions 
     await ensureCurrentAccountView(session.page);
     const orderTables = inspectPositions && accountScope !== "positions" ? await collectCurrentOrderTables(session.page, collectTables) : [];
     const positionTables = inspectPositions ? await collectPositionTables(session.page, collectTables) : [];
+    const summaryTables = inspectPositions ? await collectPositionSummaryTables(session.page, collectTables) : [];
     const raw = await session.page.evaluate(() => ({
       url: location.href,
       title: document.title,
       visibleText: document.body?.innerText || "",
     }));
-    const tables = inspectPositions ? [...positionTables, ...orderTables] : await collectTables(session.page);
+    const tables = inspectPositions ? [...positionTables, ...summaryTables, ...orderTables] : await collectTables(session.page);
     const chart = quick && !inspectCandles ? { klines: [] } : await collectHqChart(session.page);
     const chartSamples = quick || (chart.klines?.length || 0) >= 20 ? [] : await collectChartSamples(session.page);
     const instrument = extractHaohanPageInstrument({ visibleText: raw.visibleText, title: raw.title });

@@ -29,30 +29,20 @@ test("priority knowledge stays first for every user even after a newer skill is 
 
 test("DGKZ/DGJJ priority skill reaches the model in full before other experience", async (t) => {
   const content = await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8");
-  assert.match(content, /以当前交易周期的下一根 K 和随后 1～3 根 K 为主要期限/);
-  assert.match(content, /1～3 根是预测窗口，不是强制持仓时间/);
-  assert.doesNotMatch(content, /realtimeValueChange >= 2/);
-  assert.match(content, /亏损时比较等待恢复盈利与及时止损/);
-  assert.match(content, /多周期结构/);
-  assert.match(content, /没有 AI 计划也执行 1 点起兑现、4 点上限/);
-  assert.match(content, /取消固定整仓金额 ≤ -3 自动止损/);
-  assert.match(content, /previousAnalysis\.decision\.positionAudit\.positions/);
-  assert.match(content, /-1 点变 -3 点是亏损扩大/);
-  assert.match(content, /亏 1 个点先结合趋势/);
-  assert.match(content, /未来目标不是当前利润/);
-  assert.match(content, /连续仍为 -1 点不是持续扩大/);
-  assert.match(content, /达到 1 点且已知费用后不亏就尽快兑现/);
-  assert.match(content, /4 点是硬上限，不能设置 5 点目标/);
-  assert.match(content, /独立实时监控达到 1 点就尽早离场/);
-  assert.doesNotMatch(content, /实际 bid 达到 AI 选定的合理目标|盈利时选择最优可兑现正净收益/);
-  assert.match(content, /短期恢复价、预计到价时间和失效条件/);
-  assert.match(content, /禁止无新证据反复延后恢复时间或放宽止损/);
-  assert.doesNotMatch(content, /只有盈利路径被证据否定|才立即执行 STOP_LOSS/);
+  assert.match(content, /以当前交易周期的下一根K及随后1～3根K为主要期限/);
+  assert.match(content, /1～3根是预测窗口，不是强制持仓时间/);
+  assert.match(content, /普通入场必须由AI顶层action明确决定BUY\/SELL/);
+  assert.match(content, /当前bid减订立均价>=0.5/);
+  assert.match(content, /订立均价减当前ask>=0.5/);
+  assert.match(content, /跳价超过1点仍立即退出/);
+  assert.match(content, /亏损不足3点继续观察恢复/);
+  assert.match(content, /实时货值变化.*>=-1/);
+  assert.match(content, /先成交一边后.*继续退出/);
+  assert.match(content, /普通离场和救单恢复不调用AI决定或确认/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);
   assert.match(content, /不能一律判假、删除或忽略/);
-  assert.match(content, /分别评估短线未来路径与当前入场点/);
-  assert.match(content, /已有早期可执行优势可以入场/);
-  assert.doesNotMatch(content, /具体阻断证据|下次可行动条件/);
+  assert.match(content, /多周期结构/);
+  assert.doesNotMatch(content, /realtimeValueChange >= 2/);
   const evidence = approvedKnowledgeForAnalysis([
     { id: "other", title: "其他经验", status: "APPROVED", version: "v2", content: "保留其他经验全文", updatedAt: "2026-10-15" },
     { id: "dgkz-dgjj", title: "DGKZ / DGJJ 入场离场分析", status: "APPROVED", version: "v1", content, tags: [PRIORITY_SKILL_TAG], updatedAt: "2026-10-14" },

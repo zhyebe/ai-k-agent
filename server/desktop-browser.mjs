@@ -43,7 +43,7 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
   // desktop timestamp is old/future or the browser call spent time in queue.
   const result = await invokeDesktopAi(userId, method, {
     channel: "browser",
-    requiredCapability: method === "observeExecutionMarket" ? "browser-exit-v1" : "",
+    requiredCapability: input.targetSummary || method === "observeExecutionMarket" ? "browser-summary-exit-v1" : "",
     input: browserInput,
     provider: browserProvider,
     credential: credential ? { username: credential.username, password: credential.password, target: credential.target } : undefined,

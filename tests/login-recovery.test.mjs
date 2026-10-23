@@ -16,6 +16,8 @@ function setup(t) {
     source: "test", evidenceId: "market:test", fingerprint: id, history: [], historyCount: 0, books: [], indicators: {},
     latest: { price: 103 }, quote: { price: 103 }, orderBook: { bids: [{ price: 103, volume: 10 }], asks: [{ price: 104, volume: 10 }] },
     account: { positionsVerified: true, positions: [position], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O1", remainingQuantity: 1 }], availableFunds: 10000 } };
+  market.account.positionSummariesVerified = true;
+  Object.defineProperty(market.account, "positionSummaries", { enumerable: true, get: () => [{ symbol: "DGKZ", symbolName: "测试商品", side: "LONG", quantity: 1, frozenQuantity: 0, averagePrice: position.orderPrice, realtimeValueChange: 103 - position.orderPrice }] });
   task.market = market;
   state.tasks.unshift(task);
   t.after(() => { stopController(id); state.tasks = state.tasks.filter(item => item !== task); });
@@ -49,7 +51,7 @@ test("expiry during collection reauthenticates and reads fresh positions/orders 
   assert.equal(f.task.monitoringEnabled, true);
 });
 
-test("fast position monitor recovers login and executes the still-valid AI exit without waiting for another analysis", async t => {
+test("fast position monitor recovers login and executes a qualified summary exit without waiting for another analysis", async t => {
   const f = setup(t);
   f.market.account.positions[0].roundTripFee = 2; // Net profit is 1; profit realization must also survive login recovery.
   f.task.exitPlans = [{ positionId: "P1", heldSide: "LONG", quantity: 1, entryPrice: 100, takeProfitPrice: 102,
@@ -68,11 +70,12 @@ for (const entryPrice of [102, 102.01, 106, 105.99]) test(`fast position monitor
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  if (entryPrice === 102) {
+  if (entryPrice === 102 || entryPrice === 102.01) {
     assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
-    assert.equal(submitted.exitType, entryPrice === 102 ? "TAKE_PROFIT" : "STOP_LOSS");
-    assert.deepEqual(submitted.targetPositionIds, ["P1"]);
-    assert.equal((submitted.exitGuard.positionPoints || submitted.exitGuard.positionAmount).threshold, entryPrice === 102 ? 1 : -3);
+    assert.equal(submitted.exitType, "TAKE_PROFIT");
+    assert.deepEqual(submitted.targetPositionIds, []);
+    assert.equal(submitted.targetSummary.averagePrice, entryPrice);
+    assert.equal(submitted.exitGuard.summary, true);
   } else if (entryPrice === 106) {
     assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
     assert.equal(submitted.exitType, null);
@@ -124,7 +127,7 @@ test("a second expiry is retried next cycle, without unbounded login loops", asy
 
 test("relogin during slow analysis discards old-session actions and resumes with fresh account data", async t => {
   const f = setup(t);
-  f.market.account.positions[0].orderPrice = 102.5; // Profit below 1 isolates stale-session entry/cancel behavior.
+  f.market.account.positions[0].orderPrice = 102.6; // Profit below 0.5 isolates stale-session entry/cancel behavior.
   let first = true;
   f.runtime.requestDecision = async () => {
     if (first) {

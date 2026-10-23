@@ -32,13 +32,13 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       const body = JSON.parse(options.body);
       const messages = body.input || body.messages || body.contents.map(item => ({ content: item.parts[0].text }));
       const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(item => item.role === "system").map(item => item.content).join("\n");
-      assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
-      assert.match(prompt, /不得单独触发离场/);
-      assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
-      assert.match(prompt, /逐仓可成交盈亏/);
+      assert.match(prompt, /Account totals are not per-commodity summary PnL/);
+      assert.match(prompt, /同一商品多空汇总的实时货值变化合计>=-1金额/);
+      assert.match(prompt, /不等AI、不逐笔操作/);
+      assert.match(prompt, /亏损不足3点继续观察/);
       assert.match(prompt, /实时盘面优先/);
       assert.match(prompt, /分析完成后.*再次核对/);
-      assert.match(prompt, /损失在持续扩大、继续持有更可能恶化/);
+      assert.match(prompt, /救单满10分钟仍未恢复/);
       const context = JSON.parse(messages.at(-1).content);
       assert.equal(context.account.realtimeValueChange, amount);
       assert.equal(context.account.dayPnl, 99);
@@ -70,7 +70,7 @@ test("desktop layered analysis retains the realtime amount and trend in the mode
     const input = JSON.parse(body.messages.at(-1).content);
     assert.equal(input.market.account.realtimeValueChange, 1.01);
     assert.equal(input.market.timeframes["1m"].history.length, 1);
-    assert.match(body.messages[0].content, /realtimeValueChange.*仅作为.*参考/);
+    assert.match(body.messages[0].content, /Account totals are not per-commodity summary PnL/);
     assert.match(body.messages[0].content, /实时盘面优先/);
     return new Response(JSON.stringify(envelope("chat", { action: "HOLD", bullish_profit_probability: 0.6, bearish_profit_probability: 0.3 })));
   });

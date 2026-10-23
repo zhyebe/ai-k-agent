@@ -427,11 +427,11 @@ function UserLogin({ onSignedIn, initialError = "" }: { onSignedIn: (user: Works
           <div className="auth-heading">
           <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
           <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用已开通的账号登录。LIVE 实盘由 AI 自动接管目标页下单和离场。</p>
+          <p>使用已开通的账号登录。LIVE 实盘由 AI 决定入场，程序监控持仓汇总离场。</p>
           </div>
           <div className="auth-safety">
             <ShieldCheck size={17} />
-            <div className="auth-safety-copy"><strong>自动下单</strong><span>分析由 AI 决定方向、入场和离场；LIVE 通过已登录页面自动提交并核实持仓变化。</span></div>
+            <div className="auth-safety-copy"><strong>自动下单</strong><span>AI 决定普通入场；程序执行汇总离场及救单，并核实持仓变化。</span></div>
             <code>CONFIRM</code>
           </div>
           {window.axiomDesktop && <div className="auth-service-settings">
@@ -1375,7 +1375,7 @@ function RulesPanel({ rules, automatic, pendingReview, onAutoJudge, busyAction }
     <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />规则裁决</div><h2>{automatic ? "策略参考" : "执行前检查"}</h2></div><span className="count-badge">{rules.filter((rule) => rule.status === "passed").length}/{rules.length} 已通过</span></div>
     <div className="rule-list">{rules.map((rule) => <div className="rule-row" key={rule.id}>
       <span className={`rule-order rule-${rule.mode.toLowerCase()}`}>{String(rule.order).padStart(2, "0")}</span>
-      <div className="rule-copy"><strong>{automatic && rule.mode === "REVIEW" ? "AI 策略复核" : automatic && rule.mode === "BLOCK" ? "异常波动参考" : rule.name}</strong><span>{automatic && rule.mode !== "AUTO" ? (rule.status === "pending" ? "标记已记录，AI 持续判断入场与离场" : "未触发") : rule.detail}</span></div>
+      <div className="rule-copy"><strong>{automatic && rule.mode === "REVIEW" ? "AI 策略复核" : automatic && rule.mode === "BLOCK" ? "异常波动参考" : rule.name}</strong><span>{automatic && rule.mode !== "AUTO" ? (rule.status === "pending" ? "标记已记录，AI 判断入场，程序监控汇总离场" : "未触发") : rule.detail}</span></div>
       <span className={`rule-mode mode-${rule.mode.toLowerCase()}`}>{automatic ? "参考" : rule.mode === "AUTO" ? "自动" : rule.mode === "REVIEW" ? "人工" : "红线"}</span>
       <span className={`rule-status status-${rule.status}`}>{rule.status === "passed" ? <CheckCircle2 size={15} /> : rule.status === "pending" ? <AlertTriangle size={15} /> : <CircleDashed size={15} />}</span>
     </div>)}</div>

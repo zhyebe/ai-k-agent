@@ -8,7 +8,8 @@ import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
 import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession, resolveSnapshotControl, scanBrowserControls, scanBrowserPage, selectPageBoardInstrument } from "./browser.mjs";
 import { requestBrowserActions } from "./provider.mjs";
 import { getCredential, initVault } from "./vault.mjs";
-import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, dismissTransferDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
+import { clickPositionSummaryTransfer, preparePositionSummaryRow, clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, dismissTransferDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
+import { summaryExitAllowsPrice, summaryKey } from "./summary-exit-policy.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
@@ -945,13 +946,54 @@ export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } 
   return { ok: results.length > 0 && results.every((item) => item.cancelled), results };
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], exitGuard = null, rescueTrigger = null, entryDeadlineAt = null, browserProvider = null, provider = null } = {}) {
+async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolName, instrumentId, targetSummary, exitGuard, exitType }) {
+  if (!exitGuard?.summary || !["LONG", "SHORT"].includes(targetSummary.side)
+    || action !== (targetSummary.side === "LONG" ? "SELL" : "BUY") || !(targetSummary.quantity > 0)) return { ok: false, code: "EXIT_SUMMARY_INVALID", submitted: false };
+  if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "EXIT_INSTRUMENT_UNVERIFIED", submitted: false };
+  if (!await preparePositionSummaryRow(page, targetSummary)) return { ok: false, code: "EXIT_SUMMARY_NOT_FOUND", submitted: false };
+  const verify = async (dialogPrice = null) => {
+    if (Date.now() >= Date.parse(exitGuard.expiresAt) || !Number.isFinite(Date.parse(exitGuard.expiresAt))) return { ok: false, code: "EXIT_SUMMARY_EXPIRED" };
+    const snapshot = await readVisiblePage(sessionId, { quick: true });
+    const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot, { symbol }) : null;
+    const rows = market?.account?.positionSummaries?.filter(row => summaryKey(row) === summaryKey(targetSummary)) || [];
+    const current = rows[0];
+    const quote = current && executableExitQuote(market, { ...current, symbol, instrumentId });
+    const matched = market?.account?.positionSummariesVerified && rows.length === 1 && current.averagePrice === targetSummary.averagePrice
+      && Number(current.quantity) === targetSummary.quantity && Number(current.frozenQuantity) === 0;
+    const marketable = quote && (dialogPrice === null || (targetSummary.side === "LONG" ? dialogPrice <= quote.price : dialogPrice >= quote.price));
+    const priceAllowed = marketable && (exitGuard.recovery || exitGuard.closing
+      || (summaryExitAllowsPrice(current, quote.price) && (dialogPrice === null || summaryExitAllowsPrice(current, dialogPrice))));
+    return { ok: Boolean(matched && priceAllowed), code: "EXIT_SUMMARY_CONDITION_CHANGED", price: matched && priceAllowed ? quote.price : null };
+  };
+  const initial = await verify();
+  if (!initial.ok) return { ...initial, submitted: false };
+  const baselineToken = await markTradePageHints(page);
+  const response = watchTradeResponse(page);
+  let clicked = false, confirmed = false;
+  try {
+    const result = await clickPositionSummaryTransfer(page, targetSummary);
+    if (!result.clicked) return { ok: false, code: result.code, submitted: false };
+    clicked = true;
+    const dialog = await completeTradeDialogs(page, { exitType, orderType: "MARKET", expectedQuantity: targetSummary.quantity, refreshTransferPrice: true,
+      baselineToken, finished: () => Boolean(response.peek()), canConfirm: verify, resolveTransferPrice: verify });
+    confirmed = dialog.confirmed === true;
+    if (!dialog.ok) return { ok: false, code: dialog.code, submitted: false, uncertain: confirmed };
+    const feedback = await observeTradeFeedback(page, response, baselineToken);
+    return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
+      pageHint: feedback.pageHint, clicked: result }), submittedQuantity: targetSummary.quantity, targetSummary, targetPositionIds: [] };
+  } catch (error) {
+    return { ok: false, code: "SUMMARY_TRANSFER_FAILED", message: error.message, submitted: false, uncertain: clicked };
+  } finally { response.dispose(); await dismissTransferDialogs(page, baselineToken); }
+}
+
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetPositionIds = [], targetSummary = null, exitGuard = null, rescueTrigger = null, entryDeadlineAt = null, browserProvider = null, provider = null } = {}) {
   if (action !== "BUY" && action !== "SELL") return { ok: false, code: "NO_DIRECTIONAL_ACTION", filled: false, submitted: false };
   if ((!exitType || orderType === "LIMIT") && (price == null || quantity == null || !Number(quantity))) {
     return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", message: "缺少建议价格或数量，无法下单", filled: false, submitted: false };
   }
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", filled: false, submitted: false };
+  if (targetSummary) return submitSummaryTransfer(page, { sessionId, action, symbol, symbolName, instrumentId, targetSummary, exitGuard, exitType });
   const target = { action, symbol, symbolName, instrumentId, targetPositionIds };
   const aiProvider = browserProvider || provider;
   const results = [];

@@ -95,6 +95,29 @@ export async function collectPositionTables(page, collectTables) {
   return tables;
 }
 
+export async function collectPositionSummaryTables(page, collectTables) {
+  if (!await activateTradeControl(page, "持仓汇总") || !await waitForAccountTable(page, "订立均价")) {
+    return [{ kind: "positionSummaries", loading: true, rows: [] }];
+  }
+  const previous = new Set();
+  while (true) {
+    const marker = await paginationText(page);
+    if (previous.has(marker) || !await turnOrderPage(page, "prev")) break;
+    previous.add(marker);
+  }
+  const tables = [], seen = new Set();
+  do {
+    const current = (await collectTables(page)).filter(table => table.rows.some(row => row.includes("订立均价")));
+    const marker = JSON.stringify(current);
+    if (!current.length || seen.has(marker) || current.some(table => table.loading)) {
+      tables.push({ kind: "positionSummaries", loading: true, rows: [] }); break;
+    }
+    seen.add(marker);
+    tables.push(...current.map(table => ({ ...table, kind: "positionSummaries" })));
+  } while (await turnOrderPage(page, "next"));
+  return tables;
+}
+
 async function findOrderRow(page, orderId) {
   const idIndex = await page.locator("tr, [role='row']").evaluateAll((rows, orderId) => {
     for (const row of rows) {

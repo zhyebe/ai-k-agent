@@ -1,3 +1,5 @@
+> v0.3.126 当前策略见 [持仓汇总离场规则](summary-exit-policy.md)。下文为历史记录，其中逐仓目标、AI控制普通离场及旧救单恢复条件均已停用。
+
 # 交易知识合并与进出场预测
 
 将已审核的 12 条线上 Skill/经验与《指标参数.txt》整理为一条项目共享交易 Skill。保留路径 `skills/dgkz-dgjj-entry-exit-analysis/SKILL.md`，供所有登录用户完整传给 AI；原始知识备份保存在忽略目录 `.axiom-data/knowledge-merge/`。

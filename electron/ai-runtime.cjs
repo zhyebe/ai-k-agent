@@ -59,6 +59,9 @@ async function executeCall(app, message, signal, apiBaseUrl) {
   if (message.method === "requestDecision") {
     return providerApi.requestDecision(provider, message.context || {}, options);
   }
+  if (message.method === "requestRescueExitPrediction") {
+    return providerApi.requestRescueExitPrediction(provider, message.context || {}, options);
+  }
   if (message.method === "requestBrowserActions") {
     return providerApi.requestBrowserActions(provider, message.context || {}, options);
   }
@@ -140,7 +143,7 @@ function connect(app, session) {
   next.on("pong", () => { lastPongAt = Date.now(); });
   next.on("open", () => {
     reconnectAttempt = 0;
-    next.send(JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1"] }));
+    next.send(JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1"] }));
     heartbeatTimer = setInterval(() => {
       if (socket !== next) return;
       if (Date.now() - lastPongAt > 45000) { next.terminate(); return; }

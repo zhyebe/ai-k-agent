@@ -323,14 +323,16 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   assert.equal(order.status, "submitted");
 });
 
-test("live exit submits 转让 with position ids", async () => {
+test("live exit submits one whole summary row", async () => {
   const task = insertTask(`task_live_exit_${Date.now()}`, {
     mode: "LIVE",
     autoDecisionEnabled: true,
     decision: {
       action: "SELL", marketRegime: "DOWN",
       exitType: "TAKE_PROFIT",
-      targetPositionIds: ["P-9"],
+      targetPositionIds: [],
+      targetSummary: { symbol: "DGKZ", symbolName: "丹桂康砖（二期）", side: "LONG", averagePrice: 1199.5, quantity: 2 },
+      exitGuard: { summary: true, expiresAt: new Date(Date.now() + 30000).toISOString() },
       targetSymbol: "DGKZ",
       targetSymbolName: "丹桂康砖（二期）",
       confidence: 0.7,
@@ -364,24 +366,22 @@ test("live exit submits 转让 with position ids", async () => {
   });
   assert.equal(submittedInput.action, "SELL");
   assert.equal(submittedInput.exitType, "TAKE_PROFIT");
-  assert.deepEqual(submittedInput.targetPositionIds, ["P-9"]);
+  assert.deepEqual(submittedInput.targetPositionIds, []);
+  assert.equal(submittedInput.targetSummary.quantity, 2);
   assert.equal(confirmed.pendingAction.status, "AWAITING_FILL");
   assert.match(confirmed.pendingAction.message, /后台核实成交/);
 });
 
-test("partial row exits reconcile only submitted rows and available quantities", async () => {
-  const task = insertTask(`partial_exit_${Date.now()}`, {
-    mode: "LIVE", autoDecisionEnabled: false,
-    decision: { action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"] },
-    market: { latest: { price: 20 }, account: { positions: [{ positionOrderId: "P-1", quantity: 2 }, { positionOrderId: "P-2", quantity: 1 }] } },
+test("persisted per-position transfers cannot be submitted after upgrade", async () => {
+  const task = insertTask(`retired_exit_${Date.now()}`, {
+    mode: "LIVE", decision: { action: "SELL", exitType: "STOP_LOSS", targetPositionIds: ["P-1"] },
+    market: { latest: { price: 20 }, account: { positions: [{ positionOrderId: "P-1", quantity: 2 }] } },
   });
   task.pendingAction = buildPendingAction(task, task.decision);
-  await confirmPendingAction(task.id, { source: "auto_timeout", runtime: {
-    submitSuggestionForm: async () => ({ ok: true, submitted: true, completedPositionIds: ["P-1"], submittedQuantity: 1 }),
-  } });
-  assert.deepEqual(task.pendingAction.targetPositionIds, ["P-1"]);
-  assert.equal(task.pendingAction.baselinePositionQty, 2);
-  assert.equal(task.pendingAction.suggestedQty, 1);
+  await assert.rejects(confirmPendingAction(task.id, { runtime: {
+    submitSuggestionForm: async () => assert.fail("retired detail transfer must never reach the browser"),
+  } }), /SUMMARY_EXIT_REQUIRED/);
+  assert.equal(task.pendingAction.status, "CANCELLED");
 });
 
 test("pending action preserves AI entry and exit levels", () => {

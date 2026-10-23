@@ -55,7 +55,7 @@ export async function activateTradeControl(page, label) {
     }
     const state = await controlState(control);
     if (!state) continue;
-    const active = ["当前委托", "持仓明细"].includes(label) && state.active;
+    const active = ["当前委托", "持仓明细", "持仓汇总"].includes(label) && state.active;
     // The trading site refreshes tab data when a tab is mounted. Avoid clicking
     // an already active tab: its live DOM is already updating by itself.
     if (active) return true;
@@ -246,6 +246,50 @@ export async function preparePositionRows(page, input) {
   return [];
 }
 
+export async function preparePositionSummaryRow(page, summary) {
+  if (!await activateTradeControl(page, "持仓汇总") || !await waitForAccountTable(page, "订立均价")) return null;
+  const previous = new Set();
+  while (true) {
+    const marker = await paginationText(page);
+    if (previous.has(marker) || !await turnOrderPage(page, "prev")) break;
+    previous.add(marker);
+  }
+  const visited = new Set();
+  do {
+    const token = controlToken();
+    const found = await page.locator(ROWS).evaluateAll((rows, { summary, token }) => {
+      const compact = value => String(value || "").replace(/\s/g, "");
+      const matches = rows.filter(row => {
+        if (!row.getBoundingClientRect().height || row.closest(".el-table__fixed, .el-table__fixed-right")) return false;
+        const table = row.closest(".el-table") || row.closest("table, [role='table']");
+        const headers = [...(table?.querySelectorAll("th, [role='columnheader']") || [])].map(n => compact(n.textContent));
+        if (!headers.includes("订立均价")) return false;
+        const cells = [...row.querySelectorAll("td, [role='cell'], [role='gridcell']")].map(n => compact(n.textContent));
+        const side = cells[headers.findIndex(h => /^买[|｜/]卖$|^买卖$/.test(h))] || "";
+        return cells[headers.indexOf("商品名称")] === compact(summary.symbolName)
+          && (summary.side === "LONG" ? /买|多|long/i.test(side) : /卖|空|short/i.test(side));
+      });
+      if (matches.length !== 1) return false;
+      matches[0].dataset.axiomSummaryRow = token;
+      return true;
+    }, { summary, token });
+    if (found) return page.locator(`[data-axiom-summary-row="${token}"]`);
+    const marker = await paginationText(page);
+    if (visited.has(marker)) break;
+    visited.add(marker);
+  } while (await turnOrderPage(page, "next"));
+  return null;
+}
+
+export async function clickPositionSummaryTransfer(page, summary) {
+  const row = await preparePositionSummaryRow(page, summary);
+  if (!row) return { clicked: false, code: "EXIT_SUMMARY_NOT_FOUND" };
+  const control = await findControl(row, ["转让"], "button, input[type='button'], [role='button'], a, .spotS, span", false);
+  if (!control) return { clicked: false, code: "EXIT_SUMMARY_CONTROL_NOT_FOUND" };
+  await control.click({ timeout: 5000 });
+  return { clicked: true, quantity: summary.quantity, label: "转让" };
+}
+
 export async function clickPositionTransfer(page, input) {
   const rows = await preparePositionRows(page, input);
   const target = input.targetPositionIds?.length || input.rowIndex == null ? rows[0] : rows.find((row) => row.index === input.rowIndex);
@@ -276,7 +320,7 @@ async function transferDialogPrice(box) {
   });
 }
 
-export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation, resolveTransferPrice } = {}) {
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, expectedQuantity, refreshTransferPrice = false, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation, resolveTransferPrice } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
@@ -295,12 +339,19 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       if (/转让价格/.test(text)) {
         // The production dialog initializes counterparty price after 200 ms.
         await page.waitForTimeout(300);
+        if (expectedQuantity !== undefined) {
+          const quantities = await box.locator("input").evaluateAll(inputs => inputs.filter(input => {
+            const label = input.closest(".inputWrap, .el-form-item, li, label, .form-item")?.textContent || "";
+            return /转让数量/.test(label) && input.getBoundingClientRect().height > 0;
+          }).map(input => Number(input.value)));
+          if (quantities.length !== 1 || quantities[0] !== expectedQuantity) return { ok: false, code: "EXIT_SUMMARY_QUANTITY_CHANGED", confirmed };
+        }
         if (orderType === "LIMIT") {
           const fields = await fillTradeFields(page, [{ labels: ["转让价格"], value: price }], box);
           if (!fields.length) return { ok: false, code: "TRANSFER_PRICE_FIELD_NOT_FOUND" };
         }
         dialogPrice = await transferDialogPrice(box);
-        if (dialogPrice === null && orderType === "MARKET" && resolveTransferPrice) {
+        if ((dialogPrice === null || refreshTransferPrice) && orderType === "MARKET" && resolveTransferPrice) {
           const quote = await resolveTransferPrice();
           if (!quote.ok) return { ...quote, confirmed };
           if (Number.isFinite(quote.price) && quote.price > 0) {

@@ -78,7 +78,9 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
       : [position?.symbol, position?.symbolName, position?.instrumentId].some((value) => String(value || "") && targetValues.includes(String(value).trim().toLocaleLowerCase())))
     : [];
   const targetQuantity = targetMatches.reduce((sum, position) => sum + Number(position?.quantity || 0), 0);
-  if (decision?.exitType && targetQuantity > 0) {
+  if (decision?.targetSummary && decision.exitType) {
+    suggestedQty = Number(decision.targetSummary.quantity);
+  } else if (decision?.exitType && targetQuantity > 0) {
     suggestedQty = targetQuantity;
   } else if (!decision?.exitType && hasPrice && Number.isFinite(equity) && equity > 0 && pct > 0) {
     suggestedQty = Math.max(1, Math.floor((equity * (pct / 100)) / price));

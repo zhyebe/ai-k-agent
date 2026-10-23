@@ -43,7 +43,7 @@ test("execution quote monitoring routes to an exit-capable desktop and rejects a
   t.after(resetDesktopAiForTests);
   const capable = new Socket();
   attachDesktopAiSocket("owner", capable);
-  capable.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1"] }));
+  capable.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1"] }));
   const older = new Socket();
   attachDesktopAiSocket("owner", older);
   older.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
@@ -100,7 +100,7 @@ for (const clockSkewMs of [-9000, 9000]) {
     t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
     const socket = new Socket();
     attachDesktopAiSocket("clock-owner", socket);
-    socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1"] }));
+    socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1"] }));
     for (const elapsed of [120, 6000]) {
       const startedAt = Date.now();
       const call = callBrowserMethod("observeExecutionMarket", "clock-owner", { task: { id: "clock-task" } });

@@ -28,7 +28,7 @@ for (const action of ["BUY", "SELL"]) {
 }
 
 for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
-  test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with ordinary holdings and their exit plans`, async t => {
+  test(`${automatic ? "automatic" : "manual"} ${action}: three new K entries coexist with ordinary holdings without AI exit plans`, async t => {
     let now = Date.now();
     t.mock.method(Date, "now", () => now);
     const id = `multi-entry-${automatic}-${action}`;
@@ -61,7 +61,7 @@ for (const automatic of [true, false]) for (const action of ["BUY", "SELL"]) {
     for (let round = 0; round < 3; round++) {
       await runAnalysis(id, "", { runtime });
       assert.equal(task.decision.action, action);
-      assert.equal(task.exitPlans.length, positions.length);
+      assert.equal(task.exitPlans.length, 0);
       assert.equal((automatic ? submissions : forms).length, round + 1);
       const submitted = (automatic ? submissions : forms).at(-1);
       assert.equal(submitted.quantity, 1);
@@ -108,12 +108,12 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
       assert.match(prompt, /下一 K 或新的价格\/趋势机会必须重新判断并可再次下单/);
       assert.doesNotMatch(prompt, /When the broad trend supports 买涨 return BUY now/);
       assert.doesNotMatch(prompt, /趋势向上且可以买涨就本轮返回 BUY/);
-      assert.match(prompt, /realtimeValueChange.*仅作为.*参考/);
-      assert.match(prompt, /AI逐仓比较等待恢复盈利与及时止损/);
-      assert.match(prompt, /本组净利>=0立即整组离场/);
+      assert.match(prompt, /Account totals are not per-commodity summary PnL/);
+      assert.match(prompt, /由程序读取持仓汇总/);
+      assert.match(prompt, /实时货值变化合计>=-1/);
       assert.match(prompt, /两笔独立救单/);
-      assert.match(prompt, /原LONG按entry-bid、原SHORT按ask-entry测算/);
-      assert.match(prompt, /保留原亏损单，另开同品种反向SELL\/BUY/);
+      assert.match(prompt, /原多单entry-bid>=3点、原空单ask-entry>=3点/);
+      assert.match(prompt, /保留原单，反向下两笔独立救单/);
       assert.doesNotMatch(prompt, /程序止盈兜底/);
       const value = JSON.stringify({ action: "BUY", marketRegime: "UP", order_type: "LIMIT", entry_price: 98, target_price: 98,
         bullish_profit_probability: 0.7, bearish_profit_probability: 0.3,
