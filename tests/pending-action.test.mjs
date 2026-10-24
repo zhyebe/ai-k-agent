@@ -372,7 +372,7 @@ test("live exit submits 转让 with position ids", async () => {
 test("partial row exits reconcile only submitted rows and available quantities", async () => {
   const task = insertTask(`partial_exit_${Date.now()}`, {
     mode: "LIVE", autoDecisionEnabled: false,
-    decision: { action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetPositionIds: ["P-1", "P-2"] },
+    decision: { action: "SELL", marketRegime: "DOWN", exitType: "SCHEDULED_CLOSE", targetPositionIds: ["P-1", "P-2"] },
     market: { latest: { price: 20 }, account: { positions: [{ positionOrderId: "P-1", quantity: 2 }, { positionOrderId: "P-2", quantity: 1 }] } },
   });
   task.pendingAction = buildPendingAction(task, task.decision);

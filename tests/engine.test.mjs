@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
 import "./fixtures/open-market-clock.mjs";
-import test from "node:test";
+import test, { after } from "node:test";
+import { stopAllControllers } from "../server/engine.mjs";
+after(stopAllControllers);
+async function waitForCycles(predicate) {
+  const deadline = performance.now() + 1000;
+  while (!predicate() && performance.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+}
 import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDecisionContext, buildPendingAction, confirmPendingAction, enforceDecisionLimits, enforceProfitProbability, entryConditionReached, meetsOrderBoundary, monitoringPollIntervalMs, profitSignalTier, runAnalysis, runMonitoringCycle, setTaskMarketSelection, setTaskProvider, startController, startTask, stopController, stopTask } from "../server/engine.mjs";
 import { createProvider, requestDecision } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { getAgentOutput, state } from "../server/store.mjs";
+import { observePositionLosses } from "../server/loss-observation.mjs";
+
+function observePriorLoss(task, market) {
+  market.account.positionsVerified = true;
+  const long = !/卖|short/i.test(market.account.positions[0].side);
+  const now = Date.now();
+  market.observedAt = new Date(now).toISOString();
+  for (let ago = 90; ago >= 0; ago -= 10) {
+    const snapshot = structuredClone(market);
+    snapshot.observedAt = new Date(now - ago * 1000).toISOString();
+    for (const levels of [snapshot.orderBook.bids, snapshot.orderBook.asks]) levels[0].price += (long ? 1 : -1) * ago * 0.005;
+    observePositionLosses(task, snapshot, now - ago * 1000);
+  }
+}
 
 test("实盘只限制单笔数量，不把 AI BUY 意图改成 HOLD", () => {
   const decision = enforceDecisionLimits({
@@ -315,13 +335,16 @@ test("自动登录后保留未核实动作并在下一轮继续观测后执行",
 for (const autoDecisionEnabled of [false, true]) {
   for (const side of ["买", "卖"]) {
     for (const exitType of ["TAKE_PROFIT", "STOP_LOSS"]) {
-      test(`${autoDecisionEnabled ? "自动" : "手动"}入场模式的${side}持仓${exitType}在本轮立即提交`, async () => {
+      test(`${autoDecisionEnabled ? "自动" : "手动"}入场模式的${side}持仓${exitType}满足观察与离场条件后提交`, async () => {
         const taskId = `conservative_${autoDecisionEnabled}_${side}_${exitType}_${Date.now()}`;
         const task = insertNorthstarTask(taskId);
         Object.assign(task, { mode: "LIVE", autoDecisionEnabled, status: "MONITORING", monitoringEnabled: true });
         task.rules = [{ id: "review", mode: "REVIEW", status: "pending" }, { id: "block", mode: "BLOCK", status: "pending" }];
         const market = testMarketSnapshot("conservative-exit", 100);
-        market.account.positions = [{ symbol: "BTC/USDT", side, quantity: 2, positionOrderId: "P-close", orderPrice: 101 }];
+        market.account.positionsVerified = true;
+        market.account.positions = [{ symbol: "BTC/USDT", side, quantity: 2, positionOrderId: "P-close",
+          orderPrice: exitType === "STOP_LOSS" ? side === "买" ? 101 : 100 : side === "买" ? 98 : 104 }];
+        if (exitType === "STOP_LOSS") observePriorLoss(task, market);
         task.pendingAction = { action: "BUY", marketRegime: "UP", status: "CONFIRMED", entryKWindow: new Date(Math.floor(Date.now() / 60_000) * 60_000 + 50_000).getTime() };
         const action = side === "买" ? "SELL" : "BUY";
         const submissions = [];
@@ -1258,7 +1281,7 @@ test("撤单失败仍执行本轮AI离场，配置下单量不影响实际离场
   const task = insertNorthstarTask(`cancel_and_exit_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", entryQuantity: 3, status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("cancel-and-exit", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 5, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 5, orderPrice: 99, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", remainingQuantity: 1 }] };
   let submitted = 0;
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -1278,7 +1301,7 @@ test("当前委托在AI分析前已撤销，随后执行本轮明确离场", asy
   const task = insertNorthstarTask(`exit_first_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("exit-first", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", orderKind: "订立", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, orderPrice: 99, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-1", orderKind: "订立", remainingQuantity: 1 }] };
   const actions = [];
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -1298,7 +1321,7 @@ test(`AI${cancelled ? "撤销" : "未能撤销"}旧离场委托后${cancelled ? 
   const task = insertNorthstarTask(`replace_exit_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("replace-exit", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 2, frozenQuantity: 2, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 2, positionOrderId: "P-1" }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 2, frozenQuantity: 2, orderPrice: 99, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 2, orderPrice: 99, positionOrderId: "P-1" }] };
   task.market = market;
   task.pendingAction = { ...buildPendingAction(task, { action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT", targetPositionIds: ["P-1"], targetSymbol: "BTC/USDT", orderType: "LIMIT", targetPrice: 110 }), status: "AWAITING_FILL", source: "auto_timeout", entrustedOrderIds: ["O-old"] };
   const actions = [];
@@ -1366,7 +1389,7 @@ test("启动时已有转让委托，按AI关联的持仓先撤单再离场", asy
   const task = insertNorthstarTask(`startup_transfer_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("startup-transfer", 99);
-  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, frozenQuantity: 1, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 1 }] };
+  market.account = { positionsVerified: true, positions: [{ symbol: "BTC/USDT", side: "买", quantity: 1, frozenQuantity: 1, orderPrice: 99, positionOrderId: "P-1" }], openOrdersVerified: true, openOrders: [{ orderTime: "2020-01-01T00:00:00Z", orderId: "O-old", orderKind: "转让", remainingQuantity: 1 }] };
   const actions = [];
   try {
     await runMonitoringCycle(task.id, { runtime: {
@@ -1430,7 +1453,7 @@ test("已提交的持仓不重复转让，其他持仓立即离场", async () =>
   const task = insertNorthstarTask(`unsettled_other_exit_${Date.now()}`);
   Object.assign(task, { mode: "LIVE", autoDecisionEnabled: false, status: "MONITORING", monitoringEnabled: true });
   const market = testMarketSnapshot("two-exits", 100);
-  market.account.positions = ["P-1", "P-2"].map((positionOrderId) => ({ symbol: "BTC/USDT", side: "买", quantity: 1, positionOrderId }));
+  market.account.positions = ["P-1", "P-2"].map((positionOrderId) => ({ symbol: "BTC/USDT", side: "买", quantity: 1, orderPrice: 100, positionOrderId }));
   task.market = market;
   task.pendingAction = { ...buildPendingAction(task, { action: "SELL", marketRegime: "DOWN", exitType: "STOP_LOSS", targetSymbol: "BTC/USDT", targetPositionIds: ["P-1"] }), status: "AWAITING_FILL", source: "auto_timeout" };
   const submissions = [];
@@ -1768,7 +1791,7 @@ test("成功轮次按 nextPollAt 递归调度，显式停止后不再运行", as
       return { task, market: { ok: true }, analysisTriggered: true };
     },
   });
-  await new Promise((resolve) => setTimeout(resolve, 90));
+  await waitForCycles(() => cycles >= 3);
   assert.ok(cycles >= 3, `expected at least three cycles, got ${cycles}`);
   const stoppedAt = cycles;
   stopController(taskId);
@@ -2092,7 +2115,7 @@ test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () =
   task.rules = [{ id: "review", status: "pending", mode: "REVIEW" }, { id: "anomaly", status: "pending", mode: "BLOCK" }];
   const market = testMarketSnapshot("live-rule-mark", 100);
   market.anomaly = true;
-  market.account.positions = exitType ? [{ symbol: "BTC/USDT", side: "卖", quantity: 1, positionOrderId: "P-auto-short" }] : [];
+  market.account.positions = exitType ? [{ symbol: "BTC/USDT", side: "卖", quantity: 1, positionOrderId: "P-auto-short", orderPrice: 102 }] : [];
   let submitted = 0;
   const runtime = {
     openMarketBrowser: async () => ({ ok: true, url: task.target.url, mode: "test" }),
@@ -2197,7 +2220,7 @@ test(`手动入场无需软件确认，成交后自动${exitType}并开启下一
     assert.equal(task.pendingAction.source, null);
     assert.equal(submissions.length, 0);
     observed = testMarketSnapshot("manual-flow-holding", 101);
-    observed.account.positions = [{ symbol: "BTC/USDT", side: "买入", quantity: 1, positionOrderId: "P-human" }];
+    observed.account.positions = [{ symbol: "BTC/USDT", side: "买入", quantity: 1, positionOrderId: "P-human", orderPrice: 100 }];
     action = "HOLD";
     await runMonitoringCycle(taskId, { runtime });
     assert.equal(task.pendingAction.status, "CONFIRMED");
@@ -2330,7 +2353,7 @@ test("等待确认时不拆掉监控循环，确认后立即继续", async () =>
         return { task };
       },
     });
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await waitForCycles(() => cycles >= 2);
     assert.ok(cycles >= 2, `expected monitoring to continue while waiting, got ${cycles}`);
     const confirmed = await confirmPendingAction(taskId);
     assert.equal(confirmed.pendingAction.status, "CONFIRMED");

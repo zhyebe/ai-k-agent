@@ -12,6 +12,7 @@ import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOr
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
+import { observedLossGuardAllowsPrice, recoveryExitAllowed } from "./loss-observation.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -971,11 +972,13 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       price: quote?.price ?? null, code: "RESCUE_CONDITION_CHANGED" };
   } : deadlineGuard;
   let currentExitGuard = exitGuard;
+  let lastExitCheck = null;
   const verifyExitGuard = async (dialogPrice = null) => {
+    lastExitCheck = null;
     const snapshot = await readVisiblePage(sessionId, { quick: true });
     if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED", message: snapshot.code + (snapshot.message ? `: ${snapshot.message}` : "") };
     const market = parseHaohanPageSnapshot(snapshot, { symbol });
-    const guard = currentExitGuard;
+    const guard = { ...currentExitGuard, exitType };
     const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: guard?.heldSide }, Date.now());
     const position = market.account?.positions?.find(p => p.positionOrderId === guard?.positionId);
     const positionValid = guard?.entryPrice === undefined || (market.account?.positionsVerified === true && position
@@ -983,10 +986,15 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       && Number(position.quantity) === guard.quantity && Number(position.frozenQuantity || 0) === 0);
     const allowed = positionValid && quote && exitGuardAllowsPrice(guard, quote.price) && (dialogPrice === null || exitGuardAllowsPrice(guard, dialogPrice))
       && (guard?.realtimeValueAbove === undefined || realtimeValueAbove(market.account, guard.realtimeValueAbove))
-      && (guard?.exitType !== "TAKE_PROFIT" || (isNonLosingExit(position, quote.price) && (dialogPrice === null || isNonLosingExit(position, dialogPrice))))
+      && (guard?.exitType !== "TAKE_PROFIT" || (guard.lossRecovery
+        ? recoveryExitAllowed(guard.lossObservation, position, quote.price) && (dialogPrice === null || recoveryExitAllowed(guard.lossObservation, position, dialogPrice))
+        : isNonLosingExit(position, quote.price) && (dialogPrice === null || isNonLosingExit(position, dialogPrice))))
+      && observedLossGuardAllowsPrice(guard, position, quote.price, market)
+      && (dialogPrice === null || observedLossGuardAllowsPrice(guard, position, dialogPrice, market))
       && positionAmountGuardAllowsPrice(guard, position, quote.price)
       && (dialogPrice === null || positionAmountGuardAllowsPrice(guard, position, dialogPrice))
       && !guard?.profitFallback;
+    if (allowed) lastExitCheck = { at: Date.now(), price: quote.price };
     return { ok: Boolean(allowed), code: quote ? "EXIT_CONDITION_CHANGED" : "EXIT_QUOTE_UNVERIFIED", price: allowed ? quote.price : null };
   };
   const withCompleted = (result) => {
@@ -1037,7 +1045,13 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
           }
         }
         stage = "click";
-        let clicked = exitType ? await clickPositionTransfer(page, positionTarget, { persistNativeDialog: true }) : await clickTradeEntry(page, action, { persistNativeDialog: true });
+        // Native confirm blocks DOM reads. Accept only against the immediately
+        // preceding verified quote; a delayed modal is dismissed and retried
+        // from a fresh observation instead of bypassing the loss/expiry guard.
+        let clicked = exitType ? await clickPositionTransfer(page, positionTarget, { persistNativeDialog: true,
+          canAcceptNative: exitGuard ? () => Boolean(lastExitCheck && Date.now() - lastExitCheck.at <= 1000
+            && exitGuardAllowsPrice(currentExitGuard, lastExitCheck.price)) : undefined,
+        }) : await clickTradeEntry(page, action, { persistNativeDialog: true });
         // A changed page needs a new AI plan. A failed or disabled click does
         // not: it must not be replayed through a second execution path.
         if (aiProvider && ["EXIT_CONTROL_NOT_FOUND", "EXIT_POSITION_NOT_FOUND", "SUBMIT_BUTTON_NOT_FOUND"].includes(clicked.code)) {

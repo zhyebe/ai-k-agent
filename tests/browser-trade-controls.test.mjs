@@ -158,6 +158,7 @@ for (const scenario of ["valid", "missing-quote", "disabled-confirm"]) {
     const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "SELL", symbol: "DGKZ", symbolName: "测试商品", quantity: 2,
       exitType: "STOP_LOSS", targetPositionIds: ["P-1"], exitGuard: {
         positionId: "P-1", heldSide: "LONG", quantity: 2, triggerPrice: 101, comparison: "LTE", expiresAt: new Date(Date.now() + 30000).toISOString(),
+        rescueRecovery: true,
       } });
     assert.equal(result.ok, scenario === "valid", JSON.stringify(result));
     assert.deepEqual(await page.evaluate(() => window.exits), scenario === "valid" ? [{ id: "P-1", price: "100", quantity: 2 }] : []);

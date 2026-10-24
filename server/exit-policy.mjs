@@ -70,6 +70,20 @@ export function isNonLosingExit(position, exitPrice) {
   return long ? pnl.exitPrice >= Math.max(minimumPrice, breakEvenPrice) : pnl.exitPrice <= Math.min(minimumPrice, breakEvenPrice);
 }
 
+export function positionLossSignature(position = {}) {
+  // The exact platform position ID survives full/quick snapshots whose symbol
+  // aliases may differ. Direction, quantity and real entry cost must also agree.
+  return JSON.stringify([position.positionOrderId, heldDirection(position), Number(position.quantity), positionEntryPrice(position)]);
+}
+
+export function isRecoveryExit(record, position, price, now = Date.now()) {
+  const identity = position && positionLossSignature(position);
+  if (!record?.recovered || record.signature !== identity || record.startedAt === null || record.netPnl === null || record.netPnl < 0
+    || now < record.lastObservedAt || now - record.lastObservedAt > 15_000 || record.lastObservedAt < record.flashUntil) return false;
+  const pnl = exitNetPnl({ ...position, roundTripFee: position.roundTripFee ?? position.totalFees ?? record.fees }, price);
+  return pnl?.netPnl !== null && pnl?.netPnl >= 0;
+}
+
 function validProfitTarget(position, price) {
   if (!isNonLosingExit(position, price)) return false;
   const long = heldDirection(position) === "LONG";
@@ -177,6 +191,7 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
   const seen = new Set();
   for (const source of normalizeExitPlans(decision.exitPlans)) {
     const position = market.account?.positions?.find(p => p.positionOrderId === source.positionId);
+    const recovery = task?.lossObservations?.[source.positionId];
     let tp = source.takeProfitPrice === null ? null : Number(source.takeProfitPrice);
     const sl = source.stopLossPrice === null ? null : Number(source.stopLossPrice);
     let realtime = source.realtimeTakeProfit;
@@ -197,14 +212,17 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
     else if (source.heldSide !== heldDirection(position) || !["LONG", "SHORT"].includes(source.heldSide) || source.quantity !== Number(position.quantity)) code = "EXIT_PLAN_POSITION_MISMATCH";
     else if (!Number.isFinite(observedAt) || !Number.isSafeInteger(source.validForSec) || source.validForSec <= 0 || source.validForSec > 3600 || !Number.isFinite(expiresAt) || expiresAt <= now) code = "EXIT_PLAN_EXPIRED";
     else if ((tp === null && sl === null && !realtime) || (tp !== null && (!Number.isFinite(tp) || tp <= 0)) || (sl !== null && (!Number.isFinite(sl) || sl <= 0)) || (tp !== null && sl !== null && (source.heldSide === "LONG" ? tp <= sl : tp >= sl))) code = "EXIT_PLAN_PRICE_INVALID";
-    if (!code && tp !== null && !validProfitTarget(position, tp)) {
+    if (!code && tp !== null && !validProfitTarget(position, tp)
+      && !(isRecoveryExit(recovery, position, tp, now) && Math.abs(tp - positionEntryPrice(position)) <= POSITION_MAX_PROFIT_POINTS)) {
       tp = null;
       if (sl === null && !realtime) code = "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE";
       else rejected.push({ positionId: source.positionId, code: "EXIT_PLAN_TAKE_PROFIT_NOT_PROFITABLE" });
     }
     if (code) { rejected.push({ positionId: source.positionId, code }); continue; }
     seen.add(source.positionId);
-    plans.push({ ...source, entryPrice: positionEntryPrice(position), takeProfitPrice: tp, stopLossPrice: sl, realtimeTakeProfit: realtime, observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
+    plans.push({ ...source, entryPrice: positionEntryPrice(position), takeProfitPrice: tp, stopLossPrice: sl, realtimeTakeProfit: realtime,
+      ...(tp !== null && isRecoveryExit(recovery, position, tp, now) ? { lossRecovery: true, lossObservation: recovery } : {}),
+      observedAt: new Date(observedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), status: "ARMED" });
   }
   return { plans, rejected };
 }
@@ -223,7 +241,7 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
   const pnl = exitNetPnl(position, quote.price);
   const targetProfit = plan.takeProfitPrice !== null
     && (long ? quote.price >= plan.takeProfitPrice : quote.price <= plan.takeProfitPrice)
-    && isNonLosingExit(position, quote.price);
+    && (isNonLosingExit(position, quote.price) || (plan.lossRecovery && isRecoveryExit(plan.lossObservation, position, quote.price, now)));
   const realtimeProfit = plan.realtimeTakeProfit
     && realtimeValueAbove(market.account, plan.realtimeTakeProfit.valueAbove)
     && (long ? quote.price >= plan.realtimeTakeProfit.takeProfitPrice : quote.price <= plan.realtimeTakeProfit.takeProfitPrice)
@@ -235,7 +253,8 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
   return {
     status: "TRIGGERED", position, quotePrice: quote.price, netPnl: pnl?.netPnl ?? null, grossPnl: pnl?.grossPnl ?? null,
     decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType, targetPositionIds: [plan.positionId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
-      exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, entryPrice: plan.entryPrice, exitType, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && !stop) || (!long && stop) ? "GTE" : "LTE",
+      exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, entryPrice: plan.entryPrice, exitType, authoredAt: plan.observedAt, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && !stop) || (!long && stop) ? "GTE" : "LTE",
+        ...(!stop && plan.lossRecovery ? { lossRecovery: true, lossObservation: plan.lossObservation } : {}),
         ...(!stop && !targetProfit && realtimeProfit ? { realtimeValueAbove: plan.realtimeTakeProfit.valueAbove } : {}) } },
   };
 }

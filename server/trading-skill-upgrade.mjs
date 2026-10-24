@@ -4,6 +4,15 @@ import { chunkDocument } from "./rag.mjs";
 
 const previousSkillId = "skill_04ef36d5-3002-40fd-b51f-3914867e29f1";
 const previousContentHashes = new Map([
+  ["v0.3.126", ["4fb92f80705ab6900b83476fa03e2ad0b77806a43498ea2f80755ad2f23202bc","33bc95d99fc08f4bc4db38070bfce5486479418390ce7e798fc3cf28d817fea7"]],
+  ["v0.3.127", "0b56ff545248d1231bc0c36ab6516d3581e5ca898e103b1e5faacfd28fdcd912"],
+  ["v0.3.128", "0b56ff545248d1231bc0c36ab6516d3581e5ca898e103b1e5faacfd28fdcd912"],
+  ["v0.3.129", "0b56ff545248d1231bc0c36ab6516d3581e5ca898e103b1e5faacfd28fdcd912"],
+  ["v0.3.130", "67f8c69ee8a813fe124fc582e35d12d7ff9bdafa6227e071819bd5e9ed793406"],
+  ["v0.3.131", "6be9216142ff8e7d5af0ac1ae5f97550a22ea5413abc6bc396b1da595ef6852a"],
+  ["v0.3.132", "dfc2a7200c6dc0343c2e366faa5ad90d72ccc6995e75a44b7f13594b6a9d2db9"],
+  ["v0.3.133", "c84d0811b1e30928425360e0c9773687918f31a6dba8e6cc7b0624844961a06d"],
+  ["v0.3.134", "33bc95d99fc08f4bc4db38070bfce5486479418390ce7e798fc3cf28d817fea7"],
   ["v0.3.125", "01d7a172630edebe3894c297174c849febe24b13e11b4226ae1737d3386efa71"],
   ["v0.3.124", "ebcc03b1d8872b9b5ded7d1dc4aafa529da6a8fe3ceaedaed9d320a674b2bc1b"],
   ["v0.3.121", "b6aa93c39274d83ad7c02c881afa714c7f599f0f352a31038128a30b5e37dc79"],
@@ -34,13 +43,13 @@ const previousContentHashes = new Map([
 // and reloads the database record before hydrating the runtime knowledge index.
 export async function tradingSkillUpgrade(skill) {
   if (skill?.id !== previousSkillId || skill.status !== "APPROVED" || !previousContentHashes.has(skill.version)) return null;
-  const hash = createHash("sha256").update(String(skill.content || "").trim()).digest("hex");
-  if (hash !== previousContentHashes.get(skill.version)) return null;
+  const hash = createHash("sha256").update(String(skill.content || "").replace(/\r\n/g, "\n").trim()).digest("hex");
+  if (![previousContentHashes.get(skill.version)].flat().includes(hash)) return null;
   const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: "v0.3.126",
+    version: "v0.3.135",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),

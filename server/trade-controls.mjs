@@ -52,7 +52,7 @@ function isTradeConfirmationText(value) {
     && !/撤单|撤销.*委托|止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text);
 }
 
-async function clickWithNativeTradeConfirmation(page, control, { persist = false } = {}) {
+async function clickWithNativeTradeConfirmation(page, control, { persist = false, canAcceptNative } = {}) {
   const state = { confirmed: false, confirmedAt: 0, disposed: false };
   let timer = null;
   let handler;
@@ -64,7 +64,7 @@ async function clickWithNativeTradeConfirmation(page, control, { persist = false
   };
   handler = dialog => {
     const message = dialog.message();
-    if (isTradeConfirmationText(message)) {
+    if (isTradeConfirmationText(message) && (!canAcceptNative || canAcceptNative())) {
       state.confirmed = true;
       state.confirmedAt = Date.now();
       dialog.accept().catch(() => {});
@@ -292,7 +292,7 @@ export async function preparePositionRows(page, input) {
   return [];
 }
 
-export async function clickPositionTransfer(page, input, { persistNativeDialog = false } = {}) {
+export async function clickPositionTransfer(page, input, { persistNativeDialog = false, canAcceptNative } = {}) {
   const rows = await preparePositionRows(page, input);
   const target = input.targetPositionIds?.length || input.rowIndex == null ? rows[0] : rows.find((row) => row.index === input.rowIndex);
   if (!target) return { clicked: false, code: "EXIT_POSITION_NOT_FOUND" };
@@ -300,7 +300,7 @@ export async function clickPositionTransfer(page, input, { persistNativeDialog =
   if (!control) return { clicked: false, code: "EXIT_CONTROL_NOT_FOUND", targetPositionIds: input.targetPositionIds };
   try {
     await control.scrollIntoViewIfNeeded({ timeout: 2500 });
-    const native = await clickWithNativeTradeConfirmation(page, control, { persist: persistNativeDialog });
+    const native = await clickWithNativeTradeConfirmation(page, control, { persist: persistNativeDialog, canAcceptNative });
     return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity, nativeConfirmed: native.confirmed, nativeConfirmationState: native, nativeDialogCleanup: native.dispose };
   } catch (error) {
     return { clicked: false, code: "EXIT_CLICK_FAILED", message: error.message, targetPositionIds: input.targetPositionIds };

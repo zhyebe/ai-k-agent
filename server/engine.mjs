@@ -14,6 +14,7 @@ import { normalizeUnitProbability } from "./provider.mjs";
 import { entryRegimeAllows, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, POSITION_MIN_PROFIT_POINTS, POSITION_MAX_PROFIT_POINTS, positionEntryPrice, positionProfitExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
+import { observePositionLosses, positionLossReview, recoveryExitAllowed, observedLossGuardAllowsPrice, observedLossStopCandidate, latestLossMarket, LOSS_REVIEW_MS, LOSS_STOP_MS } from "./loss-observation.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -88,6 +89,7 @@ function changedLiveMarket(baseline, fresh) {
 }
 
 function recordLiveObservation(task, market) {
+  observePositionLosses(task, market);
   const generation = taskGeneration(task);
   const previous = liveObservations.get(task.id);
   const samples = previous?.generation === generation ? previous.samples : [];
@@ -104,7 +106,10 @@ function recordLiveObservation(task, market) {
   // finishes; final revalidation accepts only still-valid AI price conditions.
   // Changed holdings/candles or a triggered existing protection invalidate now.
   if (reason && (reason !== "MARKET_CHANGED_DURING_ANALYSIS"
-    || (task.exitPlans || []).some(plan => evaluateExitPlan(plan, market).status === "TRIGGERED"))) {
+    || (task.exitPlans || []).some(plan => {
+      const result = evaluateExitPlan(plan, market);
+      return result.status === "TRIGGERED" && executableExitDecision(task, result.decision, market).targetPositionIds.length;
+    }))) {
     analysis.abort.abort(new Error(reason));
   }
 }
@@ -335,9 +340,27 @@ function executableExitDecision(task, decision, market = task.market) {
     ? rescueProtectedPositionIds(task, market) : new Set();
   const groupedIds = decision.exitType !== "SCHEDULED_CLOSE" && !decision.exitGuard?.rescueRecovery
     ? activeRescuePositionIds(task) : new Set();
-  const targetPositionIds = (decision.targetPositionIds || []).filter((id) => !exitingIds.has(id) && !protectedIds.has(id) && !groupedIds.has(id));
-  const exitGuard = decision.exitGuard?.positions ? { ...decision.exitGuard, positions: decision.exitGuard.positions.filter(p => targetPositionIds.includes(p.positionId)) } : decision.exitGuard;
-  return { ...decision, targetPositionIds, exitGuard };
+  const guards = new Map();
+  let lossObservationHeld = false;
+  const holdLoss = () => { lossObservationHeld = true; return false; };
+  const targetPositionIds = (decision.targetPositionIds || []).filter((id) => {
+    if (exitingIds.has(id) || protectedIds.has(id) || groupedIds.has(id)) return false;
+    const position = market.account?.positions?.find(p => p.positionOrderId === id);
+    const originalGuard = decision.exitGuard?.positions?.find(p => p.positionId === id) || decision.exitGuard;
+    const guard = originalGuard ? { ...originalGuard, lossObservation: task.lossObservations?.[id] } : null;
+    if (decision.exitType === "STOP_LOSS" && !guard?.rescueRecovery && !guard?.positionPoints?.programCeiling) {
+      const quote = executableExitQuote(market, position);
+      if (!quote || !guard || !observedLossGuardAllowsPrice(guard, position, quote.price, market)) return holdLoss();
+      const record = task.lossObservations?.[id];
+      const authoredAt = Date.parse(decision.observedAt || guard?.authoredAt || "");
+      if (record?.value < 0 && !guard?.programLossStop
+        && !(authoredAt >= Math.max(record.startedAt + LOSS_REVIEW_MS, record.flashUntil))) return holdLoss();
+    }
+    guards.set(id, guard);
+    return true;
+  });
+  const exitGuard = decision.exitGuard?.positions ? { ...decision.exitGuard, positions: targetPositionIds.map(id => guards.get(id)) } : guards.get(targetPositionIds[0]) || decision.exitGuard;
+  return { ...decision, targetPositionIds, exitGuard, lossObservationHeld };
 }
 
 function openPositionCount(market) {
@@ -351,7 +374,7 @@ function closingActionForPositions(positions) {
   return null;
 }
 
-export function attachPositionExit(decision, market = {}) {
+export function attachPositionExit(decision, market = {}, task = {}) {
   const positions = openPositionsFromMarket(market);
   if (!decision?.exitType) return decision;
   const requestedIds = (Array.isArray(decision?.targetPositionIds) ? decision.targetPositionIds : []).map(String).filter(Boolean);
@@ -384,7 +407,7 @@ export function attachPositionExit(decision, market = {}) {
   if (decision.exitType === "TAKE_PROFIT" && market.account?.positionsVerified === true) {
     const unverifiedProfit = matched.some((position) => {
       const quote = executableExitQuote(market, position, Date.now());
-      return !quote || !isNonLosingExit(position, quote.price);
+      return !quote || (!isNonLosingExit(position, quote.price) && !recoveryExitAllowed(task.lossObservations?.[position.positionOrderId], position, quote.price));
     });
     if (unverifiedProfit) return fail("EXIT_PROFIT_NOT_VERIFIED");
   }
@@ -876,6 +899,7 @@ function reconcilePositionAction(task, market, pending) {
 }
 
 function reconcilePendingPosition(task, market) {
+  observePositionLosses(task, market);
   if (market.account?.positionsVerified === true) {
     for (const pending of [task.pendingAction, ...(task.unsettledActions || [])].filter(p => p?.cancellationAwaitingAudit)) {
       observeRescueFill(task, market, { ...pending, status: "AWAITING_FILL" });
@@ -916,6 +940,17 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
   if (!task.pendingAction.exitType) validateRescueEntry(task, task.pendingAction, task.pendingAction.id);
   const exitGuard = task.pendingAction.exitGuard;
+  if (task.pendingAction.exitType === "STOP_LOSS" && !exitGuard?.positionAmount && !exitGuard?.positions?.some(g => g.positionAmount)
+    && !exitGuard?.rescueRecovery && !exitGuard?.positionPoints?.programCeiling) {
+    const allowed = executableExitDecision(task, task.pendingAction, latestLossMarket(task) || task.market);
+    if (allowed.targetPositionIds.length !== task.pendingAction.targetPositionIds.length) {
+      task.pendingAction.status = "CANCELLED";
+      task.pendingAction.message = "亏损或闪 K 仍在观察，等待恢复或连续扩大证据后重新判断";
+      persistTask(task);
+      throw new Error("LOSS_OBSERVATION_REQUIRED");
+    }
+    task.pendingAction.exitGuard = allowed.exitGuard;
+  }
   if (task.pendingAction.exitType && task.pendingAction.exitType !== "SCHEDULED_CLOSE" && !exitGuard?.rescueRecovery
     && task.pendingAction.targetPositionIds?.some(id => activeRescuePositionIds(task).has(id))) {
     task.pendingAction.status = "CANCELLED";
@@ -1883,7 +1918,8 @@ function decisionExecutionPolicy(task) {
   return isLiveTask(task) ? {
     entryMode: task.autoDecisionEnabled ? "automatic" : "manual_submit",
     exitsAutomatic: true, cancellationsAutomatic: true,
-    lossExit: "ai_trend_and_recovery", fixedLossAmountStop: false,
+    lossExit: "observe_recovery_then_stop", fixedLossAmountStop: false,
+    lossObservation: { aiReviewAfterMs: LOSS_REVIEW_MS, forceWorseningStopAfterMs: LOSS_STOP_MS, recoveryNetPnlAtLeast: 0, flashDecision: "wait_until_settled" },
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
     rangeMarketEntry: "ai_short_term_opportunity", automaticRescue: { lossPoints: 3, unit: "per_unit_price", preserveOriginal: true, modelIndependent: true, blockNewEntriesUntilFlat: true, rescueOrdersPerOriginal: 2, recoveryScope: "RESCUE_GROUP", recoveryNetPnlAtLeast: 0 }, entryMarketRegimeRequired: true,
     conditionalExits: true, profitPointExit: { minPoints: POSITION_MIN_PROFIT_POINTS, maxPoints: POSITION_MAX_PROFIT_POINTS, unit: "directional_price_difference", unknownFees: "net_unknown", knownNegativeNetAtCeiling: "STOP_LOSS" }, sessionClose: sessionCloseWindow(task),
@@ -1949,6 +1985,8 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       ...task.metrics,
       ...(market.account || {}),
       rescueSession: task.rescueSession || null,
+      lossObservations: Object.entries(task.lossObservations || {}).map(([positionId, observation]) => ({ positionId, ...observation,
+        review: positionLossReview(observation, market.account?.positions?.find(p => p.positionOrderId === positionId)) })),
       positionContext,
     },
     realtimeObservations: recentLiveObservations(task),
@@ -2540,14 +2578,16 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         }
       }
     }
-    decision = applyEntryBoundary(bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(decision, exitMarket)), exitMarket), exitMarket);
+    observePositionLosses(task, exitMarket);
+    decision = applyEntryBoundary(bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(decision, exitMarket, task)), exitMarket), exitMarket);
     if (explicitExit && decision.exitType) {
       const expiresAt = new Date(Date.parse(market.observedAt) + (decision.decisionTtlSec || 300) * 1000).toISOString();
-      decision.exitGuard = { positions: pendingPositions(exitMarket, decision).map(position => liveExitGuards.get(position.positionOrderId) || ({
+      decision.exitGuard = { positions: pendingPositions(exitMarket, decision).map(position => ({ ...(liveExitGuards.get(position.positionOrderId) || {
         positionId: position.positionOrderId, heldSide: heldDirection(position), quantity: Number(position.quantity),
         entryPrice: positionEntryPrice(position), expiresAt, triggerPrice: executableExitQuote(exitMarket, position)?.price,
         comparison: "EQ", exitType: decision.exitType,
-      })) };
+      }), authoredAt: market.observedAt, lossObservation: task.lossObservations?.[position.positionOrderId],
+        lossRecovery: decision.exitType === "TAKE_PROFIT" && recoveryExitAllowed(task.lossObservations?.[position.positionOrderId], position, executableExitQuote(exitMarket, position)?.price) })) };
     }
     const targetBook = decisionTargetBook(decision, market);
     if (targetBook) qualityIssues = marketQualityIssues(targetBook);
@@ -2718,7 +2758,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       appendAgentOutput({ taskId, runId: run.id, stage: "action", level: "error", message: `动作未执行：${execution.message}`, data: { code: execution.code } });
     } else {
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
-      const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
+      const actionMessage = task.decision.lossObservationHeld ? "亏损或闪 K 仍在观察，等待恢复或连续扩大证据后重新判断"
+        : execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续分析与执行其他买卖"
         : execution.reason === "ENTRY_ALREADY_HANDLED" ? "本 K 已处理入场，持续监控离场与下一 K"
           : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
       const boundaryMessage = rescueEntryBlock ? ({ INVALID_RESCUE_TARGET: "补救目标、方向或当前亏损未核实，继续分析", RESCUE_ALREADY_PENDING: "前笔补救尚未核实完成，继续管理持仓和委托", RESCUE_ENTRY_LOCKED: "救单尚未全部离场，禁止新开仓，继续监控整体恢复", RESCUE_EXIT_IN_PROGRESS: "救单正在整体离场，完成前不新开仓" })[rescueEntryBlock]
@@ -2902,7 +2943,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       const boundaryIds = new Set([...candidates.map(item => item.position.positionOrderId), ...activeRescuePositionIds(task)]);
       for (const position of market.account.positions) {
         if (boundaryIds.has(position.positionOrderId)) continue;
-        const result = positionProfitExit(position, market, Date.now());
+        const result = positionProfitExit(position, market, Date.now()) || observedLossStopCandidate(position, market, task.lossObservations?.[position.positionOrderId]);
         if (!result) continue;
         boundaryIds.add(position.positionOrderId);
         candidates.push(result);
@@ -2936,7 +2977,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.decision.exitGuard?.rescueRecovery ? "rescue_recovery" : candidate.decision.exitGuard?.positionPoints?.programCeiling ? "position_profit_ceiling" : candidate.decision.exitGuard?.positionPoints ? "position_profit_realization" : "ai_price_trigger", runtime }); }
+      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.decision.exitGuard?.rescueRecovery ? "rescue_recovery" : candidate.decision.exitGuard?.programLossStop ? "observed_loss_stop" : candidate.decision.exitGuard?.positionPoints?.programCeiling ? "position_profit_ceiling" : candidate.decision.exitGuard?.positionPoints ? "position_profit_realization" : "ai_price_trigger", runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: candidate.position.positionOrderId, code: error.message });
@@ -2981,7 +3022,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
     }
     const missingPlans = !closing.active && market.account.positions.some(p => !(task.exitPlans || []).some(plan => plan.positionId === p.positionOrderId && ["ARMED", "TRIGGERED", "SUBMITTED"].includes(plan.status)));
-    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length || rescueSubmitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : `${market.account.positions.length} 笔持仓已核实，普通单按原1～4点策略离场；亏损3点反向下两笔救单，每组净利>=0整组离场，救单期间禁止普通新开仓` };
+    task.exitMonitor = { status: closing.active ? task.sessionCloseState.status : submitted.length || rescueSubmitted.length ? "AWAITING_FILL" : missingPlans ? "PLAN_MISSING" : "WATCHING", checkedAt: market.observedAt, message: closing.active ? task.sessionCloseState.status === "FLAT_VERIFIED" ? "收盘持仓与委托已核实为零" : `收盘清仓中，仍有 ${market.account.positions.length} 笔持仓待核实` : `${market.account.positions.length} 笔持仓已核实；普通单1点起AI择机离场、4点强制离场；亏损观察1～2分钟、闪K结束后复核，恢复净利>=0交AI判断，持续扩亏止损；救单组净利>=0整组离场，救单期间禁止普通新开仓` };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: closing.overdue ? "OVERDUE" : "ERROR", failures, message: `${failures.length} 笔持仓动作未完成；${task.exitMonitor.message}` };
     if (closing.active && task.sessionCloseState.status === "FLAT_VERIFIED") task.exitPlans = [];
     persistTask(task);

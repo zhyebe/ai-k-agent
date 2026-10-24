@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { confirmObservedCandles } from "../server/candle-confirmation.mjs";
+import { confirmObservedCandles, markObservedMarketCandles } from "../server/candle-confirmation.mjs";
 import { buildLayeredAnalysisMarket, buildMarketAnalysisSegments, summarizeMarketForDecision } from "../server/analysis-context.mjs";
 import { marketDataFingerprint } from "../server/market.mjs";
 
@@ -103,4 +103,26 @@ test("a transient price matching live quotes and ticks remains actionable intrab
   assert.equal(result.intrabarEvidence.transientEvent.price, 105);
   assert.equal(result.intrabarEvidence.confirmed, false);
   assert.equal(result.orderBook.bids[0].price, 105);
+});
+
+for (const price of [90, 110]) test(`unconfirmed sudden ${price < 100 ? 'down' : 'up'} move reaches AI without waiting for rebound`, () => {
+  const scope = `flash-${price}`;
+  const observeMarket = (second, close) => markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m',
+    observedAt: new Date(minute + second * 1000).toISOString(), history: [candle(close)] }, scope);
+  observeMarket(40, 100);
+  const market = observeMarket(42, price);
+  assert.equal(market.history[0].confirmation.status, 'PROVISIONAL');
+  assert.equal(market.flashK.suspected, true);
+  assert.equal(market.flashK.price, price);
+  const result = summarizeMarketForDecision(market);
+  assert.equal(result.historyCount, 0);
+  assert.equal(result.intrabarEvidence.transientEvent.price, price);
+  assert.equal(result.flashK.excludeFromAnalysis, false);
+  const otherSession = markObservedMarketCandles({ ...market }, `${scope}-other`);
+  assert.equal(otherSession.flashK.suspected, false, 'sessions must not borrow another session flash evidence');
+  const withoutChart = markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m', observedAt: new Date(minute + 44000).toISOString() }, scope);
+  assert.equal(withoutChart.flashK.price, price, 'temporary chart absence retains the observed flash event');
+  let stable;
+  for (const second of [50, 52, 54, 56]) stable = observeMarket(second, price);
+  assert.equal(stable.history[0].confirmation.status, 'CONFIRMED', 'sustained genuine move can become confirmed');
 });

@@ -41,7 +41,7 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /亏 1 个点先结合趋势/);
   assert.match(content, /未来目标不是当前利润/);
   assert.match(content, /连续仍为 -1 点不是持续扩大/);
-  assert.match(content, /达到至少 1 点且已知费用后非负时立即 EXIT_NOW \/ TAKE_PROFIT/);
+  assert.match(content, /达到至少 1 点且已知费用后非负时由 AI 选择 EXIT_NOW \/ TAKE_PROFIT/);
   assert.match(content, /4 点是硬上限，不能设置 5 点目标/);
   assert.match(content, /达到1点后由AI计划选择离场/);
   assert.doesNotMatch(content, /实际 bid 达到 AI 选定的合理目标|盈利时选择最优可兑现正净收益/);

@@ -1,3 +1,5 @@
+import { detectFlashK } from "./flash-k.mjs";
+export { detectFlashK } from "./flash-k.mjs";
 import crypto from "node:crypto";
 import { markObservedMarketCandles } from "./candle-confirmation.mjs";
 import NodeWebSocket from "ws";
@@ -386,76 +388,6 @@ function isCompleteCandle(candle) {
   return Boolean(candle)
     && [candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value) && value > 0)
     && (candle.volume === null || (Number.isFinite(candle.volume) && candle.volume >= 0));
-}
-
-// A flash K is a transient display quote, not a confirmed market print. Keep
-// the detector deliberately evidence-based: one large range is only an ATR
-// anomaly; a price must briefly appear and then revert/disappear in consecutive
-// observations (or in a short tick burst) before classifying a transient event.
-const flashKObservationHistory = new Map();
-
-function flashIdentity({ symbol = "", symbolName = "", instrumentId = "", timeframe = "" } = {}) {
-  return [symbol, symbolName, instrumentId, timeframe].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean).join("|") || "default";
-}
-
-function priceNear(left, right, tolerance = 0.001) {
-  const a = Number(left);
-  const b = Number(right);
-  return Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) / Math.max(Math.abs(b), 1) <= tolerance;
-}
-
-export function detectFlashK({ symbol = "", symbolName = "", instrumentId = "", timeframe = "", history = [], ticks = [], latest = {}, now = Date.now() } = {}) {
-  const currentCandle = Array.isArray(history) ? history.at(-1) : null;
-  const currentPrice = Number(latest?.price ?? currentCandle?.close);
-  if (!Number.isFinite(currentPrice) || currentPrice <= 0) return { suspected: false, reason: "LATEST_PRICE_MISSING" };
-  const identity = flashIdentity({ symbol, symbolName, instrumentId, timeframe });
-  const samples = flashKObservationHistory.get(identity) || [];
-  const current = { at: Number(now) || Date.now(), price: currentPrice, timestamp: currentCandle?.timestamp || null, wickless: Boolean(currentCandle && priceNear(currentCandle.high, Math.max(currentCandle.open, currentCandle.close), 0.00001) && priceNear(currentCandle.low, Math.min(currentCandle.open, currentCandle.close), 0.00001)) };
-  samples.push(current);
-  while (samples.length > 8) samples.shift();
-  flashKObservationHistory.set(identity, samples);
-
-  let transientPrice = null;
-  let reason = "";
-  const before = samples.at(-3);
-  const transient = samples.at(-2);
-  if (before && transient && samples.length >= 3
-    && transient.wickless
-    && Number(transient.at) - Number(before.at) <= 15000
-    && Number(now) - Number(transient.at) <= 15000
-    && !priceNear(transient.price, before.price, 0.001)
-    && priceNear(currentPrice, before.price, 0.001)) {
-    transientPrice = transient.price;
-    reason = "TRANSIENT_REVERTED";
-  }
-
-  const validTicks = (Array.isArray(ticks) ? ticks : [])
-    .map((tick) => ({ price: Number(tick?.price), at: new Date(tick?.timestamp || 0).getTime() }))
-    .filter((tick) => Number.isFinite(tick.price) && tick.price > 0 && Number.isFinite(tick.at))
-    .sort((left, right) => left.at - right.at);
-  if (!transientPrice && current.wickless && validTicks.length >= 3) {
-    const first = validTicks[0];
-    const last = validTicks.at(-1);
-    const prices = validTicks.map((tick) => tick.price);
-    const extreme = prices.reduce((best, price) => Math.abs(price / first.price - 1) > Math.abs(best / first.price - 1) ? price : best, first.price);
-    const extremeCount = prices.filter((price) => priceNear(price, extreme, 0.0001)).length;
-    if (last.at - first.at <= 10000 && extremeCount === 1 && Math.abs(extreme / first.price - 1) >= 0.002 && priceNear(last.price, first.price, 0.001)) {
-      transientPrice = extreme;
-      reason = "SHORT_TICK_SPIKE_REVERTED";
-    }
-  }
-  return transientPrice === null
-    ? { suspected: false, reason: "NO_DISAPPEARING_PRICE" }
-    : {
-      suspected: true,
-      price: transientPrice,
-      timestamp: transient?.timestamp || currentCandle?.timestamp || null,
-      reason,
-      excludeFromAnalysis: false,
-      interpretation: "TRANSIENT_PRICE_EVENT",
-      actorIntent: "UNKNOWN",
-      preserveExecutableQuotes: true,
-    };
 }
 
 function sma(values, period) {
@@ -946,7 +878,7 @@ function buildTimeframeSnapshot({ symbol = "", symbolName = "", instrumentId = "
     })),
     trend: indicators.trend,
     anomaly: indicators.anomaly,
-    flashK: detectFlashK({ symbol, symbolName, instrumentId, timeframe: normalizedTimeframe, history: normalizedHistory, ticks }),
+    flashK: detectFlashK({ observe: false, symbol, symbolName, instrumentId, timeframe: normalizedTimeframe, history: normalizedHistory, ticks }),
     missingFields,
     dataQuality: missingFields.length ? "LIMITED" : "VERIFIED",
     ticks: Array.isArray(ticks) ? ticks : [],
