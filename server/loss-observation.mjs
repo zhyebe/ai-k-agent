@@ -92,6 +92,11 @@ export function recoveryExitAllowed(record, position, price, now = Date.now()) {
   return isRecoveryExit(record, position, price, now);
 }
 
+export function positionLossContexts(task, market, now = Date.now()) {
+  return Object.entries(task.lossObservations || {}).map(([positionId, observation]) => ({ positionId, ...observation,
+    review: positionLossReview(observation, market.account?.positions?.find(p => p.positionOrderId === positionId), now) }));
+}
+
 // Applied by the browser again to its fresh executable quote and modal price.
 export function observedLossGuardAllowsPrice(guard, position, price, market, now = Date.now()) {
   if (guard?.rescueRecovery || guard?.positionPoints?.programCeiling || guard?.exitType === "SCHEDULED_CLOSE") return true;

@@ -14,7 +14,7 @@ import { normalizeUnitProbability } from "./provider.mjs";
 import { entryRegimeAllows, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, POSITION_MIN_PROFIT_POINTS, POSITION_MAX_PROFIT_POINTS, positionEntryPrice, positionProfitExit, sessionCloseWindow, validateExitPlans } from "./exit-policy.mjs";
-import { observePositionLosses, positionLossReview, recoveryExitAllowed, observedLossGuardAllowsPrice, observedLossStopCandidate, latestLossMarket, LOSS_REVIEW_MS, LOSS_STOP_MS } from "./loss-observation.mjs";
+import { observePositionLosses, positionLossContexts, recoveryExitAllowed, observedLossGuardAllowsPrice, observedLossStopCandidate, latestLossMarket, LOSS_REVIEW_MS, LOSS_STOP_MS } from "./loss-observation.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -1985,8 +1985,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
       ...task.metrics,
       ...(market.account || {}),
       rescueSession: task.rescueSession || null,
-      lossObservations: Object.entries(task.lossObservations || {}).map(([positionId, observation]) => ({ positionId, ...observation,
-        review: positionLossReview(observation, market.account?.positions?.find(p => p.positionOrderId === positionId)) })),
+      lossObservations: positionLossContexts(task, market),
       positionContext,
     },
     realtimeObservations: recentLiveObservations(task),
@@ -2425,7 +2424,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
             observedAt: market.observedAt,
             freshnessSec: market.freshnessSec,
           },
-          account: { ...task.metrics, ...(market.account || {}), positionContext, rescueSession: task.rescueSession || null },
+          account: { ...task.metrics, ...(market.account || {}), positionContext, rescueSession: task.rescueSession || null,
+            lossObservations: positionLossContexts(task, market) },
           positions: positionContext,
           realtimeObservations: recentLiveObservations(task),
           rawPositions: market.account?.positions || [],

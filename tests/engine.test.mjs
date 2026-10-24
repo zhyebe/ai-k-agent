@@ -1550,6 +1550,8 @@ for (const rescueStatus of ["ACTIVE", "EXITING"]) test(`生产后端只调度客
   process.env.AXIOM_REQUIRE_DESKTOP_BROWSER = "1";
   const task = insertNorthstarTask(`client_analysis_${Date.now()}`);
   const market = testMarketSnapshot("client-snapshot", 100);
+  market.account.positions = [{ positionOrderId: "ordinary-loss", symbol: market.symbol, side: "LONG", quantity: 1, orderPrice: 101 }];
+  observePriorLoss(task, market);
   task.rescueSession = { status: rescueStatus, originalPositionIds: ["original"], rescuePositionIds: ["rescue"], lastRescueByPosition: { original: { lossPoints: 3 } } };
   task.exitPlans = [{ positionId: "existing", status: "ARMED", takeProfitPrice: 110, stopLossPrice: 94, rationale: "大趋势延续" }];
   let calls = 0;
@@ -1564,6 +1566,8 @@ for (const rescueStatus of ["ACTIVE", "EXITING"]) test(`生产后端只调度客
       requestMarketAnalysis: async (_provider, context) => {
         calls++;
         assert.deepEqual(context.account.rescueSession, task.rescueSession);
+        assert.equal(context.account.lossObservations[0].positionId, "ordinary-loss");
+        assert.equal(context.account.lossObservations[0].review.stopAllowed, true);
         assert.equal(context.market, undefined);
         assert.equal(context.marketRef.fingerprint, market.fingerprint);
         assert.equal(context.marketRef.observedAt, market.observedAt);
