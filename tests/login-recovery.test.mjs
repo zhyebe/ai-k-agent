@@ -61,18 +61,19 @@ test("fast position monitor recovers login and executes the still-valid AI exit 
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-for (const entryPrice of [102, 102.01, 106, 105.99]) test(`fast position monitor recovers login and rechecks price-point profit and automatic rescue without an AI plan: entry ${entryPrice}`, async t => {
+for (const entryPrice of [99, 102, 102.01, 106, 105.99]) test(`fast position monitor recovers login and rechecks price-point profit and automatic rescue without an AI plan: entry ${entryPrice}`, async t => {
   const f = setup(t);
   f.market.account.positions[0].orderPrice = entryPrice;
   let reads = 0, submitted;
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
-  if (entryPrice === 102) {
+  if (entryPrice === 99) {
     assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
-    assert.equal(submitted.exitType, entryPrice === 102 ? "TAKE_PROFIT" : "STOP_LOSS");
+    assert.equal(submitted.exitType, "TAKE_PROFIT");
     assert.deepEqual(submitted.targetPositionIds, ["P1"]);
-    assert.equal((submitted.exitGuard.positionPoints || submitted.exitGuard.positionAmount).threshold, entryPrice === 102 ? 1 : -3);
+    assert.equal(submitted.exitGuard.positionPoints.threshold, 4);
+    assert.equal(submitted.exitGuard.positionPoints.programCeiling, true);
   } else if (entryPrice === 106) {
     assert.deepEqual(f.calls, ["read", "login", "read", "cancel", "read", "submit"]);
     assert.equal(submitted.exitType, null);

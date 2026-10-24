@@ -78,7 +78,7 @@ module.exports = async function inspectBrowser({ app }, input) {
       });
       for (const side of ["LONG", "SHORT"]) {
         await page.evaluate(() => window.redrawNextControl(".el-dialog button"));
-        const position = { positionOrderId: side === "LONG" ? "P-1" : "P-10", symbol: "DGKZ", symbolName: "测试商品", side, quantity: side === "LONG" ? 2 : 1, orderPrice: side === "LONG" ? 98 : 103 };
+        const position = { positionOrderId: side === "LONG" ? "P-1" : "P-10", symbol: "DGKZ", symbolName: "测试商品", side, quantity: side === "LONG" ? 2 : 1, orderPrice: side === "LONG" ? 96 : 105 };
         const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionsVerified: true }, orderBook };
         const candidate = positionProfitExit(position, market);
         if (!candidate) throw new Error(`SMOKE_EXIT_GUARD_MISSING:${side}`);

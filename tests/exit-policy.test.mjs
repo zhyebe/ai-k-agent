@@ -20,8 +20,11 @@ for (const side of ["LONG", "SHORT"]) test(`${side}: retired fixed amount guards
 });
 
 test("unknown fees stay unknown when user price-point boundary executes", () => {
-  const result = positionProfitExit({ ...position, quantity: 3 }, market, observed);
-  assert.equal(result.grossPnl, 6);
+  const result = positionProfitExit({ ...position, quantity: 3 }, {
+    ...market,
+    orderBook: { bids: [{ price: 106, volume: 20 }], asks: [{ price: 108, volume: 20 }] },
+  }, observed);
+  assert.equal(result.grossPnl, 12);
   assert.equal(result.netPnl, null);
   assert.equal(result.decision.exitGuard.positionPoints.fees, null);
 });
