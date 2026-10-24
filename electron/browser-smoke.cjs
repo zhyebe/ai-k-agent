@@ -73,7 +73,7 @@ module.exports = async function inspectBrowser({ app }, input) {
         const th = document.createElement("th"); th.textContent = "订单价格";
         document.querySelector("#positions thead tr").append(th);
         for (const row of document.querySelectorAll("#positions tbody tr")) {
-          const td = document.createElement("td"); td.textContent = row.cells[1].textContent === "买入" ? "98" : "103"; row.append(td);
+          const td = document.createElement("td"); td.textContent = row.cells[1].textContent === "买入" ? "96" : "105"; row.append(td);
         }
       });
       for (const side of ["LONG", "SHORT"]) {
