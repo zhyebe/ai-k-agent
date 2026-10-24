@@ -32,6 +32,16 @@ afterEach(async () => {
   assert.equal(await page.evaluate(() => window.historyVisits), 0, "automation must never open historical orders");
 });
 
+async function setPositionEntryCost(price) {
+  await page.evaluate(price => {
+    const head = document.createElement("th"); head.textContent = "订单价格";
+    document.querySelector("#positions thead tr").append(head);
+    for (const row of document.querySelectorAll("#positions tbody tr")) {
+      const cell = document.createElement("td"); cell.textContent = String(price); row.append(cell);
+    }
+  }, price);
+}
+
 test("a confirmation redrawn after discovery is reacquired without waiting on its detached token", async t => {
   await page.reload();
   page.setDefaultTimeout(600);
@@ -184,6 +194,7 @@ test("confirmation sent before a quote reversal stays uncertain and is never cli
     .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
   await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
   await page.reload();
+  await setPositionEntryCost(100);
   await page.evaluate(() => {
     window.transfer = id => {
       const box = document.createElement("div");
@@ -979,6 +990,7 @@ for (const scenario of ["valid", "reversed-quote", "reversed-dialog", "expired",
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace('<body>', `<body><div>DGKZ | 测试商品</div><div>最新价 100</div><div id="realtime">${scenario === "realtime-missing" ? "" : "实时货值变化 +2.5元"}</div>`) }));
     await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
     await page.reload();
+    await setPositionEntryCost(18);
     const startedAt = Date.now();
     const observed = await observeExecutionMarket({ target: { browserSessionId: "trade-fixture" } }, { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] });
     assert.equal(observed.account.positions.length, 3);
