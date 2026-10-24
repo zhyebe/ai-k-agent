@@ -106,23 +106,21 @@ function positionExitCandidate(position, quote, pnl, now, exitType, triggerPrice
   };
 }
 
-// The user's 1–4 boundary is a directional price difference, not cash PnL.
-// Unknown fees stay unknown; known negative net PnL is never called profit.
+// AI chooses a realized profit point once the position reaches one favorable
+// point. The host only supplies the hard four-point ceiling. Unknown fees stay
+// unknown; known negative net PnL is never called profit.
 export function positionProfitExit(position, market, now = Date.now()) {
   if (market.account?.positionsVerified !== true || !position?.positionOrderId || Number(position.frozenQuantity || 0) !== 0) return null;
   const quote = executableExitQuote(market, position, now);
   const pnl = quote && exitNetPnl(position, quote.price);
   if (!pnl) return null;
   const long = heldDirection(position) === "LONG";
-  const profitable = isNonLosingExit(position, quote.price);
   const ceiling = pnl.entryPrice + (long ? 1 : -1) * POSITION_MAX_PROFIT_POINTS;
-  if (!profitable && !(long ? quote.price >= ceiling : quote.price <= ceiling)) return null;
-  const threshold = profitable ? POSITION_MIN_PROFIT_POINTS : POSITION_MAX_PROFIT_POINTS;
-  const minimum = pnl.entryPrice + (long ? 1 : -1) * threshold;
-  const breakEven = positionAmountTriggerPrice(pnl, long, 0);
-  const triggerPrice = profitable ? (long ? Math.max(minimum, breakEven) : Math.min(minimum, breakEven)) : minimum;
-  return positionExitCandidate(position, quote, pnl, now, profitable ? "TAKE_PROFIT" : "STOP_LOSS", triggerPrice,
-    { positionPoints: { threshold, fees: pnl.fees } });
+  const atCeiling = long ? quote.price >= ceiling : quote.price <= ceiling;
+  if (!atCeiling) return null;
+  const profitable = isNonLosingExit(position, quote.price);
+  return positionExitCandidate(position, quote, pnl, now, profitable ? "TAKE_PROFIT" : "STOP_LOSS", ceiling,
+    { positionPoints: { threshold: POSITION_MAX_PROFIT_POINTS, fees: pnl.fees, programCeiling: true } });
 }
 
 export function positionAmountGuardAllowsPrice(guard, position, price) {
@@ -131,6 +129,7 @@ export function positionAmountGuardAllowsPrice(guard, position, price) {
   if (!boundary) return true;
   const profit = guard.exitType === "TAKE_PROFIT";
   if (boundary.threshold !== (profit ? POSITION_MIN_PROFIT_POINTS : POSITION_MAX_PROFIT_POINTS)
+    && !(boundary.programCeiling === true && boundary.threshold === POSITION_MAX_PROFIT_POINTS)
     || (!profit && guard.exitType !== "STOP_LOSS")
     || !position || position.positionOrderId !== guard.positionId || heldDirection(position) !== guard.heldSide
     || Number(position.quantity) !== guard.quantity || Number(position.frozenQuantity || 0) !== 0
@@ -140,7 +139,13 @@ export function positionAmountGuardAllowsPrice(guard, position, price) {
   const pnl = exitNetPnl({ ...position, roundTripFee: fees }, price);
   if (!pnl) return false;
   const long = guard.heldSide === "LONG";
-  if (profit) return isNonLosingExit({ ...position, roundTripFee: fees }, price);
+  if (profit) {
+    if (boundary.programCeiling === true) {
+      const ceiling = pnl.entryPrice + (long ? 1 : -1) * POSITION_MAX_PROFIT_POINTS;
+      if (!(long ? pnl.exitPrice >= ceiling : pnl.exitPrice <= ceiling)) return false;
+    }
+    return isNonLosingExit({ ...position, roundTripFee: fees }, price);
+  }
   const ceiling = pnl.entryPrice + (long ? 1 : -1) * POSITION_MAX_PROFIT_POINTS;
   return pnl.netPnl !== null && pnl.netPnl < 0 && (long ? pnl.exitPrice >= ceiling : pnl.exitPrice <= ceiling);
 }

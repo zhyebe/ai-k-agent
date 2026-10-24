@@ -96,6 +96,21 @@ for (const action of ["BUY", "SELL"]) {
   });
 }
 
+test("native order confirmation is accepted automatically even when it appears after the click", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const original = window.enter;
+    window.enter = side => {
+      setTimeout(() => {
+        if (window.confirm("是否确认下单")) original(side);
+      }, 150);
+    };
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 2 });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "BUY", price: "101", quantity: "2" }]);
+});
+
 test("verified row transfer completes with AI offline and retains the requested limit price", async () => {
   await page.reload();
   let requests = 0;
@@ -1060,7 +1075,7 @@ for (const scenario of ["valid", "break-even", "quote-changed", "cost-changed", 
   });
 }
 
-for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [1, 2, 4, 4.5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
+for (const heldSide of ["LONG", "SHORT"]) for (const threshold of [4, 4.5, -3]) for (const scenario of ["valid", "quote-changed", "dialog-changed", "cost-changed", "quantity-changed", "frozen", "expired"]) {
   test(`${heldSide} profit points / stop amount ${threshold} verifies final browser confirmation: ${scenario}`, async () => {
     const long = heldSide === "LONG";
     const entryPrice = 100 - (long ? 1 : -1) * (threshold > 0 ? threshold : (threshold + 2) / 2);

@@ -862,8 +862,8 @@ function entryConfirmationGuard(entryDeadlineAt) {
 export async function continueManualEntry({ sessionId = "default", action, entryDeadlineAt = null } = {}) {
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND" };
-  const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
-  if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
+  const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible, [aria-modal='true']:visible, dialog:visible, .ant-modal:visible, .modal:visible, .popup:visible").allTextContents();
+  if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|确认委托|确认交易|是否确认|确定.*(?:下单|委托|交易|订立)|提交委托|风险提示|合同|协议|您确定/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
   const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page), canConfirm: entryConfirmationGuard(entryDeadlineAt) });
   return { ok: result.ok, code: result.code, continued: result.confirmed === true };
 }
@@ -1037,7 +1037,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
           }
         }
         stage = "click";
-        let clicked = exitType ? await clickPositionTransfer(page, positionTarget) : await clickTradeEntry(page, action);
+        let clicked = exitType ? await clickPositionTransfer(page, positionTarget, { persistNativeDialog: true }) : await clickTradeEntry(page, action, { persistNativeDialog: true });
         // A changed page needs a new AI plan. A failed or disabled click does
         // not: it must not be replayed through a second execution path.
         if (aiProvider && ["EXIT_CONTROL_NOT_FOUND", "EXIT_POSITION_NOT_FOUND", "SUBMIT_BUTTON_NOT_FOUND"].includes(clicked.code)) {
@@ -1061,12 +1061,19 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
         }
         actionClicked = true;
         stage = "confirm";
-        const dialog = await completeTradeDialogs(page, {
-          exitType, orderType, price, baselineToken, finished: () => Boolean(writeResponse.peek()),
-          canConfirm: exitGuard ? verifyExitGuard : entryGuard,
-          resolveTransferPrice: exitGuard ? () => verifyExitGuard() : undefined,
-          resolveConfirmation: aiProvider ? box => agentTradeConfirmation(page, box, aiProvider, { action, exitType, targetPositionIds: positionTarget.targetPositionIds, price, quantity }) : undefined,
-        });
+        let dialog;
+        try {
+          dialog = await completeTradeDialogs(page, {
+            exitType, orderType, price, baselineToken, initialConfirmed: clicked.nativeConfirmed === true,
+            finished: () => Boolean(writeResponse.peek()) || (clicked.nativeConfirmationState?.confirmed === true
+              && Date.now() - Number(clicked.nativeConfirmationState.confirmedAt || 0) >= 2000),
+            canConfirm: exitGuard ? verifyExitGuard : entryGuard,
+            resolveTransferPrice: exitGuard ? () => verifyExitGuard() : undefined,
+            resolveConfirmation: aiProvider ? box => agentTradeConfirmation(page, box, aiProvider, { action, exitType, targetPositionIds: positionTarget.targetPositionIds, price, quantity }) : undefined,
+          });
+        } finally {
+          clicked.nativeDialogCleanup?.();
+        }
         if (!dialog.ok) return withCompleted({ ok: false, code: dialog.code, message: `交易确认未完成 [${dialog.code}]${dialog.message ? `：${dialog.message}` : ""}`, filled: true, submitted: false, uncertain: dialog.confirmed === true });
         stage = "feedback";
         const { response, pageHint } = await observeTradeFeedback(page, writeResponse, baselineToken);

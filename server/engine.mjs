@@ -2936,7 +2936,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       if (!decision.targetPositionIds.length || Number(candidate.position.frozenQuantity || 0) > 0) continue;
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.decision.exitGuard?.rescueRecovery ? "rescue_recovery" : candidate.decision.exitGuard?.positionPoints ? candidate.decision.exitType === "STOP_LOSS" ? "position_profit_ceiling" : "position_profit_realization" : "ai_price_trigger", runtime }); }
+      try { await confirmPendingAction(taskId, { source: closing.active ? "session_close" : candidate.decision.exitGuard?.rescueRecovery ? "rescue_recovery" : candidate.decision.exitGuard?.positionPoints?.programCeiling ? "position_profit_ceiling" : candidate.decision.exitGuard?.positionPoints ? "position_profit_realization" : "ai_price_trigger", runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: candidate.position.positionOrderId, code: error.message });

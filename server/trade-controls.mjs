@@ -1,6 +1,7 @@
 import { paginationText, turnOrderPage, waitForAccountTable } from "./order-controls.mjs";
 
 const BUTTONS = "button, input[type='button'], input[type='submit'], [role='button'], a";
+const DIALOGS = ".el-message-box, .el-dialog, [role='dialog'], [aria-modal='true'], dialog, .ant-modal, .modal, .popup";
 const TABS = "button, [role='tab'], .el-tabs__item, .el-radio-button__inner, .trade_btn, .tab_btn, .header_l_item, span, a, div";
 const ROWS = "tr, [role='row'], .el-table__row, .position-row";
 let controlSequence = 0;
@@ -43,6 +44,51 @@ async function findControl(root, labels, selector = BUTTONS, allowPartial = true
     return true;
   }, { wanted: labels.map((label) => label.replace(/[\s:：|｜]/g, "")), token, allowPartial });
   return found ? root.locator(`[data-axiom-control="${token}"]`) : null;
+}
+
+function isTradeConfirmationText(value) {
+  const text = String(value || "").replace(/\s+/g, "");
+  return /确认下单|确认买入|确认卖出|确认委托|确认交易|订单确认|交易确认|是否确认|确定.*(?:下单|委托|交易|订立)|提交委托|风险提示|合同|协议|您确定/.test(text)
+    && !/撤单|撤销.*委托|止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text);
+}
+
+async function clickWithNativeTradeConfirmation(page, control, { persist = false } = {}) {
+  const state = { confirmed: false, confirmedAt: 0, disposed: false };
+  let timer = null;
+  let handler;
+  const dispose = () => {
+    if (state.disposed) return;
+    state.disposed = true;
+    if (timer) clearTimeout(timer);
+    page.off("dialog", handler);
+  };
+  handler = dialog => {
+    const message = dialog.message();
+    if (isTradeConfirmationText(message)) {
+      state.confirmed = true;
+      state.confirmedAt = Date.now();
+      dialog.accept().catch(() => {});
+    } else {
+      dialog.dismiss().catch(() => {});
+    }
+  };
+  page.on("dialog", handler);
+  try {
+    await control.click({ timeout: 5000 });
+    await page.waitForTimeout(25);
+    if (persist) {
+      // Some trading pages raise window.confirm from a delayed callback after
+      // the click promise has already resolved. Keep the listener alive for
+      // the rest of the confirmation workflow and clean it up automatically.
+      timer = setTimeout(dispose, 8000);
+      timer.unref?.();
+    } else dispose();
+    state.dispose = dispose;
+    return state;
+  } catch (error) {
+    dispose();
+    throw error;
+  }
 }
 
 export async function activateTradeControl(page, label) {
@@ -137,7 +183,7 @@ export async function prepareTradeEntry(page, action) {
   return false;
 }
 
-export async function clickTradeEntry(page, action) {
+export async function clickTradeEntry(page, action, { persistNativeDialog = false } = {}) {
   const labels = action === "SELL" ? ["卖出订立", "卖订立"] : ["买入订立", "买订立"];
   let lastError = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -149,8 +195,8 @@ export async function clickTradeEntry(page, action) {
     try {
       if (!await acceptTradeAgreement(control)) continue;
       await control.scrollIntoViewIfNeeded({ timeout: 2500 });
-      await control.click({ timeout: 5000 });
-      return { clicked: true, label: labels[0] };
+      const native = await clickWithNativeTradeConfirmation(page, control, { persist: persistNativeDialog });
+      return { clicked: true, label: labels[0], nativeConfirmed: native.confirmed, nativeConfirmationState: native, nativeDialogCleanup: native.dispose };
     } catch (error) {
       lastError = error;
       if (attempt < 2) await page.waitForTimeout(150);
@@ -246,7 +292,7 @@ export async function preparePositionRows(page, input) {
   return [];
 }
 
-export async function clickPositionTransfer(page, input) {
+export async function clickPositionTransfer(page, input, { persistNativeDialog = false } = {}) {
   const rows = await preparePositionRows(page, input);
   const target = input.targetPositionIds?.length || input.rowIndex == null ? rows[0] : rows.find((row) => row.index === input.rowIndex);
   if (!target) return { clicked: false, code: "EXIT_POSITION_NOT_FOUND" };
@@ -254,8 +300,8 @@ export async function clickPositionTransfer(page, input) {
   if (!control) return { clicked: false, code: "EXIT_CONTROL_NOT_FOUND", targetPositionIds: input.targetPositionIds };
   try {
     await control.scrollIntoViewIfNeeded({ timeout: 2500 });
-    await control.click({ timeout: 5000 });
-    return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity };
+    const native = await clickWithNativeTradeConfirmation(page, control, { persist: persistNativeDialog });
+    return { clicked: true, label: "转让", positionId: target.id, quantity: target.quantity, nativeConfirmed: native.confirmed, nativeConfirmationState: native, nativeDialogCleanup: native.dispose };
   } catch (error) {
     return { clicked: false, code: "EXIT_CLICK_FAILED", message: error.message, targetPositionIds: input.targetPositionIds };
   }
@@ -276,11 +322,11 @@ async function transferDialogPrice(box) {
   });
 }
 
-export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, canConfirm, resolveConfirmation, resolveTransferPrice } = {}) {
+export async function completeTradeDialogs(page, { exitType, cancelOrder = false, orderType, price, baselineToken = "", finished = () => false, initialConfirmed = false, canConfirm, resolveConfirmation, resolveTransferPrice } = {}) {
   const deadline = Date.now() + 7000;
   const confirmationToken = `${Date.now()}-${Math.random()}`;
-  const selector = ".el-message-box, .el-dialog, [role='dialog']";
-  let confirmed = false;
+  const selector = DIALOGS;
+  let confirmed = initialConfirmed === true;
   let failureCode = "TRADE_DIALOG_NOT_CONFIRMED";
   do {
     if (finished()) return { ok: true, confirmed };
@@ -289,7 +335,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       const box = boxes.nth(index);
       if (!await box.isVisible()) continue;
       const text = (await box.innerText()).replace(/\s+/g, "");
-      if (!(cancelOrder ? /撤单|撤销.*委托/.test(text) : exitType ? /转让/.test(text) : /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text)) || /止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
+      if (!(cancelOrder ? /撤单|撤销.*委托/.test(text) : exitType ? /转让/.test(text) : isTradeConfirmationText(text)) || /止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
       if (exitType && baselineToken) await box.evaluate((node, token) => { node.dataset.axiomTransferDialog = token; }, baselineToken);
       let dialogPrice = null;
       if (/转让价格/.test(text)) {
@@ -311,7 +357,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
         }
         if (dialogPrice === null) { failureCode = "TRANSFER_PRICE_UNAVAILABLE"; continue; }
       }
-      const control = await findControl(box, ["确定", "确认", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"], BUTTONS, false)
+      const control = await findControl(box, ["确定", "确认", "确定下单", "确认提交", "提交", "继续", "是的", "同意", "我已阅读并同意", "我已阅读并同意签署"], BUTTONS, false)
         || (resolveConfirmation ? await resolveConfirmation(box) : null);
       const state = control ? await controlState(control) : null;
       if (!state || state.disabled) { failureCode = state ? "TRADE_CONFIRM_DISABLED" : "TRADE_CONFIRM_NOT_FOUND"; continue; }
@@ -348,7 +394,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     if (hint.some((text) => /成功|已提交|失败|不足|拒绝|错误/.test(text))) return { ok: true, confirmed };
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
-  return { ok: !exitType || confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
+  return { ok: confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
 }
 
 export async function dismissTransferDialogs(page, token) {
