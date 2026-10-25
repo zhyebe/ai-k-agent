@@ -227,7 +227,7 @@ export function validateExitPlans(decision, market, task, now = Date.now()) {
   return { plans, rejected };
 }
 
-export function evaluateExitPlan(plan, market, now = Date.now()) {
+export function evaluateExitPlan(plan, market, now = Date.now(), { lossObservation = plan.lossObservation } = {}) {
   if (now >= Date.parse(plan.expiresAt) || !Number.isFinite(Date.parse(plan.expiresAt))) return { status: "EXPIRED" };
   if (market.account?.positionsVerified !== true) return { status: "POSITIONS_UNVERIFIED" };
   const position = market.account.positions.find(p => p.positionOrderId === plan.positionId);
@@ -241,7 +241,7 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
   const pnl = exitNetPnl(position, quote.price);
   const targetProfit = plan.takeProfitPrice !== null
     && (long ? quote.price >= plan.takeProfitPrice : quote.price <= plan.takeProfitPrice)
-    && (isNonLosingExit(position, quote.price) || (plan.lossRecovery && isRecoveryExit(plan.lossObservation, position, quote.price, now)));
+    && (isNonLosingExit(position, quote.price) || (plan.lossRecovery && isRecoveryExit(lossObservation, position, quote.price, now)));
   const realtimeProfit = plan.realtimeTakeProfit
     && realtimeValueAbove(market.account, plan.realtimeTakeProfit.valueAbove)
     && (long ? quote.price >= plan.realtimeTakeProfit.takeProfitPrice : quote.price <= plan.realtimeTakeProfit.takeProfitPrice)
@@ -254,7 +254,7 @@ export function evaluateExitPlan(plan, market, now = Date.now()) {
     status: "TRIGGERED", position, quotePrice: quote.price, netPnl: pnl?.netPnl ?? null, grossPnl: pnl?.grossPnl ?? null,
     decision: { action: long ? "SELL" : "BUY", orderType: "MARKET", exitType, targetPositionIds: [plan.positionId], targetSymbol: position.symbol, targetSymbolName: position.symbolName, targetInstrumentId: position.instrumentId,
       exitGuard: { positionId: plan.positionId, heldSide: plan.heldSide, quantity: plan.quantity, entryPrice: plan.entryPrice, exitType, authoredAt: plan.observedAt, expiresAt: plan.expiresAt, triggerPrice, comparison: (long && !stop) || (!long && stop) ? "GTE" : "LTE",
-        ...(!stop && plan.lossRecovery ? { lossRecovery: true, lossObservation: plan.lossObservation } : {}),
+        ...(!stop && plan.lossRecovery ? { lossRecovery: true, lossObservation } : {}),
         ...(!stop && !targetProfit && realtimeProfit ? { realtimeValueAbove: plan.realtimeTakeProfit.valueAbove } : {}) } },
   };
 }

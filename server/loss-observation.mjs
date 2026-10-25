@@ -1,9 +1,9 @@
 import { executableExitQuote, exitNetPnl, heldDirection, positionEntryPrice, isRecoveryExit, positionLossSignature } from "./exit-policy.mjs";
+import { observeExitFlashes, exitFlashAllows } from "./exit-flash.mjs";
 
 export const LOSS_REVIEW_MS = 60_000;
 export const LOSS_STOP_MS = 120_000;
 export const LOSS_SAMPLE_GAP_MS = 15_000;
-export const FLASH_SETTLE_MS = 5_000;
 const SAMPLE_MS = 10_000;
 const observationMarkets = new WeakMap();
 export const latestLossMarket = task => observationMarkets.get(task);
@@ -11,15 +11,11 @@ const sameInstrument = (a, b) => [a?.symbol, a?.symbolName, a?.instrumentId].fil
   .some(value => [b?.symbol, b?.symbolName, b?.instrumentId].includes(value));
 const signature = positionLossSignature;
 
-function flashPending(market, position) {
-  const book = (market.books || []).find(b => sameInstrument(b, position)) || (sameInstrument(market, position) ? market : null);
-  return book?.flashK?.suspected === true || book?.intrabarEvidence?.transientEvent?.suspected === true;
-}
-
 // Only successive fresh quotes count as observation time. Restarts, changed
 // holdings and gaps start again; repeated snapshots never advance the clock.
 export function observePositionLosses(task, market, now = Date.now()) {
   observationMarkets.set(task, market);
+  const flashes = observeExitFlashes(task, market, now);
   const generation = Number(task.monitorGeneration || 0);
   const previous = task.lossObservationGeneration === generation ? task.lossObservations || {} : {};
   task.lossObservationGeneration = generation;
@@ -48,8 +44,8 @@ export function observePositionLosses(task, market, now = Date.now()) {
     if (!pnl) continue;
     const value = pnl.netPnl ?? pnl.grossPnl;
     const old = continuous && prior.fees === pnl.fees ? prior : null;
-    const flashing = flashPending(market, position);
-    const flashUntil = flashing ? quote.observedAt + FLASH_SETTLE_MS : old?.flashUntil || 0;
+    const flash = flashes[id];
+    const flashUntil = flash?.pending ? quote.observedAt + 1 : flash?.readyAt || old?.flashUntil || 0;
     const losing = value < 0;
     // Retain a recovery episode for the AI even when profit is below one point.
     const continuingLoss = losing && old?.value < 0;
@@ -77,11 +73,14 @@ export function positionLossReview(record, position, now = Date.now()) {
   if (record.lastObservedAt < record.flashUntil) return { status: "FLASH_WAIT", stopAllowed: false };
   if (record.recovered && record.netPnl >= 0) return { status: "RECOVERED", stopAllowed: false, netPnl: record.netPnl };
   const elapsedMs = record.startedAt === null ? 0 : record.lastObservedAt - record.startedAt;
-  // Three separated observations must all worsen. A flat loss, a rebound or a
-  // single jump is insufficient, even after two minutes have elapsed.
-  const recent = record.samples.filter(s => s.at >= Math.max(record.lastObservedAt - 40_000, record.flashUntil)).slice(-3);
-  const worsening = record.value < 0 && recent.length === 3 && recent[2].at - recent[0].at >= 20_000
-    && recent.every((s, i) => Number.isFinite(s.value) && s.value < 0 && (!i || s.value < recent[i - 1].value))
+  // Two distinct declines still count when quotes pause between price levels.
+  // Flat losses, a rebound and an isolated jump do not establish deterioration.
+  const window = record.samples.filter(s => s.at >= Math.max(record.lastObservedAt - 40_000, record.flashUntil)).slice(-5);
+  const lastRebound = window.findLastIndex((s, i) => i > 0 && s.value > window[i - 1].value);
+  const recent = window.slice(Math.max(0, lastRebound));
+  const declines = recent.filter((s, i) => i > 0 && s.value < recent[i - 1].value).length;
+  const worsening = record.value < 0 && recent.length >= 3 && recent.at(-1).at - recent[0].at >= 20_000 && declines >= 2
+    && recent.every((s, i) => Number.isFinite(s.value) && s.value < 0 && (!i || s.value <= recent[i - 1].value))
     && record.value <= recent.at(-1).value;
   const stopAllowed = elapsedMs >= LOSS_REVIEW_MS && worsening;
   return { status: elapsedMs < LOSS_REVIEW_MS ? "OBSERVING" : stopAllowed ? "WORSENING" : "WAIT_RECOVERY",
@@ -99,12 +98,13 @@ export function positionLossContexts(task, market, now = Date.now()) {
 
 // Applied by the browser again to its fresh executable quote and modal price.
 export function observedLossGuardAllowsPrice(guard, position, price, market, now = Date.now()) {
+  if (!exitFlashAllows(guard, position, market, now)) return false;
   if (guard?.rescueRecovery || guard?.positionPoints?.programCeiling || guard?.exitType === "SCHEDULED_CLOSE") return true;
   const record = guard?.lossObservation;
-  if (guard?.lossRecovery) return !flashPending(market, position) && recoveryExitAllowed(record, position, price, now);
+  if (guard?.lossRecovery) return recoveryExitAllowed(record, position, price, now);
   if (guard?.exitType !== "STOP_LOSS") return true;
   const pnl = exitNetPnl({ ...position, roundTripFee: position?.roundTripFee ?? position?.totalFees ?? record?.fees }, price);
-  if (!pnl || flashPending(market, position)) return false;
+  if (!pnl) return false;
   if ((pnl.netPnl ?? pnl.grossPnl) >= 0) return true;
   const review = positionLossReview(record, position, now);
   return review.stopAllowed === true && (pnl.netPnl ?? pnl.grossPnl) <= record.value;

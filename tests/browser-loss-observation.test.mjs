@@ -78,3 +78,27 @@ test("delayed native transfer confirmation cannot bypass a rejected latest check
     assert.equal(clicked.nativeConfirmationState.confirmed, false);
   } finally { clicked.nativeDialogCleanup?.(); }
 });
+
+for (const confirmed of [false, true]) test(`ordinary four-point transfer modal respects flash state, confirmed=${confirmed}`, async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    for (const title of ["订单价格", "冻结数量"]) {
+      const th = document.createElement("th"); th.textContent = title;
+      document.querySelector("#positions thead tr").append(th);
+    }
+    for (const row of document.querySelectorAll("#positions tbody tr")) for (const value of [96, 0]) {
+      const td = document.createElement("td"); td.textContent = String(value); row.append(td);
+    }
+  });
+  const now = Date.now();
+  const result = await submitSuggestionForm({ sessionId: "loss-fixture", action: "SELL", exitType: "TAKE_PROFIT", quantity: 2,
+    targetPositionIds: ["P-1"], symbol: "DGKZ", symbolName: "测试商品", exitGuard: {
+      positionId: "P-1", heldSide: "LONG", quantity: 2, entryPrice: 96, exitType: "TAKE_PROFIT", triggerPrice: 100,
+      comparison: "GTE", expiresAt: new Date(now + 15000).toISOString(),
+      positionPoints: { programCeiling: true, threshold: 4 },
+      exitFlash: { observedAt: now - 40000, waitUntil: now - 10000, candleAt: Math.floor((now - 40000) / 60000) * 60000,
+        confirmedAt: confirmed ? now - 1000 : null, readyAt: confirmed ? now - 1000 : null, pending: !confirmed },
+    } });
+  assert.equal(result.ok, confirmed, JSON.stringify(result));
+  assert.equal((await page.evaluate(() => window.exits)).length, confirmed ? 1 : 0);
+});

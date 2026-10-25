@@ -29,6 +29,74 @@ function setup(id, positions, extras = {}) {
 }
 const long = (id, quantity = 1) => ({ positionOrderId: id, symbol: "DGKZ", symbolName: "测试商品", side: "买入", quantity, frozenQuantity: 0, orderPrice: 100 });
 
+test("four-point exit waits thirty seconds AND a confirmed candle, then uses the current price", async () => {
+  const f = setup("flash-ceiling-recheck", [long("P1")]);
+  const now = Date.now();
+  const observedAt = now - 31000;
+  f.market.flashK = { observedAt, timestamp: Math.floor(observedAt / 60000) * 60000, suspected: false };
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 0, "thirty seconds alone cannot authorize an exit");
+  f.market.history.push({ timestamp: f.market.flashK.timestamp, confirmation: { status: "CONFIRMED", lastObservedAt: now } });
+  f.market.orderBook.bids[0].price = 102;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 0, "a prior four-point spike cannot force a current two-point exit");
+  f.market.orderBook.bids[0].price = 104;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.exitFlash.pending, false);
+});
+
+test("recovery plan survives old observation expiry by rechecking the current same-position episode", async () => {
+  const f = setup("recovery-plan-refresh", [{ ...long("P1", 2), roundTripFee: 1 }]);
+  const now = Date.now();
+  for (let ago = 50; ago >= 0; ago -= 10) {
+    const sample = structuredClone(f.market);
+    sample.observedAt = new Date(now - ago * 1000).toISOString();
+    sample.orderBook.bids[0].price = ago >= 40 ? 99.8 : 100.5;
+    observePositionLosses(f.task, sample, now - ago * 1000);
+    if (ago === 30) f.task.exitPlans = validateExitPlans({ exitPlans: [{ positionId: "P1", heldSide: "LONG", quantity: 2,
+      validForSec: 120, takeProfitPrice: 100.5 }] }, sample, f.task, now - ago * 1000).plans;
+  }
+  assert.equal(f.task.exitPlans[0].lossRecovery, true);
+  f.market.orderBook.bids[0].price = 100.5;
+  await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.lossRecovery, true);
+});
+
+for (const scenario of ["uncertain", "cancelled-outside", "partial", "active-order", "frozen", "unknown-frozen", "unknown-orders"]) {
+  test(`exit reconciliation cannot stick or duplicate a transfer: ${scenario}`, async () => {
+    const f = setup(`orphan-exit-${scenario}`, [long("P1", 2)]);
+    f.task.pendingAction = { ...buildPendingAction(f.task, { action: "SELL", exitType: "TAKE_PROFIT", targetPositionIds: ["P1"], targetSymbol: "DGKZ" }),
+      status: scenario === "uncertain" ? "UNVERIFIED" : "AWAITING_FILL", source: "ai_price_trigger",
+      createdAt: new Date(Date.now() - 130000).toISOString(), entrustedOrderIds: scenario === "cancelled-outside" ? ["gone"] : [] };
+    if (scenario === "partial") f.market.account.positions[0].quantity = 1;
+    if (scenario === "frozen") f.market.account.positions[0].frozenQuantity = 1;
+    if (scenario === "unknown-frozen") delete f.market.account.positions[0].frozenQuantity;
+    if (scenario === "unknown-orders") f.market.account.openOrdersVerified = false;
+    if (scenario === "active-order") f.market.account.openOrders = [{ orderId: "live", symbol: "DGKZ", orderKind: "转让", remainingQuantity: 2 }];
+    const nativeNow = Date.now;
+    let clockNow = nativeNow();
+    const scopes = [];
+    const runtime = { ...f.runtime, observeExecutionMarket: async (_task, _connector, options) => {
+      scopes.push(options.accountScope);
+      return { ...f.market, observedAt: new Date(clockNow).toISOString() };
+    } };
+    Date.now = () => clockNow;
+    try {
+      await runPositionExitCycle(f.task.id, { runtime });
+      assert.equal(f.submitted.length, 0, "one empty order snapshot does not authorize a retry");
+      await runPositionExitCycle(f.task.id, { runtime });
+      assert.equal(f.submitted.length, 0, "duplicate snapshot does not count as a second audit");
+      clockNow += 6000;
+      await runPositionExitCycle(f.task.id, { runtime });
+      assert.equal(f.submitted.length, ["uncertain", "cancelled-outside", "partial"].includes(scenario) ? 1 : 0);
+      if (scenario === "partial") assert.equal(f.submitted[0].quantity, 1);
+      assert.ok(scopes.every(scope => scope === "full"), "unknown submissions need full order audits every cycle");
+    } finally { Date.now = nativeNow; }
+  });
+}
+
 function seedWorseningLoss(f, seconds = 90) {
   const now = Date.now();
   delete f.task.lossObservations;

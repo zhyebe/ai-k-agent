@@ -4,8 +4,9 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import test from "node:test";
 import WebSocket from "ws";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function freePort() {
   const server = createServer();

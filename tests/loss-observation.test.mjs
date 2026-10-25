@@ -87,12 +87,16 @@ test("flash requires fresh settled quotes before recovery or loss decisions; con
   f.sample(130, -2.1);
   assert.equal(f.review(130).stopAllowed, false);
   f.sample(140, -2.2);
-  f.sample(150, -2.3);
-  assert.equal(f.review(150).forceStop, true);
-  f.sample(160, 0, { flashK: { suspected: true } });
-  assert.equal(recoveryExitAllowed(f.task.lossObservations.p, f.position, 100, base + 160000), false);
-  f.sample(166, 0);
-  assert.equal(f.review(166).status, "RECOVERED");
+  f.sample(150, -2.3, { history: [{ timestamp: base + 120000, confirmation: { status: "CONFIRMED", lastObservedAt: base + 150000 } }] });
+  assert.equal(f.review(150).stopAllowed, false, "needs deterioration after the settled candle");
+  f.sample(160, -2.4);
+  f.sample(170, -2.5);
+  assert.equal(f.review(170).forceStop, true);
+  f.sample(180, 0, { flashK: { suspected: true } });
+  assert.equal(recoveryExitAllowed(f.task.lossObservations.p, f.position, 100, base + 180000), false);
+  for (const s of [190, 200]) f.sample(s, 0);
+  f.sample(210, 0, { history: [{ timestamp: base + 180000, confirmation: { status: "CONFIRMED", lastObservedAt: base + 210000 } }] });
+  assert.equal(f.review(210).status, "RECOVERED");
 });
 
 for (const reset of ["gap", "quantity", "cost", "fees", "unverified", "restart", "stale"]) test(`${reset} cannot reuse loss evidence`, () => {
@@ -119,10 +123,17 @@ test("duplicate and out-of-order snapshots never add elapsed evidence", () => {
   assert.equal(f.review(10).stopAllowed, false);
 });
 
-test("rescue and four-point ceiling guards keep precedence", () => {
+test("rescue guards keep precedence; ordinary four-point ceiling also waits for flash confirmation", () => {
   const f = fixture();
   f.sample(0, -2, { flashK: { suspected: true } });
-  for (const guard of [{ rescueRecovery: true }, { positionPoints: { programCeiling: true } }, { exitType: "SCHEDULED_CLOSE" }]) {
+  for (const guard of [{ rescueRecovery: true }, { exitType: "SCHEDULED_CLOSE" }]) {
     assert.equal(observedLossGuardAllowsPrice(guard, f.position, 98, f.market, base), true);
   }
+  assert.equal(observedLossGuardAllowsPrice({ positionPoints: { programCeiling: true } }, f.position, 98, f.market, base), false);
+});
+
+for (const side of ["LONG", "SHORT"]) test(`${side}: stair-step deterioration with unchanged quotes cannot hold a loss forever`, () => {
+  const f = fixture(side);
+  for (let s = 0; s <= 120; s += 10) f.sample(s, -0.1 - Math.floor(s / 20) / 10);
+  assert.equal(f.review(120).forceStop, true);
 });

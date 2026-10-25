@@ -12,6 +12,7 @@ import { clickPositionTransfer, clickTradeEntry, completeTradeDialogs, dismissOr
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote, exitGuardAllowsPrice, heldDirection, isNonLosingExit, positionEntryPrice, positionAmountGuardAllowsPrice, realtimeValueAbove } from "./exit-policy.mjs";
+import { markObservedMarketCandles } from "./candle-confirmation.mjs";
 import { observedLossGuardAllowsPrice, recoveryExitAllowed } from "./loss-observation.mjs";
 
 function valuesFromEnv(name, fallback) {
@@ -975,9 +976,9 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   let lastExitCheck = null;
   const verifyExitGuard = async (dialogPrice = null) => {
     lastExitCheck = null;
-    const snapshot = await readVisiblePage(sessionId, { quick: true });
+    const snapshot = await readVisiblePage(sessionId, { quick: true, inspectCandles: true });
     if (!snapshot.ok) return { ok: false, code: "EXIT_QUOTE_UNVERIFIED", message: snapshot.code + (snapshot.message ? `: ${snapshot.message}` : "") };
-    const market = parseHaohanPageSnapshot(snapshot, { symbol });
+    const market = markObservedMarketCandles(parseHaohanPageSnapshot(snapshot, { symbol, timeframe: "1m" }), sessionId);
     const guard = { ...currentExitGuard, exitType };
     const quote = executableExitQuote(market, { symbol, symbolName, instrumentId, side: guard?.heldSide }, Date.now());
     const position = market.account?.positions?.find(p => p.positionOrderId === guard?.positionId);
