@@ -893,14 +893,14 @@ function App() {
         <div className="workspace-switcher"><div className="avatar">{(user.displayName || user.username).slice(0, 1).toUpperCase()}</div><div><b>{user.displayName || user.username}</b><span>{workspaceReady ? `${workspace.tasks.length} 个自建任务` : loadError ? "加载失败" : "正在加载任务"}</span></div></div>
         <div className="nav-label">工作区</div>
         <nav className="primary-nav" aria-label="主导航">
-          {navItems.map(({ key, label, icon: Icon }) => <button key={key} className={view === key ? "nav-item active" : "nav-item"} onClick={() => { setView(key); setSidebarOpen(false); }}><Icon size={17} /><span>{label}</span>{key === "skills" && workspace.skills.some((skill) => skill.status === "REVIEW") && <em>{workspace.skills.filter((skill) => skill.status === "REVIEW").length}</em>}</button>)}
+          {navItems.map(({ key, label, icon: Icon }) => <button key={key} className={view === key ? "nav-item active" : "nav-item"} aria-label={label} title={label} onClick={() => { setView(key); setSidebarOpen(false); }}><Icon size={17} /><span>{label}</span>{key === "skills" && workspace.skills.some((skill) => skill.status === "REVIEW") && <em>{workspace.skills.filter((skill) => skill.status === "REVIEW").length}</em>}</button>)}
         </nav>
         <div className="sidebar-divider" />
         <div className="nav-label">系统</div>
-        <button className="nav-item" onClick={() => { setView("connectors"); setSidebarOpen(false); }}><Settings2 size={17} /><span>连接器</span></button>
+        <button className="nav-item" aria-label="连接器" title="连接器" onClick={() => { setView("connectors"); setSidebarOpen(false); }}><Settings2 size={17} /><span>连接器</span></button>
         <div className="sidebar-bottom">
-          <div className="service-card"><span className="online-dot" /><div><b>单机模式 · v{appVersion}</b><span>数据保存在本机 · 无需登录</span></div></div>
-          <button type="button" className="nav-item" onClick={() => { setEditingProvider(null); setModal("provider"); }}><Bot size={17} /><span>配置 AI</span></button>
+          <div className="service-card" role="status" aria-label={`单机模式 · v${appVersion}`} title="数据保存在本机 · 无需登录"><span className="online-dot" /><div><b>单机模式 · v{appVersion}</b><span>数据保存在本机 · 无需登录</span></div></div>
+          <button type="button" className="nav-item" aria-label="配置 AI" title="配置 AI" onClick={() => { setEditingProvider(null); setModal("provider"); }}><Bot size={17} /><span>配置 AI</span></button>
         </div>
       </aside>
 

@@ -99,6 +99,7 @@
       "releaseType": "release"
     },
     "mac": {
+      "mergeASARs": false,
       "icon": "build/icon.icns",
       "category": "public.app-category.finance",
       "target": [

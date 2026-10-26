@@ -24,9 +24,11 @@ async function main() {
     const executablePath = process.env.AXIOM_DESKTOP_EXECUTABLE;
     app = await _electron.launch({ ...(executablePath ? { executablePath } : {}), args: executablePath ? [] : [path.join(__dirname, "..")], env, timeout: 30000 });
     const page = await app.firstWindow();
+    // CI desktops can start below the sidebar's 1360px compact breakpoint.
+    await page.setViewportSize({ width: 1280, height: 900 });
     page.setDefaultTimeout(10000);
     page.on("pageerror", error => errors.push(error.message));
-    await page.getByText("单机模式 · v1.0.0", { exact: true }).waitFor();
+    await page.getByRole("status", { name: "单机模式 · v1.0.0", exact: true }).waitFor();
     await page.getByRole("button", { name: "连接器", exact: true }).first().waitFor();
     return page;
   };
