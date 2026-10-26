@@ -23,7 +23,7 @@ export function getApiBaseUrl() {
 
 function providerPreferenceKey(userId: string) {
   if (!userId) throw new Error("USER_AUTH_REQUIRED");
-  return `axiom.provider:${JSON.stringify([apiBaseUrl || window.location.origin, userId])}`;
+  return `axiom.provider:${JSON.stringify([window.axiomDesktop?.standalone ? "standalone" : apiBaseUrl || window.location.origin, userId])}`;
 }
 
 export function getLocalProviderId(userId: string) {
@@ -40,6 +40,7 @@ const USER_TOKEN_KEY = "axiom.user.token";
 const ADMIN_TOKEN_KEY = "axiom.admin.token";
 
 export function getUserToken() {
+  if (window.axiomDesktop?.standalone) return window.axiomDesktop.localToken || "";
   return window.localStorage.getItem(USER_TOKEN_KEY) || window.sessionStorage.getItem(USER_TOKEN_KEY) || "";
 }
 
@@ -61,6 +62,7 @@ export function clearUserToken() {
 }
 
 export async function configureApiBaseUrl(value: string) {
+  if (window.axiomDesktop?.standalone) throw new Error("STANDALONE_API_FIXED");
   const next = normalizeApiBaseUrl(value);
   if (window.axiomDesktop?.api?.setBaseUrl) await window.axiomDesktop.api.setBaseUrl(next);
   if (next !== apiBaseUrl) {
@@ -72,7 +74,7 @@ export async function configureApiBaseUrl(value: string) {
 }
 
 function authHeaders(): Record<string, string> {
-  const adminToken = window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
+  const adminToken = window.axiomDesktop?.standalone ? null : window.sessionStorage.getItem(ADMIN_TOKEN_KEY);
   const userToken = getUserToken();
   return {
     ...(adminToken ? { "x-admin-token": adminToken } : {}),

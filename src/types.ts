@@ -44,6 +44,9 @@ declare global {
     axiomDesktop?: {
       platform: string;
       isDesktop: boolean;
+      standalone?: boolean;
+      localToken?: string;
+      version?: string;
       apiBaseUrl: string;
       api?: DesktopApiBridge;
       ai?: DesktopAiBridge;

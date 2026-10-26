@@ -25,8 +25,6 @@ import {
   LayoutDashboard,
   ListChecks,
   LockKeyhole,
-  LogIn,
-  LogOut,
   Menu,
   Minus,
   Pause,
@@ -56,19 +54,16 @@ import {
   cancelPendingAction,
   confirmPendingAction,
   createTask,
-  configureApiBaseUrl,
   deleteProvider,
   deleteSkill,
   deleteTask,
   discoverConnector,
-  fetchApiHealth,
   fetchAgentOutput,
   fetchWorkspace,
   getApiBaseUrl,
   getLocalProviderId,
   getUserToken,
   openTaskBrowser,
-  clearUserToken,
   saveProvider,
   saveSkill,
   setAutoDecision,
@@ -82,12 +77,10 @@ import {
   testConnector,
   testProvider,
   updateTask,
-  setUserToken,
-  userLogin,
-  userLogout,
   userSession,
 } from "./lib/api";
 import type { AgentOutputLine, AgentRun, Decision, DesktopUpdateState, MarketCandle, MarketSnapshot, MarketTimeframe, PendingAction, Provider, Rule, SavedCredential, Skill, Task, TaskStatus, ViewKey, Workspace, WorkspaceUser } from "./types";
+import { version as appVersion } from "../package.json";
 import { BusyIcon, DataSkeleton, LoadError, LoadingStatus } from "./components/Loading";
 
 const navItems: Array<{ key: ViewKey; label: string; icon: typeof LayoutDashboard }> = [
@@ -304,30 +297,6 @@ function configuredProviders(providers: Provider[]) {
   return providers.filter((item) => item.configured);
 }
 
-const DEFAULT_CLOUD_API_URL = "http://47.109.95.143";
-
-function isLoopbackApiUrl(value = "") {
-  try {
-    const host = new URL(value).hostname.toLowerCase();
-    return host === "127.0.0.1" || host === "localhost" || host === "::1";
-  } catch {
-    return false;
-  }
-}
-
-function serviceEndpointLabel() {
-  const raw = getApiBaseUrl() || (window.axiomDesktop ? DEFAULT_CLOUD_API_URL : "http://127.0.0.1:8787");
-  try {
-    const url = new URL(raw);
-    const defaultPort = url.protocol === "https:" ? "443" : "80";
-    const host = !url.port || url.port === defaultPort ? url.hostname : `${url.hostname}:${url.port}`;
-    const local = isLoopbackApiUrl(raw);
-    return { title: local ? "本机服务（不是云端）" : "服务已连接", host: `API · ${host}` };
-  } catch {
-    return { title: "服务已连接", host: `API · ${raw.replace(/^https?:\/\//, "")}` };
-  }
-}
-
 function WindowControls() {
   const bridge = window.axiomDesktop?.window;
   if (!bridge || window.axiomDesktop?.platform === "darwin") return null;
@@ -360,123 +329,7 @@ function WindowResizeHandles() {
   return <>{["n", "s", "e", "w", "ne", "nw", "se", "sw"].map((edge) => <div key={edge} className={`window-resize-handle resize-${edge}`} onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); resizing.current = true; bridge.startResize(edge); }} />)}</>;
 }
 
-function UserLogin({ onSignedIn, initialError = "" }: { onSignedIn: (user: WorkspaceUser) => void; initialError?: string }) {
-  const [account, setAccount] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState(initialError);
-  const [busy, setBusy] = useState(false);
-  const [serviceUrl, setServiceUrl] = useState(getApiBaseUrl() || (window.axiomDesktop ? DEFAULT_CLOUD_API_URL : "http://127.0.0.1:8787"));
-  const [serviceSettingsOpen, setServiceSettingsOpen] = useState(false);
-  const [serviceMessage, setServiceMessage] = useState("");
-  const [serviceBusy, setServiceBusy] = useState(false);
-
-  async function saveServiceUrl() {
-    setServiceBusy(true);
-    setServiceMessage("");
-    try {
-      const normalized = await configureApiBaseUrl(serviceUrl);
-      await fetchApiHealth();
-      setServiceUrl(normalized);
-      setServiceMessage("服务已连接");
-      setError("");
-    } catch (reason) {
-      const code = reason instanceof Error ? reason.message : "";
-      setServiceMessage(code === "API_URL_INVALID" || code === "API_URL_REQUIRED" ? "服务地址无效" : "无法连接服务，请确认地址和服务状态");
-    } finally {
-      setServiceBusy(false);
-    }
-  }
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    if (!account.trim() || !password.trim()) {
-      setError("请输入桌面账号和密码");
-      return;
-    }
-    setBusy(true);
-    setError("");
-    try {
-      if (window.axiomDesktop) {
-        await configureApiBaseUrl(serviceUrl);
-        await fetchApiHealth();
-      }
-      const session = await userLogin(account, password);
-      setUserToken(session.token);
-      onSignedIn(session.user as WorkspaceUser);
-    } catch (reason) {
-      const code = reason instanceof Error ? reason.message : "";
-      setError(code === "USER_CREDENTIALS_INVALID" ? "账号或密码不正确，或账号已停用" : "无法连接管理服务，请检查服务地址和服务状态");
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <>
-      <WindowResizeHandles />
-      <div className="auth-screen desktop-login">
-        <div className="auth-window-drag-region" aria-hidden="true" />
-        <div className="auth-window-controls"><WindowControls /></div>
-        <section className="auth-panel" aria-labelledby="user-login-title">
-          <div className="auth-panel-head">
-            <div className="brand-lockup">
-              <div className="brand-mark" aria-hidden="true"><span /><span /><span /><span /></div>
-              <div><strong>axiom</strong><small>agent workspace</small></div>
-            </div>
-            <span className="auth-environment">DESKTOP</span>
-          </div>
-          <div className="auth-heading">
-          <span className="eyebrow"><span className="eyebrow-line" />用户端</span>
-          <h1 id="user-login-title">进入任务工作台</h1>
-          <p>使用已开通的账号登录。LIVE 实盘由 AI 决定入场；盈利 1 点立即离场，亏损 -2 点先观察30秒排查闪K，再由 AI 判断。</p>
-          </div>
-          <div className="auth-safety">
-            <ShieldCheck size={17} />
-            <div className="auth-safety-copy"><strong>自动下单</strong><span>AI 决定入场；盈利 1 点程序直接离场，亏损 -2 点先观察30秒排查闪K，再交给 AI；持仓汇总整行操作。</span></div>
-            <code>CONFIRM</code>
-          </div>
-          {window.axiomDesktop && <div className="auth-service-settings">
-            <div className="auth-service-summary"><span><ServerCog size={14} />服务地址</span><code>{serviceUrl}</code><button type="button" className="text-button" onClick={() => setServiceSettingsOpen((current) => !current)}>{serviceSettingsOpen ? "收起" : "设置"}</button></div>
-            {serviceSettingsOpen && <div className="auth-service-editor"><input value={serviceUrl} onChange={(event) => setServiceUrl(event.target.value)} inputMode="url" aria-label="服务地址" placeholder={DEFAULT_CLOUD_API_URL} /><button type="button" className="button button-small button-secondary" onClick={saveServiceUrl} disabled={serviceBusy}><BusyIcon busy={serviceBusy}><RefreshCw size={13} /></BusyIcon>{serviceBusy ? "检查中" : "连接测试"}</button>{serviceMessage && <span className={serviceMessage === "服务已连接" ? "service-ok" : "service-error"}>{serviceMessage}</span>}</div>}
-            {isLoopbackApiUrl(serviceUrl) && <div className="login-error auth-error"><AlertTriangle size={14} />当前是本机地址。云端 MySQL 里的共享 AI Provider 不会出现，请改成生产服务地址后再登录。</div>}
-          </div>}
-          <form onSubmit={submit} className="auth-form">
-            <label className="auth-field"><span>账号</span><span className="auth-input-shell"><UserRound size={16} /><input value={account} onChange={(event) => setAccount(event.target.value)} autoComplete="username" autoFocus placeholder="输入桌面账号" /></span></label>
-            <label className="auth-field"><span>密码</span><span className="auth-input-shell"><KeyRound size={16} /><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" placeholder="输入登录密码" /></span></label>
-            {error && <div className="login-error auth-error"><AlertTriangle size={14} />{error}</div>}
-            <button className="button button-primary auth-submit" type="submit" disabled={busy}><BusyIcon busy={busy}><LogIn size={15} /></BusyIcon>{busy ? "验证中" : "登录任务工作台"}</button>
-          </form>
-          <div className="auth-footer"><LockKeyhole size={14} /><span>账号由管理后台开通。AI Provider 对登录用户共享，密钥仅服务端加密保存。</span></div>
-        </section>
-      </div>
-    </>
-  );
-}
 function App() {
-  const [sessionKey, setSessionKey] = useState(0);
-  const [loggingOut, setLoggingOut] = useState(false);
-  const [logoutError, setLogoutError] = useState("");
-  const logoutLock = useRef(false);
-
-  async function handleLogout() {
-    if (logoutLock.current) return;
-    logoutLock.current = true;
-    const remoteLogout = userLogout();
-    setLoggingOut(true);
-    const results = await Promise.allSettled([remoteLogout, window.axiomDesktop?.ai?.disconnect()]);
-    const failures = results.flatMap((result, index) => result.status === "rejected"
-      ? [`${index === 0 ? "服务端任务停止未确认" : "桌面运行环境关闭失败"}：${result.reason instanceof Error ? result.reason.message : String(result.reason)}`]
-      : []);
-    setLogoutError(failures.join("；"));
-    setSessionKey((current) => current + 1);
-    setLoggingOut(false);
-    logoutLock.current = false;
-  }
-
-  if (loggingOut) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在退出并停止任务" /></div></div></>;
-  return <SessionApp key={sessionKey} onLogout={handleLogout} logoutError={logoutError} />;
-}
-
-function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; logoutError: string }) {
   const [workspace, setWorkspace] = useState<Workspace>(emptyWorkspace);
   const [view, setView] = useState<ViewKey>("console");
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -488,6 +341,8 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
   const [updateState, setUpdateState] = useState<DesktopUpdateState | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [authChecked, setAuthChecked] = useState(false);
+  const [startupError, setStartupError] = useState("");
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [user, setUser] = useState<WorkspaceUser | null>(null);
   const [streamOpen, setStreamOpen] = useState(false);
   const [agentLines, setAgentLines] = useState<AgentOutputLine[]>([]);
@@ -528,21 +383,19 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
 
   useEffect(() => {
     let active = true;
-    const existing = getUserToken();
-    if (!existing) {
+    setAuthChecked(false);
+    setStartupError("");
+    if (!getUserToken()) {
+      setStartupError("请打开 Axiom 桌面应用。单机工作区由应用自动启动，无需登录。");
       setAuthChecked(true);
       return;
     }
     userSession()
-      .then((session) => {
-        if (!active) return;
-        setUserToken(existing);
-        setUser(session.user);
-      })
-      .catch(() => { if (active) { clearUserToken(); setUser(null); } })
+      .then((session) => { if (active) setUser(session.user); })
+      .catch((error) => { if (active) setStartupError(`本机工作区无法打开：${error instanceof Error ? error.message : "请重启应用"}`); })
       .finally(() => { if (active) setAuthChecked(true); });
     return () => { active = false; };
-  }, []);
+  }, [startupAttempt]);
 
   useEffect(() => {
     const ai = window.axiomDesktop?.ai;
@@ -553,7 +406,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
     }
     const userToken = getUserToken();
     if (!userToken) return;
-    ai.connect({ apiBaseUrl: getApiBaseUrl(), userToken }).catch(() => {});
+    ai.connect({ apiBaseUrl: getApiBaseUrl(), userToken }).then(result => { if (!result.ok) notify(`本机 AI 引擎连接失败：${result.error || "请重启应用"}`); }).catch(error => notify(`本机 AI 引擎连接失败：${error instanceof Error ? error.message : "请重启应用"}`));
     return () => { ai.disconnect().catch(() => {}); };
   }, [user?.id]);
 
@@ -886,7 +739,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
     setWorkspace((current) => ({ ...current, skills: current.skills.map((item) => item.id === next.id ? next : item) }));
     notify(`${next.title} 已发布到 RAG 索引`);
       } catch (error) {
-        notify(`发布失败：${error instanceof Error ? error.message : "需要管理后台权限"}`);
+        notify(`发布失败：${error instanceof Error ? error.message : "请重试保存"}`);
       }
     });
   }
@@ -921,7 +774,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
           setLocalProviderId(user.id, provider.id);
           setLocalProviderIdState(provider.id);
         }
-        notify(editing ? `${provider.name} 已更新` : task ? `${provider.name} 已保存，并设为当前分析模型` : "Provider 已保存，所有登录用户可共享使用");
+        notify(editing ? `${provider.name} 已更新` : task ? `${provider.name} 已保存，并设为当前分析模型` : "AI 已保存到本机，可创建任务开始使用");
       } catch (error) {
         notify(`保存失败：${error instanceof Error ? error.message : "请检查接口地址、模型和密钥"}`);
         throw error;
@@ -985,7 +838,7 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
         setSelectedTaskId(created.id);
     setModal(null);
     setView("console");
-        notify(created.target.credentialStatus === "已托管" ? `任务已创建，登录凭据已保存到当前账号：${created.name}` : `任务已创建：${created.name}`);
+        notify(created.target.credentialStatus === "已托管" ? `任务已创建，目标网站凭据已加密保存到本机：${created.name}` : `任务已创建：${created.name}`);
       } catch (error) {
         notify(`创建失败：${error instanceof Error ? error.message : "请检查目标地址"}`);
         throw error;
@@ -1026,8 +879,8 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
     });
   }
 
-  if (!authChecked) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在验证桌面会话" /></div></div></>;
-  if (!user) return <UserLogin onSignedIn={setUser} initialError={logoutError} />;
+  if (!authChecked) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-panel auth-loading-panel"><LoadingStatus label="正在打开本机工作区" /></div></div></>;
+  if (!user) return <><WindowResizeHandles /><div className="auth-screen"><div className="auth-window-controls"><WindowControls /></div><div className="auth-panel"><LoadError title="本机工作区未就绪" message={startupError} onRetry={() => setStartupAttempt(value => value + 1)} /></div></div></>;
 
   return (
     <div className={["app-shell", window.axiomDesktop ? "is-desktop" : "", window.axiomDesktop?.platform ? `platform-${window.axiomDesktop.platform}` : ""].filter(Boolean).join(" ")}>
@@ -1046,12 +899,8 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
         <div className="nav-label">系统</div>
         <button className="nav-item" onClick={() => { setView("connectors"); setSidebarOpen(false); }}><Settings2 size={17} /><span>连接器</span></button>
         <div className="sidebar-bottom">
-          {(() => { const endpoint = serviceEndpointLabel(); return <div className="service-card"><span className="online-dot" /><div><b>{endpoint.title}</b><span>{endpoint.host}</span></div></div>; })()}
-          <button type="button" className="user-row user-logout" onClick={onLogout}>
-            <div className="avatar avatar-small">{user.username.slice(0, 1).toUpperCase()}</div>
-            <div><b>{user.displayName || user.username}</b><span>退出桌面端</span></div>
-            <LogOut size={14} />
-          </button>
+          <div className="service-card"><span className="online-dot" /><div><b>单机模式 · v{appVersion}</b><span>数据保存在本机 · 无需登录</span></div></div>
+          <button type="button" className="nav-item" onClick={() => { setEditingProvider(null); setModal("provider"); }}><Bot size={17} /><span>配置 AI</span></button>
         </div>
       </aside>
 
@@ -1069,8 +918,10 @@ function SessionApp({ onLogout, logoutError }: { onLogout: () => Promise<void>; 
 
         <div className={`content-scroll ${view === "console" ? "console-content" : ""}`}>
           {loadError && <LoadError title={workspaceReady ? "同步失败，当前显示上次数据" : "工作区加载失败"} message={loadError} busy={workspaceLoading} onRetry={() => setRefreshVersion((value) => value + 1)} />}
+          {workspace.health?.dbAvailable === false && <LoadError title="本机数据保存失败" message="请检查磁盘空间和数据目录权限；未成功保存的修改需重新提交。" onRetry={() => setRefreshVersion(value => value + 1)} />}
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
+          {workspace.tasks.length === 0 && !workspace.providers.some(provider => provider.configured) && <section className="panel empty-state"><Bot size={24} /><h2>配置 AI，开始使用</h2><p>无需注册或登录。填入 AI 接口地址、模型和 API Key，配置加密保存在本机。</p><button className="button button-primary" onClick={() => { setEditingProvider(null); setModal("provider"); }}>配置 AI</button></section>}
           {view === "console" && (task ? <ConsoleView task={task} currentProviderId={currentProviderId} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
@@ -1388,7 +1239,7 @@ function RulesPanel({ rules, automatic, pendingReview, onAutoJudge, busyAction }
 function WalletIcon() { return <span className="wallet-icon">¥</span>; }
 
 function EmptyTaskState({ onCreate }: { onCreate: () => void }) {
-  return <section className="panel empty-task"><div className="panel-kicker"><Workflow size={14} />还没有任务</div><h2>创建你的第一个任务</h2><p>任务仅属于当前账号。创建后可连接目标网站、托管凭据，并基于实时数据进行分析。</p><button type="button" className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>;
+  return <section className="panel empty-task"><div className="panel-kicker"><Workflow size={14} />还没有任务</div><h2>创建你的第一个任务</h2><p>任务仅属于本机。创建后可连接目标网站、托管凭据，并基于实时数据进行分析。</p><button type="button" className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>;
 }
 
 function AgentOutputDrawer({ task, lines, runs, loading, error, onRetry, onClose }: { task: Task; lines: AgentOutputLine[]; runs: AgentRun[]; loading: boolean; error: string | null; onRetry: () => void; onClose: () => void }) {
@@ -1449,7 +1300,7 @@ function defaultSessionInputs(now = Date.now()) {
 function WorkflowsView({ tasks, task, onSelect, onCreate, onEdit, onDelete, onRun, onStop, busyAction }: { tasks: Task[]; task: Task; onSelect: (taskId: string) => void; onCreate: () => void; onEdit: () => void; onDelete: (task: Task) => void; onRun: () => void; onStop: () => void; busyAction: string | null }) {
   const isRunning = taskIsMonitoring(task);
   return <>
-    <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />我的任务</div><h1>任务管理</h1><p>当前账号自行创建、切换、编辑和删除任务，其他账号无法访问。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
+    <section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />我的任务</div><h1>任务管理</h1><p>在本机创建、切换、编辑和删除任务。</p></div><button className="button button-primary" onClick={onCreate}><Plus size={16} />新建任务</button></section>
     <div className="task-management-grid">
       <section className="panel task-list-panel">
         <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />任务列表</div><h2>{tasks.length} 个任务</h2></div></div>
@@ -1476,14 +1327,14 @@ function SkillsView({ skills, rag, onCreate, onApprove, onDelete, busyAction }: 
   const filteredSkills = normalizedQuery
     ? skills.filter((skill) => [skill.title, skill.summary, skill.source, ...skill.tags].join(" ").toLocaleLowerCase().includes(normalizedQuery))
     : skills;
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>所有用户均可读取共享经验与 Skills；已审核内容用于各账号的 AI 分析，审核和删除仅限创建者。</p></div><button className="button button-primary" onClick={onCreate} disabled={busyAction !== null}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label={rag?.mode === "direct-ai" ? "经验传输" : "RAG 切片"} value={rag?.mode === "direct-ai" ? "直传 AI" : String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value={rag?.mode === "direct-ai" ? "分析提示词" : "共享知识库"} icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>共享 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span><span>操作</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} onDelete={onDelete} busyAction={busyAction} directAi={rag?.mode === "direct-ai"} />) : <div className="empty-state"><CircleDashed size={16} />{normalizedQuery ? "没有匹配的经验" : "共享知识库还没有经验；AI 会仅根据本轮实时实盘数据自主分析。"}</div>}</div></section></>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />知识与约束</div><h1>经验与 Skills</h1><p>经验与 Skills 保存在本机；审核后参与 AI 分析，可随时管理或删除。</p></div><button className="button button-primary" onClick={onCreate} disabled={busyAction !== null}><Upload size={16} />导入经验</button></section><div className="skill-summary"><SummaryTile label="已发布 Skills" value={String(approved)} icon={<BookOpen size={17} />} tone="green" /><SummaryTile label="待审核" value={String(skills.length - approved)} icon={<CirclePause size={17} />} tone="amber" /><SummaryTile label={rag?.mode === "direct-ai" ? "经验传输" : "RAG 切片"} value={rag?.mode === "direct-ai" ? "直传 AI" : String(rag?.indexedChunks || 0)} icon={<Database size={17} />} tone="blue" /><SummaryTile label="检索模式" value={rag?.mode === "direct-ai" ? "分析提示词" : "本机知识库"} icon={<Search size={17} />} tone="muted" /></div><section className="panel skills-panel"><div className="panel-header"><div><div className="panel-kicker"><FileText size={14} />知识库版本</div><h2>本机 Skills</h2></div><div className="panel-header-tools"><div className="search-field"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选标题或标签" aria-label="筛选标题或标签" /></div></div></div><div className="skill-table"><div className="table-head"><span>名称</span><span>类型</span><span>来源与标签</span><span>版本</span><span>状态</span><span>操作</span></div>{filteredSkills.length ? filteredSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onApprove={onApprove} onDelete={onDelete} busyAction={busyAction} directAi={rag?.mode === "direct-ai"} />) : <div className="empty-state"><CircleDashed size={16} />{normalizedQuery ? "没有匹配的经验" : "本机知识库还没有经验；AI 会仅根据本轮实时实盘数据自主分析。"}</div>}</div></section></>;
 }
 
 function SummaryTile({ label, value, icon, tone }: { label: string; value: string; icon: React.ReactNode; tone: string }) { return <article className="summary-tile"><span className={`summary-icon ${tone}`}>{icon}</span><div><span>{label}</span><strong className="tabular">{value}</strong></div></article>; }
 function SkillRow({ skill, onApprove, onDelete, busyAction, directAi }: { skill: Skill; onApprove: (skill: Skill) => void; onDelete: (skill: Skill) => void; busyAction: string | null; directAi?: boolean }) { const kind = skill.kind === "guardrail" ? "红线" : skill.kind === "rule" ? "规则" : "专家经验"; const deleting = busyAction === `skill-delete:${skill.id}`; return <div className="skill-row"><div className="skill-name"><span className={`skill-file ${skill.kind}`}><FileText size={16} /></span><div><strong>{skill.title}</strong><span>{skill.summary}</span></div></div><span className={`kind-label kind-${skill.kind}`}>{kind}</span><div className="skill-source"><span>{skill.source}</span><div className="tag-list">{skill.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div></div><span className="version-label tabular">{skill.version}<small>{directAi ? "直传 AI" : `${skill.chunks} 个切片`}</small></span><div>{skill.status === "APPROVED" ? <span className="approval-label"><CheckCircle2 size={14} />已发布</span> : skill.owned ? <button className="button button-small button-review" disabled={busyAction !== null} onClick={() => onApprove(skill)}><ShieldCheck size={13} />审核发布</button> : <span className="approval-label"><CirclePause size={14} />待审核</span>}</div>{skill.owned && <IconButton label={deleting ? "删除中" : `删除 ${skill.title}`} disabled={busyAction !== null} onClick={() => onDelete(skill)}>{deleting ? <RefreshCw size={13} /> : <Trash2 size={13} />}</IconButton>}</div>; }
 
 function ConnectorsView({ task, currentProviderId, providers, onConnectorTest, onConnectorDiscover, onProviderCreate, onProviderEdit, onProviderTest, onProviderModels, onProviderDelete, onSelectProvider, onCreateTask, busyAction }: { task: Task | null; currentProviderId: string; providers: Provider[]; onConnectorTest: (payload: Record<string, unknown>) => void; onConnectorDiscover: (payload: Record<string, unknown>) => void; onProviderCreate: () => void; onProviderEdit: (provider: Provider) => void; onProviderTest: (provider: Provider) => void; onProviderModels: (provider: Provider) => void; onProviderDelete: (provider: Provider) => void; onSelectProvider: (providerId: string) => void; onCreateTask: () => void; busyAction: string | null }) {
-  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>AI Provider 配置共享；本机启用选择按用户缓存，连接器和目标凭据按用户隔离。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加共享 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />共享配置 · 密钥加密</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={currentProviderId === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={true} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有共享 Provider。添加后所有登录用户可使用。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>Provider 配置对所有登录用户共享；只有创建者可编辑、验证、同步模型和删除，其他用户可读取并选择使用。密钥只返回掩码。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "实盘自动入场" : "实盘手动入场") : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode !== "LIVE" ? "禁止" : task.autoDecisionEnabled ? "入场自动 · 离场自动" : "入场手动 · 离场自动"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
+  return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />外部能力</div><h1>连接器</h1><p>配置 AI 和目标网站，模型选择与目标凭据保存在本机。</p></div><button className="button button-primary" onClick={onProviderCreate} disabled={busyAction !== null}><Plus size={16} />添加 Provider</button></section><div className="connector-grid">{task ? <TargetConnector task={task} onTest={onConnectorTest} onDiscover={onConnectorDiscover} busyAction={busyAction} /> : <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div></div><div className="empty-state"><CircleDashed size={16} />还没有任务。可先添加本机 AI Provider，再<button type="button" className="text-button" onClick={onCreateTask}>新建任务</button>连接目标。</div></section>}<section className="panel provider-panel"><div className="panel-header"><div><div className="panel-kicker"><Bot size={14} />模型接入</div><h2>AI Provider</h2></div><span className="secure-label"><LockKeyhole size={13} />本机配置 · 密钥加密</span></div><div className="provider-list">{providers.length ? providers.map((provider) => <ProviderRow key={provider.id} provider={provider} selected={currentProviderId === provider.id} onEdit={onProviderEdit} onTest={onProviderTest} onModels={onProviderModels} onDelete={onProviderDelete} onSelect={onSelectProvider} canSelect={true} busy={busyAction !== null} testing={busyAction === `provider-test:${provider.id}`} syncing={busyAction === `provider-models:${provider.id}`} />) : <div className="empty-state"><CircleDashed size={16} />还没有本机 Provider。添加后本机任务可使用。</div>}</div><div className="provider-note"><ShieldCheck size={15} /><span>Provider 可供本机任务使用，可随时编辑、验证、同步模型或删除。密钥加密保存，页面只显示掩码。</span></div></section></div>{task && <section className="panel permissions-panel"><div className="panel-header"><div><div className="panel-kicker"><KeyRound size={14} />权限边界</div><h2>当前任务授权</h2></div><span className="mode-chip">{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "实盘自动入场" : "实盘手动入场") : task.mode === "SHADOW" ? "影子记录" : "观察 / 建议"}</span></div><div className="permission-grid"><PermissionItem icon={<EyeIcon />} label="读取行情与历史数据" status="允许" tone="green" /><PermissionItem icon={<UserRound size={16} />} label="读取账户与持仓" status="允许" tone="green" /><PermissionItem icon={<ListChecks size={16} />} label="提出交易计划" status="受控" tone="amber" /><PermissionItem icon={<LockKeyhole size={16} />} label="提交订单" status={task.mode !== "LIVE" ? "禁止" : task.autoDecisionEnabled ? "入场自动 · 离场自动" : "入场手动 · 离场自动"} tone={task.mode === "LIVE" ? "amber" : "red"} /><PermissionItem icon={<LockKeyhole size={16} />} label="修改风控与资金" status="禁止" tone="red" /></div></section>}</>;
 }
 
 function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task; onTest: (payload: Record<string, unknown>) => void; onDiscover: (payload: Record<string, unknown>) => void; busyAction: string | null }) {
@@ -1509,7 +1360,7 @@ function TargetConnector({ task, onTest, onDiscover, busyAction }: { task: Task;
   }
   const connectionReady = ["connected", "readonly_ready", "browser_ready"].includes(task.target.connectionStatus);
   const connectionLabel = displayLabel(task.target.connectionStatus, connectionLabels, "待确认");
-  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "当前账号的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用当前账号凭据" : "写入当前账号的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>凭据绑定当前登录用户。同一网站下次创建任务或重新登录会自动复用，其他账号看不到。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><BusyIcon busy={busyAction === "connector"}><RefreshCw size={15} /></BusyIcon>{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
+  return <section className="panel target-panel"><div className="panel-header"><div><div className="panel-kicker"><Waypoints size={14} />目标连接</div><h2>网站 / 桌面 App</h2></div><span className={`connection-state ${connectionReady ? "connected" : ""}`}><span />{connectionLabel}</span></div><div className="segmented-control"><button type="button" className={type === "website" ? "selected" : ""} onClick={() => setType("website")}><Globe2 size={14} />网站</button><button type="button" className={type === "app" ? "selected" : ""} onClick={() => setType("app")}><Laptop size={14} />桌面 App</button></div><form className="connector-form" onSubmit={submit}><label>目标名称<input value={name} onChange={(event) => setName(event.target.value)} /></label>{type === "website" ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" type="url" /></label> : <><label>安装路径<input value={installPath} onChange={(event) => setInstallPath(event.target.value)} placeholder="/Applications/App.app 或 C:\\Program Files\\App" /></label><label>应用标识<input value={appId} onChange={(event) => setAppId(event.target.value)} placeholder="应用名称或 Bundle ID（可选）" /></label></>}<div className="target-discovery"><div><span className={`discovery-dot ${task.target.discoveryStatus === "已发现" ? "ready" : ""}`} /><div><b>{task.target.discoveryStatus || "未发现"}</b><small>{task.target.adapterStatus || "输入目标后自动发现连接器"}</small></div></div><button type="button" className="button button-small button-quiet" onClick={() => onDiscover({ taskId: task.id, type, name, url, installPath, appId })} disabled={busyAction !== null || (type === "website" ? !url : !installPath && !appId)}>{busyAction === "discover" ? "发现中" : "自动发现"}</button></div><label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder={hosted ? `已托管 ${task.target.accountLabel}，留空复用` : "本机的目标登录名"} /></label><label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" type="password" placeholder={hosted ? "已托管，留空以复用本机凭据" : "写入本机的加密托管"} /></label><div className="credential-note"><LockKeyhole size={14} /><span>这是目标网站的登录凭据，加密保存在本机；同一网站的任务可复用。Axiom 本身无需登录。</span></div><button className="button button-secondary button-full" type="submit" disabled={busyAction !== null}><BusyIcon busy={busyAction === "connector"}><RefreshCw size={15} /></BusyIcon>{busyAction === "connector" ? "测试中" : "测试登录与连接"}</button></form></section>;
 }
 
 function ProviderRow({ provider, selected, onEdit, onTest, onModels, onDelete, onSelect, canSelect, busy, testing, syncing }: { provider: Provider; selected: boolean; onEdit: (provider: Provider) => void; onTest: (provider: Provider) => void; onModels: (provider: Provider) => void; onDelete: (provider: Provider) => void; onSelect: (providerId: string) => void; canSelect: boolean; busy: boolean; testing: boolean; syncing: boolean }) { const status = displayLabel(provider.status, providerStatusLabels, provider.configured ? "已配置" : "未配置"); return <div className={`provider-row ${selected ? "selected" : ""}`}><span className="provider-logo">{provider.name.slice(0, 1)}</span><div className="provider-copy"><strong>{provider.name}</strong><span>{provider.model} <i>·</i> {provider.baseUrl || "未设置接口地址"}</span></div><span className={`provider-status ${provider.status === "模型可用" ? "configured" : ""}`}><span />{status}</span><span className="key-preview"><KeyRound size={13} />{provider.keyPreview || "未配置密钥"}</span><div className="provider-actions"><button type="button" className={`button button-small ${selected ? "button-primary" : "button-quiet"}`} disabled={busy || !provider.configured || !canSelect} onClick={() => onSelect(provider.id)}>{selected ? "使用中" : "使用"}</button>{provider.owned ? <><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onEdit(provider)}><Pencil size={13} />编辑</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onModels(provider)}><BusyIcon busy={syncing}><Download size={13} /></BusyIcon>{syncing ? "同步中" : "模型"}</button><button type="button" className="button button-small button-quiet" disabled={busy || !provider.configured} onClick={() => onTest(provider)}><BusyIcon busy={testing}><RefreshCw size={13} /></BusyIcon>{testing ? "推理中" : "验证"}</button><button type="button" className="button button-small button-quiet" disabled={busy} onClick={() => onDelete(provider)}><Trash2 size={13} />删除</button></> : <span className="provider-shared-label">共享只读</span>}</div></div>; }
@@ -1580,7 +1431,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
     }
   }
   return (
-    <ModalShell title="创建任务" subtitle="目标登录凭据按当前用户保存；AI Provider 对所有登录用户共享，可在连接器中选择。" onClose={busy ? () => {} : onClose}>
+    <ModalShell title="创建任务" subtitle="目标网站凭据加密保存在本机；可选择已配置的 AI Provider。" onClose={busy ? () => {} : onClose}>
       <form className="modal-form" onSubmit={submit}>
         <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
         <div className="form-row">
@@ -1597,13 +1448,13 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
           <label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label>
         </div>
         <label>登录账号<input value={username} onChange={(event) => setUsername(event.target.value)} placeholder={saved ? `已保存 ${saved.accountLabel}，留空则复用` : "目标网站登录名"} autoComplete="username" required={!saved} /></label>
-        <label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} placeholder={saved ? "已保存到当前账号，留空则复用" : "加密保存到当前登录用户"} autoComplete="new-password" type="password" required={!saved} /></label>
+        <label>登录密码<input value={password} onChange={(event) => setPassword(event.target.value)} placeholder={saved ? "已保存到本机，留空则复用" : "加密保存到本机"} autoComplete="new-password" type="password" required={!saved} /></label>
         <div className="form-section-label">行情分析端（可选）</div>
         <label>分析端名称<input value={analysisName} onChange={(event) => setAnalysisName(event.target.value)} placeholder="行情分析端" /></label>
         <label>分析端 Web 地址<input value={analysisUrl} onChange={(event) => setAnalysisUrl(event.target.value)} type="url" placeholder="https://analysis.example.com" /></label>
-        {analysisUrl ? <><label>分析端账号<input value={analysisUsername} onChange={(event) => setAnalysisUsername(event.target.value)} autoComplete="username" placeholder="行情分析端账号" /></label><label>分析端密码<input value={analysisPassword} onChange={(event) => setAnalysisPassword(event.target.value)} autoComplete="new-password" type="password" placeholder="加密保存到当前登录用户" /></label></> : null}
+        {analysisUrl ? <><label>分析端账号<input value={analysisUsername} onChange={(event) => setAnalysisUsername(event.target.value)} autoComplete="username" placeholder="行情分析端账号" /></label><label>分析端密码<input value={analysisPassword} onChange={(event) => setAnalysisPassword(event.target.value)} autoComplete="new-password" type="password" placeholder="加密保存到本机" /></label></> : null}
         <div className="modal-footnote"><Globe2 size={14} />分析端独立于交易端，当前先保存地址和账号凭据，后续适配器可读取其指标数据并合并分析。</div>
-        <div className="modal-footnote"><LockKeyhole size={14} />{saved ? "当前账号已有该网站凭据，密码留空会自动复用。AI Provider 可共享使用。" : "账号密码绑定当前登录用户，写入服务端加密托管。下次登录同一账号不用再填。"}</div>
+        <div className="modal-footnote"><LockKeyhole size={14} />{saved ? "本机已有该网站凭据，密码留空会自动复用。" : "目标网站账号密码加密保存在本机，下次打开应用可复用。"}</div>
         <div className="modal-actions">
           <button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button>
           <button type="submit" className="button button-primary" disabled={busy}><BusyIcon busy={busy}><Plus size={15} /></BusyIcon>{busy ? "创建中" : "创建任务"}</button>
@@ -1613,7 +1464,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   );
 }
 
-function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后，所有用户的 AI 分析均可使用该经验。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><BusyIcon busy={busy}><FileText size={15} /></BusyIcon>{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
+function SkillModal({ onClose, onSave }: { onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) { const [title, setTitle] = useState(""); const [kind, setKind] = useState("expert"); const [tags, setTags] = useState("BTC/USDT,15m"); const [content, setContent] = useState(""); const [filename, setFilename] = useState("手动输入"); const [busy, setBusy] = useState(false); const lock = useRef(false); function chooseFile(event: ChangeEvent<HTMLInputElement>) { const file = event.target.files?.[0]; if (!file) return; setFilename(file.name); file.text().then(setContent); if (!title) setTitle(file.name.replace(/\.[^.]+$/, "")); } async function submit(event: FormEvent) { event.preventDefault(); if (lock.current) return; lock.current = true; setBusy(true); try { await onSave({ title: title || filename, kind, tags, content, filename }); } catch { lock.current = false; setBusy(false); } } return <ModalShell title="导入专家经验" subtitle="文件或文本会保存为待审核草稿，不会立即影响决策。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><div className="upload-drop"><Upload size={20} /><div><strong>拖入 Markdown / TXT</strong><span>或点击选择本地文件</span></div><input type="file" accept=".md,.txt,.markdown,.json" onChange={chooseFile} aria-label="选择经验文件" /></div><label>Skill 标题<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：趋势突破与回撤红线" /></label><div className="form-row"><label>知识类型<select value={kind} onChange={(event) => setKind(event.target.value)}><option value="expert">专家经验</option><option value="rule">规则</option><option value="redline">红线</option></select></label><label>适用标签<input value={tags} onChange={(event) => setTags(event.target.value)} /></label></div><label>内容<textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入触发条件、建议动作、禁止动作、失效条件和证据来源..." rows={7} /></label><div className="modal-footnote"><ShieldCheck size={14} />审核发布后，本机任务的 AI 分析可使用该经验。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !content.trim()}><BusyIcon busy={busy}><FileText size={15} /></BusyIcon>{busy ? "保存中" : "保存草稿"}</button></div></form></ModalShell>; }
 
 function ProviderModal({ provider, onClose, onSave }: { provider: Provider | null; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
   const [name, setName] = useState(provider?.name || "");
@@ -1650,7 +1501,7 @@ function ProviderModal({ provider, onClose, onSave }: { provider: Provider | nul
     }
   }
   const knownModels = [...new Set([model, ...(provider?.models || []), ...models.split(/[\n,]/)].map((item) => item.trim()).filter(Boolean))];
-  return <ModalShell title={provider ? "编辑 AI Provider" : "添加 AI Provider"} subtitle="配置与模型列表对所有登录用户共享；只有创建者可修改或删除，API Key 在服务端加密保存。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>{fullUrlMode ? "完整模型请求 URL" : "接口根地址"}<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={fullUrlMode ? "https://api.example.com/v1/chat/completions" : "https://api.example.com/v1"} type="url" required disabled={busy} /></label><label className="checkbox-label"><input type="checkbox" checked={fullUrlMode} onChange={(event) => setFullUrlMode(event.target.checked)} disabled={busy} /><span>完整 URL 模式（不自动拼接请求路径）</span></label><div className="form-row"><label>默认模型<input value={model} onChange={(event) => setModel(event.target.value)} list={`provider-models-${provider?.id || "new"}`} placeholder="任意模型 ID" required disabled={busy} /><datalist id={`provider-models-${provider?.id || "new"}`}>{knownModels.map((item) => <option value={item} key={item} />)}</datalist></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select></label></div><label>其他可用模型（可选，每行一个）<textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-chat&#10;deepseek-reasoner" rows={3} disabled={busy} /></label><label>模型列表 URL（可选）<input value={modelsUrl} onChange={(event) => setModelsUrl(event.target.value)} placeholder="留空时根据协议自动推导 /models" type="url" disabled={busy} /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider ? "留空保持原密钥不变" : "服务端加密保存，共享使用"} type="password" autoComplete="new-password" required={!provider} disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />模型 ID 不设白名单。保存后可点「模型」从 Provider 同步列表，点「验证」会调用当前模型完成一次真实推理，不再只检查 /models。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><BusyIcon busy={busy}><KeyRound size={15} /></BusyIcon>{busy ? "保存中" : provider ? "保存修改" : "保存并共享"}</button></div></form></ModalShell>;
+  return <ModalShell title={provider ? "编辑 AI Provider" : "添加 AI Provider"} subtitle="配置 AI 接口、模型与 API Key，密钥加密保存在本机，无需平台账号。" onClose={busy ? () => {} : onClose}><form className="modal-form" onSubmit={submit}><label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus placeholder="例如：自建网关" disabled={busy} /></label><label>{fullUrlMode ? "完整模型请求 URL" : "接口根地址"}<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder={fullUrlMode ? "https://api.example.com/v1/chat/completions" : "https://api.example.com/v1"} type="url" required disabled={busy} /></label><label className="checkbox-label"><input type="checkbox" checked={fullUrlMode} onChange={(event) => setFullUrlMode(event.target.checked)} disabled={busy} /><span>完整 URL 模式（不自动拼接请求路径）</span></label><div className="form-row"><label>默认模型<input value={model} onChange={(event) => setModel(event.target.value)} list={`provider-models-${provider?.id || "new"}`} placeholder="任意模型 ID" required disabled={busy} /><datalist id={`provider-models-${provider?.id || "new"}`}>{knownModels.map((item) => <option value={item} key={item} />)}</datalist></label><label>协议<select value={apiFormat} onChange={(event) => setApiFormat(event.target.value)} disabled={busy}><option value="auto">自动识别</option><option value="responses">OpenAI Responses</option><option value="chat">OpenAI Chat Completions</option><option value="anthropic">Anthropic Messages</option><option value="gemini">Google Gemini</option></select></label></div><label>其他可用模型（可选，每行一个）<textarea value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-chat&#10;deepseek-reasoner" rows={3} disabled={busy} /></label><label>模型列表 URL（可选）<input value={modelsUrl} onChange={(event) => setModelsUrl(event.target.value)} placeholder="留空时根据协议自动推导 /models" type="url" disabled={busy} /></label><label>API Key<input value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider ? "留空保持原密钥不变" : "加密保存在本机"} type="password" autoComplete="new-password" required={!provider} disabled={busy} /></label><div className="modal-footnote"><LockKeyhole size={14} />模型 ID 不设白名单。保存后可点「模型」从 Provider 同步列表，点「验证」会调用当前模型完成一次真实推理，不再只检查 /models。</div><div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy}><BusyIcon busy={busy}><KeyRound size={15} /></BusyIcon>{busy ? "保存中" : provider ? "保存修改" : "保存配置"}</button></div></form></ModalShell>;
 }
 
 function TradeConfirmModal({ task, pending, busyAction, onConfirm, onCancel }: { task: Task; pending: PendingAction; busyAction: string | null; onConfirm: () => void; onCancel: () => void }) {

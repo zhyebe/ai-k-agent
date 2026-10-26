@@ -163,6 +163,11 @@ export async function createUserSession(username, password) {
 }
 
 export function getUserSession(token) {
+  if (process.env.AXIOM_STANDALONE === "1") {
+    const expected = process.env.AXIOM_LOCAL_TOKEN;
+    if (!expected || !sameSecret(token, expected)) return null;
+    return { user: { id: "local-user", username: "local", displayName: "本机工作区", status: "ACTIVE", assignedTaskIds: [] }, expiresAt: "9999-12-31T23:59:59.999Z" };
+  }
   const key = tokenHash(token);
   const session = sessions.get(key);
   if (!session || session.expiresAt <= Date.now()) {

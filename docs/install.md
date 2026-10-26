@@ -1,102 +1,51 @@
-# 本地安装与试运行
+# Axiom Agent v1.0 安装与使用
 
-生产上线（拓扑、环境变量、MySQL、systemd、Nginx、桌面端对接、发布与排障）见 [deploy.md](./deploy.md)。
+## 安装
 
-Axiom 用户端是 Electron 桌面应用，后台管理是浏览器访问的 B/S 页面。当前版本支持观察、影子记录和 LIVE 实盘自动执行；LIVE 任务在目标页登录且交易开关开启时由 Agent 自动提交订单并离场。服务端仍禁止撤单、提现和绕过目标页执行。
+macOS 使用对应架构的 DMG，将 Axiom Agent 拖入 Applications；Windows 使用 setup.exe，或解压后运行 portable.exe。安装包自带运行环境，不需要单独安装 Node.js、数据库、浏览器或部署服务器。
 
-生产拓扑：Node.js API、MySQL/MongoDB 和后台静态页面部署在服务器；桌面端只连接 API，不承担账号、任务分配或数据库存储。一个 API 实例必须使用共享持久化数据库，不能让后台和桌面各自启动内存服务。
+打开应用直接进入本机工作区。无需 Axiom 账号、密码、授权码或服务地址。点击「配置 AI」，填写接口地址、模型、协议与 API Key，在连接器中验证即可使用。目标网站本身的登录要求不变。
 
-## 1. 准备
+## 数据目录
 
-- Node.js 20+
-- 可选：Docker MySQL / MongoDB
-- 目标网站 Chrome 可访问；本机已安装 Chrome 时，分析会优先读取可见页面
+正式安装版默认位置：
 
-复制环境变量：
+- macOS：`~/Library/Application Support/Axiom Agent/standalone/`
+- Windows：`%APPDATA%\Axiom Agent\standalone\`
 
-```bash
-cp .env.example .env
-```
+源码开发版通常使用 `axiom-agent` 作为应用目录名。目录实际由 Electron `app.getPath("userData")` 决定。
 
-至少修改：
+`workspace.json` 保存任务、经验和加密的 AI 配置；`.axiom-secret` 是解密所需密钥；`credentials.vault.json` 保存加密的目标凭据。退出应用后备份整个应用数据目录，可同时保存模型选择和 `browser-profiles` 中的目标网站登录状态。
 
-- `APP_SECRET`
-- `ADMIN_PASSWORD`
-- `DESKTOP_USERNAME` / `DESKTOP_PASSWORD`（首次启动会创建桌面用户，并分配已有任务）
+缺失密钥、损坏数据或磁盘不可写时，应用会明确提示错误。请恢复原始备份或解决目录权限问题，不要删除密钥后继续使用旧数据。
 
-浏览器白名单需包含目标域名，例如：
+## 从 v0.3 升级
 
-```dotenv
-BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1,smyw.haohandahan.cn
-```
+v1.0 不连接旧服务器，也不会自动同步旧账号下的任务、Provider 或经验。旧数据不会被删除或覆盖。首次进入 v1.0 后重新配置 AI；需要保留的经验可导出文本后通过「导入经验」添加。
 
-## 2. 数据库
+内置交易 Skill 在新工作区初始化一次。更新应用不会覆盖用户经验，删除的 Skill 不会重新出现。
 
-本地快速演示可用内存仓储：`DB_MODE=memory`。需要验证后台分配和桌面登录时，必须使用同一个 MySQL/Mongo API 实例；不要同时启动多个内存 API。
+## 运行
 
-MySQL：
+应用退出后本机引擎和内嵌浏览器关闭。重新打开时任务保持暂停；确认模型、目标页面和持仓后再启动。关闭应用不会自动处理已有实盘持仓。
 
-```bash
-mysql -h127.0.0.1 -P3306 -uroot -p < db/mysql/schema.sql
-```
+本地配置与工作台无需网络；在线模型、目标网站与更新下载需要各自的网络连接。检查更新失败不影响本机工作区。
 
-```dotenv
-HOST=127.0.0.1
-DB_MODE=mysql
-MYSQL_URL=mysql://root:<password>@127.0.0.1:3306/axiom_agent
-ALLOW_MEMORY_FALLBACK=0
-```
-
-MongoDB 执行 `db/mongo/indexes.js`，并设置 `DB_MODE=mongo`。
-
-登录态保存在 `user_sessions`。会话过期后，桌面端需要重新登录；分析过程若发现目标网站回到登录页，会使用托管凭据自动填充并提交登录，但不会提交买卖表单。
-
-AI Provider 保存在 `providers` 表：API Key 用 `APP_SECRET` 做 AES-256-GCM 加密后写入 `encrypted_key`，接口只返回脱敏预览。不要把业务密钥提交到 Git。
-
-## 3.1 持续监控生命周期
-
-「开始观察」只创建后台监控控制器，不代表只执行一次。服务端在任务进程中持续运行，直到用户点击「停止观察」或任务被明确切换为人工接管：
-
-1. 启动后立即执行首轮连接、登录、只读采集和分析。
-2. 首轮完成后按轮询间隔再次读取目标页面和只读行情；浏览器会话复用，不因每轮检查主动刷新登录态。
-3. 每次采集包含主周期历史 K 线、配置周期（默认 `1m,1h,1d,1mo`）、实时逐笔、页面可见字段和账户只读字段。周期由 `HAOHAN_ANALYSIS_TIMEFRAMES` 控制，历史根数由 `HAOHAN_KLINE_COUNT` 控制。交给模型前会按上海时区再分层：近 1 小时用分钟 K，1 小时前至昨天 00:00 用小时 K，昨天之前至上个月用日 K，上月以前用月 K；秒级逐笔不会进入模型上下文。
-4. 服务端对规范化行情计算指纹。行情未变化时只记录一次检查并跳过模型请求；首次检查、上次模型失败或指纹变化时，才把当前完整快照交给 AI，并附带最近监控轮次作为多轮上下文。
-5. 网络、登录或模型异常不会结束任务。控制器使用退避后继续重试；`monitoringEnabled=true` 时，即使界面状态显示「已暂停」，后台仍会继续只读监测，直到用户停止。
-6. 点击「停止观察」会写入停止锁、清除下一次定时器。正在执行的轮次结束后也不能创建新轮次、订单或交易写请求。
-
-普通监控轮次完成后立即开始下一轮；LIVE 出现买卖提示时自动提交并继续监控，观察模式才等待确认。监控轮次只分析最近 1 小时分钟数据。设置 `MONITOR_POLL_INTERVAL_MS` 可显式增加轮询间隔，范围为 1-120 秒；分析失败时使用最小退避重试。轮询是实时变化探测频率，不等于等待一根 K 线收盘；只有行情指纹变化才触发 AI 分析。
-
-## 4. 本地运行
+## 源码启动与打包
 
 ```bash
 npm install
 npm run dev
 ```
 
-- 用户端：`http://127.0.0.1:5173/`
-- 后台：`http://127.0.0.1:5173/admin.html`
-- 桌面端：`npm run dev:desktop`
-
-首次进入用户端使用 `DESKTOP_USERNAME` 登录。若未配置桌面用户，先到后台「账号与分配」创建账号并分配任务。后台只管理账号、密码、分配和日志；连接器、Provider、Skills 和分析配置在桌面端完成。服务端用 `x-admin-token` 和 `x-user-token` 分隔两类会话：管理令牌不能读取或操作客户端工作区，凭据、连接器和任务配置按桌面账号保存；Provider、Skills 与经验共享，模型启用选择只缓存于当前桌面并按用户隔离。后台和用户端都必须指向同一个 API 地址；桌面登录页的「服务地址」可保存服务器 URL。
-
-桌面端默认连接 `http://127.0.0.1:8787`，地址保存在本机应用配置中。打包客户端默认不会自启 API；仅设置 `AXIOM_EMBEDDED_API=1` 时才启用一次性本地内嵌服务，不能用于多人或生产部署。
-
-## 5. 建议试运行
-
-1. 在连接器中填写目标 URL 和登录账号密码，测试连接（密码写入本地 Vault）。
-2. 打开任务控制台，点击「立即分析」。
-3. 打开「查看 Agent 输出流」，确认阶段为 `connect → login → collect → analyze → rules → action`。
-4. `BUY` / `SELL` 只会显示为建议，`action` 阶段应出现“未创建订单”。
-5. 保持页面运行数个轮询周期，确认输出流出现多条「本轮只读行情与上轮一致，跳过模型请求」或新的分析轮次；修改行情后应看到新的模型轮次和上一轮上下文。
-6. 点击「停止观察」，确认不再新增运行记录。
-
-实盘自动或手动入场的单笔数量上限固定为 1；先确认 AXIOM_TRADING_ENABLED、真实目标登录态和目标盘口。
-
-## 6. 打包
+无需 `.env`。桌面应用忽略历史 `AXIOM_API_URL`、`connection.json`、MySQL/MongoDB 和登录配置。本机引擎仅绑定 `127.0.0.1`，操作系统分配空闲端口，应用自动连接；没有需要用户配置或部署的 API 服务。
 
 ```bash
+npm run check
+npm test
+npm run test:standalone
 npm run dist:mac
 npm run dist:win
 ```
 
-安装包输出到 `release/`。GitHub Release、Nginx 与 systemd 见 [deploy.md](./deploy.md) 与仓库 README。未签名的 macOS 包只适合本机测试。
+`npm start` 构建并打开桌面应用。`npm run dev:web` 仅用于开发界面；`npm run dev:api` 和部署脚本属于历史服务器维护入口，单机版无需运行。

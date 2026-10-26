@@ -1,8 +1,8 @@
 {
   "name": "axiom-agent",
-  "version": "0.3.133",
+  "version": "1.0.0",
   "private": true,
-  "description": "Axiom Agent desktop workflow console",
+  "description": "Axiom Agent standalone desktop workspace",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
   "repository": {
     "type": "git",
@@ -11,10 +11,10 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:api\"",
+    "dev": "npm run dev:desktop",
     "dev:web": "vite --host 127.0.0.1 --port 5173",
     "dev:api": "node server/index.mjs",
-    "dev:desktop": "concurrently -k \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "dev:desktop": "concurrently -k \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
     "electron": "electron .",
     "api": "node server/index.mjs",
     "mcp": "node mcp/server.mjs",
@@ -35,7 +35,9 @@
     "dist:win": "npm run build && electron-builder --win",
     "release": "npm run build && electron-builder --publish always",
     "release:mac": "npm run build && electron-builder --mac --universal --publish always",
-    "release:win": "npm run build && electron-builder --win --x64 --publish always"
+    "release:win": "npm run build && electron-builder --win --x64 --publish always",
+    "start": "npm run build && electron .",
+    "test:standalone": "node --test tests/standalone*.test.mjs && node scripts/standalone-smoke.cjs"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
@@ -72,7 +74,8 @@
       "electron/browser-host.cjs",
       "node_modules/ws/**",
       "node_modules/playwright/**",
-      "node_modules/playwright-core/**"
+      "node_modules/playwright-core/**",
+      "node_modules/**"
     ],
     "files": [
       "dist/index.html",

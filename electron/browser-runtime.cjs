@@ -50,7 +50,7 @@ async function loadModules(app) {
 function scopedSession(message, apiBaseUrl) {
   const input = message.input || {};
   const sessionId = input.sessionId || input.task?.target?.browserSessionId || `task:${input.task?.id}`;
-  return crypto.createHash("sha256").update(`${apiBaseUrl}\n${message.userId}\n${sessionId}`).digest("hex").slice(0, 32);
+  return crypto.createHash("sha256").update(`${process.env.AXIOM_STANDALONE === "1" ? "standalone" : apiBaseUrl}\n${message.userId}\n${sessionId}`).digest("hex").slice(0, 32);
 }
 
 function browserOperationPriority(method) {

@@ -9,15 +9,11 @@ on:
       release_tag:
         description: Existing or new release tag to publish
         required: true
-        default: v0.3.0
+        default: v1.0.0
       artifact_run_id:
         description: Reuse artifacts from a previous release run without rebuilding
         required: false
         type: string
-      deploy_after_release:
-        description: Deploy the API after publishing the desktop release
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -71,6 +67,10 @@ jobs:
           AXIOM_DESKTOP_EXECUTABLE: release/mac-universal/Axiom Agent.app/Contents/MacOS/Axiom Agent
           AXIOM_SMOKE_OUTPUT: release/smoke
         run: npm run test:desktop-browser
+      - name: Verify packaged macOS standalone workspace
+        env:
+          AXIOM_DESKTOP_EXECUTABLE: release/mac-universal/Axiom Agent.app/Contents/MacOS/Axiom Agent
+        run: node scripts/standalone-smoke.cjs
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -122,6 +122,10 @@ jobs:
           AXIOM_DESKTOP_EXECUTABLE: release/win-unpacked/Axiom Agent.exe
           AXIOM_SMOKE_OUTPUT: release/smoke
         run: npm run test:desktop-browser
+      - name: Verify packaged Windows standalone workspace
+        env:
+          AXIOM_DESKTOP_EXECUTABLE: release/win-unpacked/Axiom Agent.exe
+        run: node --test tests/standalone-persistence.test.mjs tests/standalone-runtime.test.mjs; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; node scripts/standalone-smoke.cjs
       - name: Verify Windows artifacts
         shell: pwsh
         run: |
@@ -182,6 +186,11 @@ jobs:
             echo "latest.yml must point auto-update at the NSIS setup, not portable" >&2
             exit 1
           fi
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
+          path: source
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -192,22 +201,18 @@ jobs:
         run: |
           mapfile -t assets < <(find release -maxdepth 1 -type f -print | sort)
           test "${#assets[@]}" -gt 0
+          notes="source/docs/release-$RELEASE_TAG.md"
+          test -s "$notes"
           gh api "repos/$GH_REPO/releases?per_page=100" --paginate | \
             jq -r --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag) | .id' > release-id.txt
           if ! test -s release-id.txt; then
             gh release create "$RELEASE_TAG" --draft --target "$RELEASE_SHA" \
               --title "Axiom Agent $RELEASE_TAG" \
-              --generate-notes
+              --notes-file "$notes"
           fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          gh release edit "$RELEASE_TAG" --notes-file "$notes"
           release_draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
           if [ "$release_draft" = true ]; then
             gh release edit "$RELEASE_TAG" --draft=false --latest
           fi
-      - name: Deploy published version
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.deploy_after_release }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-        run: gh workflow run deploy.yml --ref main -f ref="$RELEASE_TAG"

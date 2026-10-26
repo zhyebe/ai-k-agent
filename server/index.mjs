@@ -1,4 +1,5 @@
-import "dotenv/config";
+import "./runtime-config.mjs";
+import { readFile } from "node:fs/promises";
 import crypto from "node:crypto";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
@@ -24,6 +25,16 @@ import { Readable } from "node:stream";
 import { closeAllBrowserSessions } from "./browser.mjs";
 
 const app = Fastify({ logger: false, bodyLimit: 8 * 1024 * 1024 });
+const standalone = process.env.AXIOM_STANDALONE === "1";
+if (standalone) app.addHook("onRequest", async (request, reply) => {
+  const pathname = request.url.split("?")[0];
+  if (pathname.startsWith("/api/admin/") || ["/api/user/login", "/api/user/logout"].includes(pathname)) {
+    return reply.code(404).send({ error: "NOT_AVAILABLE_IN_STANDALONE" });
+  }
+  if (request.method === "OPTIONS") return;
+  const token = userTokenFromRequest(request) || new URL(request.url, "http://127.0.0.1").searchParams.get("userToken");
+  if (!getUserSession(token)) return reply.code(401).send({ error: "LOCAL_RUNTIME_ACCESS_DENIED" });
+});
 await app.register(cors, {
   origin: (origin, callback) => callback(null, isAllowedCorsOrigin(origin, {
     extraOrigins: parseCsv(process.env.CORS_ALLOWED_ORIGINS),
@@ -41,11 +52,22 @@ let stateLoadFailed = false;
 try {
   restoredState = await persistence.loadState?.() || null;
 } catch (error) {
+  if (standalone) throw error;
   stateLoadFailed = true;
   console.error("persistence.loadState failed", error);
   restoredState = null;
 }
 hydrateState(restoredState);
+if (standalone) {
+  for (const task of state.tasks) {
+    task.monitoringEnabled = false;
+    task.stopLocked = true;
+    task.status = "PAUSED";
+    task.nextPollAt = null;
+    task.nextTrigger = "应用已重启，请确认行情和持仓后启动任务";
+    if (task.target) delete task.target.browserSessionId;
+  }
+}
 const restoredCredentials = await persistence.loadCredentials?.().catch(() => []);
 await initVault({ persistedRecords: restoredCredentials });
 setVaultPersistence(persistence);
@@ -206,11 +228,11 @@ function rememberConnector(profile, auth) {
   return next;
 }
 
-function upsertConnector(profile, auth) {
+async function upsertConnector(profile, auth) {
   const next = rememberConnector(profile, auth);
+  await persistConnector(next);
   state.connectors = state.connectors.filter((item) => item.connectorId !== next.connectorId);
   state.connectors.unshift(next);
-  persistConnector(next);
   return next;
 }
 
@@ -417,8 +439,19 @@ if (stateLoadFailed) {
   console.error("skip persistHydratedDefaults/bootstrapDesktopUser: database state was not restored");
 } else {
   if (restoredState) await persistHydratedDefaults();
-  await bootstrapDesktopUser();
-  await migrateTenantOwnership();
+  if (standalone) {
+    if (!restoredState) {
+      const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
+      if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
+      const skill = { id: "skill_local_trading", ownerUserId: "local-user", title: "AI 趋势交易：入场、持仓与离场", kind: "expert", status: "APPROVED", version: "v1.0.0", tags: ["优先参考"], source: "应用内置", content, summary: "主动趋势预测、多空持仓、闪 K 排除与条件离场", chunks: 0, createdAt: new Date().toISOString() };
+      await persistSkill(skill);
+      state.skills.push(skill);
+      indexSkill(skill);
+    }
+  } else {
+    await bootstrapDesktopUser();
+    await migrateTenantOwnership();
+  }
 }
 
 app.get("/api/health", async () => ({ ok: true, service: "axiom-api", uptimeSec: Math.round(process.uptime()), persistence: await persistence.health(), persistentSecret: hasPersistentSecret(), vault: vaultStatus(), adapters: listConnectorAdapters().length }));
@@ -582,7 +615,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
   const hasTarget = targetType === "website" ? Boolean(String(body.url || "").trim()) : Boolean(String(body.installPath || body.appId || "").trim());
   if (hasTarget) {
     try { profile = discoverConnector(targetInput); } catch (error) { return reply.code(400).send({ error: error.message }); }
-    profile = upsertConnector(profile, request.auth);
+    profile = await upsertConnector(profile, request.auth);
   }
   let resolved = { credentialRef: "", accountLabel: "未配置", credentialOwnerUserId: "", hasCredential: false };
   if (profile) {
@@ -676,8 +709,8 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     nextPollAt: null,
     analysisCoverage: null,
   };
-  state.tasks.unshift(task);
   await persistTask(task);
+  state.tasks.unshift(task);
   addEvent("task_created", `已创建任务：${task.name}`, { taskId: task.id, userId: request.auth.user.id });
   broadcast();
   return reply.code(201).send({ task: publicTask(task) });
@@ -857,7 +890,7 @@ app.get("/api/credentials", { preHandler: requireWorkspaceAccess }, async (reque
 app.post("/api/connectors/discover", { preHandler: requireConnectorAccess }, async (request, reply) => {
   try {
     const body = request.body || {};
-    const profile = upsertConnector(discoverConnector(body), request.auth);
+    const profile = await upsertConnector(discoverConnector(body), request.auth);
     const task = body.taskId ? getTask(String(body.taskId)) : null;
     if (task) {
       applyConnectorToTask(task, profile);
@@ -902,7 +935,7 @@ app.post("/api/connectors/test", { preHandler: requireConnectorAccess }, async (
     const credentialOwnerUserId = resolved.credentialOwnerUserId;
     const accountLabel = resolved.accountLabel;
     const credentialOptions = ownerOptions(request.auth, task?.id);
-    profile = upsertConnector(profile, request.auth);
+    profile = await upsertConnector(profile, request.auth);
     const adapterReady = profile.reviewStatus === "APPROVED";
     const hasCredential = resolved.hasCredential;
     let ok = false;
@@ -1021,15 +1054,14 @@ app.post("/api/providers", { preHandler: requireWorkspaceAccess }, async (reques
     provider = createProvider(body, existing);
     provider.ownerUserId = request.auth.user.id;
   } catch (error) { return reply.code(400).send({ error: error.message || "PROVIDER_INVALID" }); }
-  state.providers = state.providers.filter((item) => item.id !== provider.id);
-  state.providers.push(provider);
   try {
     await persistProvider(provider);
   } catch {
-    if (!existing) state.providers = state.providers.filter((item) => item.id !== provider.id);
     return reply.code(503).send({ error: "PROVIDER_PERSIST_FAILED" });
   }
-  addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥仅服务端保存）`, { providerId: provider.id, userId: request.auth.user.id });
+  state.providers = state.providers.filter((item) => item.id !== provider.id);
+  state.providers.push(provider);
+  addEvent("provider_saved", `已保存 Provider：${provider.name}（密钥${standalone ? "在本机" : "在服务端"}加密保存）`, { providerId: provider.id, userId: request.auth.user.id });
   broadcast();
   return reply.code(existing ? 200 : 201).send({ provider: publicProvider(provider, request.auth.user.id) });
 });
@@ -1203,19 +1235,29 @@ rollStoredTradingSessions().catch((error) => console.error("trading session roll
 
 try {
   await app.listen({ port, host });
+  process.send?.({ type: "ready", port: app.server.address().port });
   console.log(`Axiom API listening on http://${host}:${port}`);
 } catch (error) {
   console.error(error);
   process.exit(1);
 }
 
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  clearInterval(tradingSessionTimer);
   stopAllControllers();
+  for (const entry of streams) entry.socket.close();
+  for (const client of sseClients) client.reply.raw.end();
+  for (const userId of new Set(state.tasks.map(task => task.ownerUserId).concat(standalone ? ["local-user"] : []))) disconnectDesktopAiUser(userId);
   await closeAllBrowserSessions();
-  await persistence.close();
   await app.close();
+  await persistence.close();
   process.exit(0);
 }
 
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
+process.on("message", message => { if (message?.type === "shutdown") void shutdown(); });
+if (process.send) process.on("disconnect", () => { void shutdown(); });

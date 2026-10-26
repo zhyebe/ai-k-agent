@@ -1,17 +1,16 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
-const apiBaseUrl = String(ipcRenderer.sendSync("api:get-base-url") || "http://127.0.0.1:8787");
+const runtime = ipcRenderer.sendSync("api:get-runtime");
 
 contextBridge.exposeInMainWorld("axiomDesktop", {
   platform: process.platform,
   isDesktop: true,
-  apiBaseUrl,
-  api: {
-    getBaseUrl: () => ipcRenderer.invoke("api:get-base-url"),
-    setBaseUrl: (value) => ipcRenderer.invoke("api:set-base-url", value),
-  },
+  standalone: true,
+  version: runtime.version,
+  apiBaseUrl: runtime.apiBaseUrl,
+  localToken: runtime.localToken,
   ai: {
-    connect: (session) => ipcRenderer.invoke("ai:connect", session),
+    connect: () => ipcRenderer.invoke("ai:connect", { apiBaseUrl: runtime.apiBaseUrl, userToken: runtime.localToken }),
     disconnect: () => ipcRenderer.invoke("ai:disconnect"),
   },
   updates: {

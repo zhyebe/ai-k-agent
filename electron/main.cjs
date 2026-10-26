@@ -1,10 +1,9 @@
 if (process.env.AXIOM_BROWSER_HOST === "1") {
   require("./browser-host.cjs");
 } else {
-const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, screen, shell } = require("electron");
 const { spawn } = require("node:child_process");
-const http = require("node:http");
-const net = require("node:net");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { bindIpc: bindAiRuntime, disconnect: disconnectAiRuntime } = require("./ai-runtime.cjs");
@@ -16,7 +15,8 @@ const {
   reduceUpdateState,
 } = require("./update-state.cjs");
 const { checkForUpdates: checkGithubUpdates, downloadInstaller, openInstaller } = require("./update-service.cjs");
-const { DEFAULT_PACKAGED_API_URL, isLoopbackApiUrl } = require("./default-api.cjs");
+process.env.AXIOM_STANDALONE = "1";
+if (process.env.AXIOM_USER_DATA_DIR) app.setPath("userData", path.resolve(process.env.AXIOM_USER_DATA_DIR));
 
 let apiProcess;
 let mainWindow;
@@ -27,10 +27,10 @@ let quittingForUpdate = false;
 let latestUpdateAsset = null;
 let downloadedInstallerPath = "";
 let downloadAbort = null;
-let apiPort = Number(process.env.AXIOM_API_PORT || 8787);
-if (!Number.isInteger(apiPort) || apiPort < 0 || apiPort > 65535) apiPort = 8787;
 let apiBaseUrl = "";
-const embeddedApiEnabled = process.env.AXIOM_EMBEDDED_API === "1";
+const localToken = crypto.randomBytes(32).toString("base64url");
+let runtimeReady = false;
+let stoppingApi = false;
 let resizeSession;
 const updateState = emptyUpdateState();
 
@@ -157,7 +157,7 @@ async function prepareAppForUpdateQuit() {
     updateCheckTimer = undefined;
   }
   await disconnectAiRuntime();
-  if (apiProcess && !apiProcess.killed) apiProcess.kill();
+  await stopApi();
 }
 
 async function installDownloadedUpdate() {
@@ -200,75 +200,10 @@ ipcMain.handle("window:close", () => {
 });
 ipcMain.handle("window:is-maximized", () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isMaximized()));
 
-function normalizeApiBaseUrl(value) {
-  const input = String(value || "").trim();
-  if (!input) throw new Error("API_URL_REQUIRED");
-  let parsed;
-  try { parsed = new URL(input); } catch { throw new Error("API_URL_INVALID"); }
-  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("API_URL_INVALID");
-  parsed.hash = "";
-  parsed.search = "";
-  return parsed.toString().replace(/\/$/, "");
-}
-
-function connectionConfigPath() {
-  return path.join(app.getPath("userData"), "connection.json");
-}
-
-function readSavedApiBaseUrl() {
-  try {
-    const config = JSON.parse(fs.readFileSync(connectionConfigPath(), "utf8"));
-    return normalizeApiBaseUrl(config.apiBaseUrl);
-  } catch {
-    return "";
-  }
-}
-
-function initialApiBaseUrl() {
-  const saved = readSavedApiBaseUrl();
-  const useCloudDefault = app.isPackaged && !embeddedApiEnabled;
-  const fallback = useCloudDefault ? DEFAULT_PACKAGED_API_URL : `http://127.0.0.1:${apiPort}`;
-  const usableSaved = saved && !(useCloudDefault && isLoopbackApiUrl(saved)) ? saved : "";
-  const configured = usableSaved || process.env.AXIOM_API_URL || fallback;
-  return normalizeApiBaseUrl(configured);
-}
-
-function saveApiBaseUrl(value) {
-  const normalized = normalizeApiBaseUrl(value);
-  const target = connectionConfigPath();
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temporary = `${target}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify({ apiBaseUrl: normalized }, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, target);
-  apiBaseUrl = normalized;
-  return apiBaseUrl;
-}
-
-ipcMain.on("api:get-base-url", (event) => { event.returnValue = apiBaseUrl || initialApiBaseUrl(); });
-ipcMain.handle("api:get-base-url", () => apiBaseUrl || initialApiBaseUrl());
-ipcMain.handle("api:set-base-url", (_event, value) => saveApiBaseUrl(value));
+ipcMain.on("api:get-runtime", (event) => {
+  event.returnValue = { apiBaseUrl, localToken, standalone: true, version: app.getVersion() };
+});
 bindAiRuntime(ipcMain, app);
-
-function probePort(port) {
-  return new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.once("error", () => resolve(null));
-    probe.listen({ host: "127.0.0.1", port }, () => {
-      const address = probe.address();
-      const selected = typeof address === "object" && address ? address.port : null;
-      probe.close(() => resolve(selected));
-    });
-  });
-}
-
-async function chooseApiPort() {
-  if (apiPort === 0) return probePort(0);
-  for (let offset = 0; offset < 32; offset += 1) {
-    const selected = await probePort(apiPort + offset);
-    if (selected) return selected;
-  }
-  return probePort(0);
-}
 
 function resizeWindowFromCursor() {
   if (!mainWindow || mainWindow.isDestroyed() || !resizeSession || mainWindow.isMaximized()) return;
@@ -307,42 +242,58 @@ function serverEntryPath() {
 }
 
 function startApi() {
-  const userData = app.getPath("userData");
-  const serverEntry = serverEntryPath();
-  apiProcess = spawn(process.execPath, [serverEntry], {
-    env: {
-      ...process.env,
-      AXIOM_DESKTOP: "1",
-      AXIOM_API_PORT: String(apiPort),
-      AXIOM_DATA_DIR: userData,
-      AXIOM_SECRET_FILE: path.join(userData, ".axiom-secret"),
-      AXIOM_VAULT_FILE: path.join(userData, "credentials.vault.json"),
-      PORT: String(apiPort),
-      ELECTRON_RUN_AS_NODE: "1",
-    },
-    stdio: "inherit",
-    windowsHide: true,
+  const directory = path.join(app.getPath("userData"), "standalone");
+  process.env.AXIOM_DATA_DIR = directory;
+  process.env.AXIOM_SECRET_FILE = path.join(directory, ".axiom-secret");
+  process.env.AXIOM_VAULT_FILE = path.join(directory, "credentials.vault.json");
+  process.env.APP_SECRET = "";
+  return new Promise((resolve, reject) => {
+    apiProcess = spawn(process.execPath, [serverEntryPath()], {
+      env: {
+        ...process.env,
+        AXIOM_STANDALONE: "1",
+        AXIOM_DESKTOP: "1",
+        AXIOM_LOCAL_TOKEN: localToken,
+        AXIOM_DATA_DIR: directory,
+        PORT: "0",
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      windowsHide: true,
+    });
+    let diagnostics = "";
+    apiProcess.stdout.on("data", data => process.stdout.write(data));
+    apiProcess.stderr.on("data", data => { diagnostics = (diagnostics + data).slice(-3000); process.stderr.write(data); });
+    const timer = setTimeout(() => reject(new Error(`本机运行引擎启动超时。${diagnostics}`)), 15000);
+    apiProcess.once("error", error => { clearTimeout(timer); reject(error); });
+    apiProcess.on("message", message => {
+      if (message?.type !== "ready" || !Number.isInteger(message.port)) return;
+      clearTimeout(timer);
+      apiBaseUrl = `http://127.0.0.1:${message.port}`;
+      runtimeReady = true;
+      resolve();
+    });
+    apiProcess.once("exit", code => {
+      clearTimeout(timer);
+      if (!runtimeReady) { reject(new Error(`本机运行引擎启动失败（${code}）。${diagnostics}`)); return; }
+      runtimeReady = false;
+      if (!stoppingApi) {
+        dialog.showErrorBox("本机运行引擎已停止", `请重新启动应用。${diagnostics}`);
+        app.quit();
+      }
+    });
   });
-  apiProcess.on("error", (error) => console.error("Axiom API process error", error));
 }
 
-function waitForApi(timeoutMs = 15000) {
-  const startedAt = Date.now();
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      const request = http.get(`http://127.0.0.1:${apiPort}/api/health`, (response) => {
-        response.resume();
-        if (response.statusCode && response.statusCode < 500) return resolve();
-        retry();
-      });
-      request.on("error", retry);
-      request.setTimeout(1200, () => { request.destroy(); retry(); });
-    };
-    const retry = () => {
-      if (Date.now() - startedAt >= timeoutMs) return reject(new Error("API_START_TIMEOUT"));
-      setTimeout(check, 250);
-    };
-    check();
+async function stopApi() {
+  stoppingApi = true;
+  const child = apiProcess;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise(resolve => {
+    const timer = setTimeout(() => { child.kill(); }, 5000);
+    child.once("exit", () => { clearTimeout(timer); resolve(); });
+    if (child.connected) child.send({ type: "shutdown" });
+    else child.kill();
   });
 }
 
@@ -368,7 +319,7 @@ function createWindow() {
     },
   });
 
-  if (!app.isPackaged || process.env.AXIOM_DEV_URL) mainWindow.loadURL(process.env.AXIOM_DEV_URL || "http://127.0.0.1:5173");
+  if (!app.isPackaged && process.argv.includes("--dev")) mainWindow.loadURL("http://127.0.0.1:5173");
   else mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   mainWindow.webContents.once("did-finish-load", () => publishUpdateState({}));
   mainWindow.on("closed", () => { mainWindow = undefined; });
@@ -394,19 +345,18 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    showMainWindow();
+    if (runtimeReady) showMainWindow();
   });
 }
 
 app.whenReady().then(async () => {
   if (!gotTheLock) return;
-  apiBaseUrl = initialApiBaseUrl();
-  if (embeddedApiEnabled) {
-    apiPort = await chooseApiPort();
-    if (!apiPort) throw new Error("API_PORT_UNAVAILABLE");
-    apiBaseUrl = `http://127.0.0.1:${apiPort}`;
-    startApi();
-    try { await waitForApi(); } catch (error) { console.error(error); }
+  try {
+    await startApi();
+  } catch (error) {
+    dialog.showErrorBox("Axiom 启动失败", String(error.message || error));
+    app.quit();
+    return;
   }
   showMainWindow();
   try {
@@ -417,12 +367,12 @@ app.whenReady().then(async () => {
 });
 
 app.on("activate", () => {
-  if (!gotTheLock || !app.isReady() || quittingForUpdate) return;
+  if (!gotTheLock || !app.isReady() || !runtimeReady || quittingForUpdate) return;
   showMainWindow();
 });
 
 app.on("window-all-closed", () => {
-  if (quittingForUpdate || process.platform !== "darwin") app.quit();
+  app.quit();
 });
 
 let browserCleanupDone = false;
@@ -431,8 +381,7 @@ app.on("before-quit", (event) => {
   if (installTimer) clearTimeout(installTimer);
   if (!browserCleanupDone) {
     event.preventDefault();
-    disconnectAiRuntime().finally(() => { browserCleanupDone = true; app.quit(); });
+    disconnectAiRuntime().finally(() => stopApi()).finally(() => { browserCleanupDone = true; app.quit(); });
   }
-  if (apiProcess && !apiProcess.killed) apiProcess.kill();
 });
 }

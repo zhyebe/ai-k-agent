@@ -917,6 +917,10 @@ async function createMongoAdapter() {
 
 export async function createPersistence() {
   const mode = process.env.DB_MODE || "memory";
+  if (mode === "file") {
+    const { createLocalPersistence } = await import("./local-persistence.mjs");
+    return createLocalPersistence({ directory: process.env.AXIOM_DATA_DIR, compactTaskRuntime });
+  }
   const allowMemoryFallback = process.env.ALLOW_MEMORY_FALLBACK === "1";
   if (mode === "mysql") {
     try { return await createMySqlAdapter(); } catch (error) {

@@ -16,6 +16,7 @@ function resolveSecret() {
         return existing;
       }
     } catch (error) {
+      if (error?.code === "ENOENT" && process.env.AXIOM_STANDALONE === "1" && (fs.existsSync(path.join(path.dirname(secretFile), "workspace.json")) || fs.existsSync(path.join(path.dirname(secretFile), "credentials.vault.json")))) throw new Error("LOCAL_SECRET_MISSING: 请恢复原数据目录中的 .axiom-secret");
       if (error?.code !== "ENOENT") return `axiom-ephemeral-${process.pid}-${crypto.randomBytes(16).toString("hex")}`;
     }
     try {
@@ -40,6 +41,7 @@ function resolveSecret() {
 }
 
 const secret = resolveSecret();
+if (process.env.AXIOM_STANDALONE === "1" && !persistentSecret) throw new Error("LOCAL_SECRET_UNAVAILABLE");
 const key = crypto.createHash("sha256").update(secret).digest();
 
 export function encryptSecret(value) {
