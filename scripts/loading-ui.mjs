@@ -733,3 +733,59 @@ test("rescue status distinguishes ordinary, pending, active, exiting and complet
   await panel.waitFor();
   assert.doesNotMatch(await panel.innerText(), /救单中|待核实成交|整体离场/);
 });
+
+for (const [width, height] of [[1440, 900], [1280, 720], [1024, 768], [390, 844]]) {
+  test(`workflow steps and task names stay fully readable at ${width}x${height}`, async t => {
+    const { page, navigate } = await openPage(t, { width, height });
+    const sample = structuredClone(workspace);
+    const holding = "本轮持仓中；盈利≥1点立即离场；亏损≤-2点请求AI判断是否离场，清零后开始下一轮";
+    const task = sample.tasks[0];
+    task.name = "浩瀚数贸 DGKZ 夜盘长名称观察任务";
+    task.workflow = [
+      { key: "connect", label: "连接目标", status: "active", detail: "打开目标：https://smyw.haohandahan.cn/client/#/transcc" },
+      { key: "login", label: "登录验证", status: "pending", detail: "检测到登录页或登录过期，准备填充并提交登录" },
+      { key: "collect", label: "数据采集", status: "pending", detail: "读取网页可见数据与只读行情" },
+      { key: "analyze", label: "趋势分析", status: "pending", detail: holding },
+      { key: "rules", label: "规则裁决", status: "pending", detail: "等待执行" },
+      { key: "action", label: "执行动作", status: "pending", detail: holding },
+    ];
+    await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+    // Full text must be rendered: no ellipsis clipping, no one-character columns, no overlap.
+    const audit = selector => page.$$eval(selector, nodes => {
+      const boxes = nodes.map(node => node.getBoundingClientRect());
+      return nodes.map((node, index) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const lines = [...range.getClientRects()];
+        return {
+          text: node.textContent,
+          clipped: node.scrollWidth > node.clientWidth + 1,
+          width: boxes[index].width,
+          overlaps: lines.some(line => boxes.some((box, other) => other !== index
+            && line.left < box.right - 1 && line.right > box.left + 1 && line.top < box.bottom - 1 && line.bottom > box.top + 1)),
+        };
+      });
+    });
+    await navigate();
+    await page.getByRole("heading", { name: "从连接到动作", exact: true }).waitFor();
+    for (const item of await audit(".workflow-copy span")) {
+      assert.equal(item.clipped, false, `console step clipped: ${item.text}`);
+      assert.equal(item.overlaps, false, `console step overlaps: ${item.text}`);
+    }
+    if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("button", { name: "任务管理", exact: true }).click();
+    await page.locator(".workflow-overview").waitFor();
+    const steps = await audit(".large-step span");
+    assert.deepEqual(steps.map(item => item.text), task.workflow.map(step => step.detail));
+    for (const item of steps) {
+      assert.equal(item.clipped, false, `task step clipped: ${item.text}`);
+      assert.equal(item.overlaps, false, `task step overlaps: ${item.text}`);
+      assert.ok(item.width >= 200, `task step too narrow (${item.width}px): ${item.text}`);
+    }
+    for (const item of await audit(".owned-task-select strong, .owned-task-select small")) {
+      assert.equal(item.clipped, false, `task list clipped: ${item.text}`);
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await capture(page, `workflow-text-${width}`);
+  });
+}

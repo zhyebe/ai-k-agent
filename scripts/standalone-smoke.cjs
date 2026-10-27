@@ -4,6 +4,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const { _electron } = require("playwright");
+const { version: expectedVersion } = require("../package.json");
 
 async function main() {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "axiom-v1-smoke-"));
@@ -28,7 +29,7 @@ async function main() {
     await page.setViewportSize({ width: 1280, height: 900 });
     page.setDefaultTimeout(10000);
     page.on("pageerror", error => errors.push(error.message));
-    await page.getByRole("status", { name: "单机模式 · v1.0.0", exact: true }).waitFor();
+    await page.getByRole("status", { name: `单机模式 · v${expectedVersion}`, exact: true }).waitFor();
     await page.getByRole("button", { name: "连接器", exact: true }).first().waitFor();
     return page;
   };
@@ -72,7 +73,7 @@ async function main() {
     const screenshot = process.env.AXIOM_SMOKE_SCREENSHOT || path.join(os.tmpdir(), "axiom-v1-standalone.png");
     await page.screenshot({ path: screenshot });
     assert.deepEqual(errors, []);
-    console.log(JSON.stringify({ ok: true, packaged: await app.evaluate(({ app }) => app.isPackaged), version: "1.0.0", modelCalls, screenshot }));
+    console.log(JSON.stringify({ ok: true, packaged: await app.evaluate(({ app }) => app.isPackaged), version: expectedVersion, modelCalls, screenshot }));
   } catch (error) {
     if (app) {
       const page = await app.firstWindow();

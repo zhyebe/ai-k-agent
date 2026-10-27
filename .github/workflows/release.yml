@@ -9,7 +9,7 @@ on:
       release_tag:
         description: Existing or new release tag to publish
         required: true
-        default: v1.0.0
+        default: v1.0.1
       artifact_run_id:
         description: Reuse artifacts from a previous release run without rebuilding
         required: false
