@@ -7,7 +7,8 @@ module.exports = async function inspectBrowser({ app }, input) {
   const browser = await import(pathToFileURL(path.join(root, "server", "browser.mjs")).href);
   const { parseHaohanOrderBook } = await import(pathToFileURL(path.join(root, "server", "haohan.mjs")).href);
   const { createProvider } = await import(pathToFileURL(path.join(root, "server", "provider.mjs")).href);
-  const { summaryExitCandidates } = await import(pathToFileURL(path.join(root, "server", "summary-exit-policy.mjs")).href);
+  const { summaryExitCandidates, summaryKey, summarySignature } = await import(pathToFileURL(path.join(root, "server", "summary-exit-policy.mjs")).href);
+  const { validateHoldingPlan } = await import(pathToFileURL(path.join(root, "server", "trading-plan.mjs")).href);
   const controller = new AbortController();
   const call = (method, data, credential) => runtime.executeBrowserCall(app, { id: `smoke-${method}`, method, userId: "smoke-user", input: data, credential, deadlineAt: Date.now() + 45000 }, "https://api.example.test", controller.signal);
   try {
@@ -17,6 +18,10 @@ module.exports = async function inspectBrowser({ app }, input) {
     const page = await browser.getBrowserPage(ids[0]);
     const orderBook = parseHaohanOrderBook(opened.visibleText);
     const sessionId = "task:fixture";
+    const entryInput = (action, price, planKey = action, orderType = "MARKET") => ({
+      sessionId, action, price, quantity: 1, symbol: "DGKZ", orderType,
+      entryGuard: { action, symbol: "DGKZ", plan: input.plans[planKey], costPoints: 0.2, expiresAt: new Date(Date.now() + 60000).toISOString() },
+    });
     const targetUrl = "https://smyw.haohandahan.cn/client/#/transcc";
     const html = await fetch(input.url).then(response => response.text());
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: html
@@ -56,7 +61,12 @@ module.exports = async function inspectBrowser({ app }, input) {
         await page.evaluate(() => window.redrawNextControl(".el-dialog button"));
         const summary = { symbol: "DGKZ", symbolName: "测试商品", side, quantity: side === "LONG" ? 3 : 1, averagePrice: side === "LONG" ? 99 : 102, frozenQuantity: 0 };
         const market = { symbol: "DGKZ", observedAt: new Date().toISOString(), account: { positionSummariesVerified: true, positionSummaries: [summary] }, orderBook };
-        const candidate = summaryExitCandidates({}, market)[0];
+        const tradingCosts = { DGKZ: 0.2 };
+        const validated = validateHoldingPlan(input.plans[side], summary, { observedAt: market.observedAt, costs: tradingCosts });
+        if (validated.code) throw new Error(validated.code);
+        const record = { id: `smoke-plan-${side}`, key: summaryKey(summary), signature: summarySignature(summary), summary,
+          ...validated, bestPrice: summary.averagePrice, profitArmed: false };
+        const candidate = summaryExitCandidates({ summaryTradingPlans: [record], tradingCosts }, market)[0];
         if (!candidate) throw new Error(`SMOKE_SUMMARY_EXIT_MISSING:${side}`);
         const result = await call("submitSuggestionForm", { sessionId, confirmationId: `${confirmationPrefix}-${side}`, ...candidate.decision, symbol: "DGKZ", symbolName: "测试商品", quantity: summary.quantity, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ side, ...result }));
@@ -73,13 +83,15 @@ module.exports = async function inspectBrowser({ app }, input) {
       fields.forEach(field => field.remove());
       setTimeout(() => fields.reverse().forEach(field => buy.prepend(field)), 1200);
     });
-    const manual = await call("fillSuggestionForm", { sessionId, action: "BUY", price: 20, quantity: 1 });
+    const manualInput = entryInput("BUY", 20, "manual", "LIMIT");
+    const manual = await call("fillSuggestionForm", manualInput);
     if (!manual.ok) throw new Error(JSON.stringify(manual));
     const manualBeforeClick = await page.evaluate(() => window.entries.length);
     await page.locator('input[type="button"][value="买入订立"]').click();
     await page.locator(".el-message-box").waitFor();
-    const continued = await call("continueManualEntry", { sessionId, action: "BUY" });
-    const entry = await call("submitSuggestionForm", { sessionId, confirmationId: "smoke-entry", action: "SELL", price: 20, quantity: 1 });
+    const continued = await call("continueManualEntry", manualInput);
+    if (!continued.ok) throw new Error(JSON.stringify(continued));
+    const entry = await call("submitSuggestionForm", { ...entryInput("SELL", 100), confirmationId: "smoke-entry" });
     if (!entry.ok) throw new Error(JSON.stringify(entry));
     await prepareAccount(true, true);
     await transferSummaries("smoke-summary");
@@ -110,7 +122,7 @@ module.exports = async function inspectBrowser({ app }, input) {
       if (!observed.ok || !observationVerified) throw new Error(JSON.stringify({ state, phase: "observe-before-trade", durationMs: Date.now() - observationStartedAt, ...observed }));
       for (const action of ["BUY", "SELL"]) {
         await page.evaluate(() => window.redrawNextControl(".el-message-box button"));
-        const result = await call("submitSuggestionForm", { sessionId, confirmationId: `smoke-${state}-${action}`, action, price: 100, quantity: 1, browserProvider });
+        const result = await call("submitSuggestionForm", { ...entryInput(action, action === "BUY" ? 101 : 100), confirmationId: `smoke-${state}-${action}`, browserProvider });
         if (!result.ok) throw new Error(JSON.stringify({ state, action, ...result }));
       }
       await prepareAccount(true);

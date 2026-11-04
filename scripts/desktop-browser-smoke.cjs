@@ -8,6 +8,7 @@ const { _electron } = require("playwright");
 async function main() {
   const { refreshingTradeFixture: tradeFixture } = await import("../tests/fixtures/trade-page.mjs");
   const { loginFixture } = await import("../tests/fixtures/login-page.mjs");
+  const { tradingPlan } = await import("../tests/fixtures/trading-plan.mjs");
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "axiom browser 中文 "));
   const executablePath = process.env.AXIOM_DESKTOP_EXECUTABLE;
   const screenshot = path.join(process.env.AXIOM_SMOKE_OUTPUT || os.tmpdir(), "axiom-client-browser-smoke.png");
@@ -35,7 +36,14 @@ async function main() {
       timeout: 30000,
     });
     await host.firstWindow();
-    const result = await host.evaluate((electron, input) => globalThis.axiomBrowserSmoke(electron, input), { url: `http://127.0.0.1:${server.address().port}`, screenshot });
+    const plans = {
+      manual: tradingPlan("LONG", 20),
+      BUY: tradingPlan("LONG", 101),
+      SELL: tradingPlan("SHORT", 100),
+      LONG: tradingPlan("LONG", 99, { takeProfitPrice: 100, profitProtection: { activationPrice: 99.8, floorPrice: 99.5, trailingDistance: 0.2 } }),
+      SHORT: tradingPlan("SHORT", 102, { takeProfitPrice: 101, profitProtection: { activationPrice: 101.2, floorPrice: 101.5, trailingDistance: 0.2 } }),
+    };
+    const result = await host.evaluate((electron, input) => globalThis.axiomBrowserSmoke(electron, input), { url: `http://127.0.0.1:${server.address().port}`, screenshot, plans });
     assert.equal(result.packaged, Boolean(executablePath));
     assert.equal(result.mode, "desktop-embedded");
     assert.equal(result.title, "Trade controls fixture");
