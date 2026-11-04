@@ -42,7 +42,7 @@ export async function tradingSkillUpgrade(skill) {
   const local = skill?.id === "skill_local_trading" && skill.version === "v1.0.0";
   const expectedHash = local ? previousContentHashes.get("v0.3.133") : skill?.id === previousSkillId ? previousContentHashes.get(skill.version) : null;
   if (skill?.status !== "APPROVED" || !expectedHash) return null;
-  const hash = createHash("sha256").update(String(skill.content || "").trim()).digest("hex");
+  const hash = createHash("sha256").update(String(skill.content || "").replace(/\r\n/g, "\n").trim()).digest("hex");
   if (hash !== expectedHash) return null;
   const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");

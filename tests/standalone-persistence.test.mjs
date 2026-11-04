@@ -77,6 +77,24 @@ test("local strategy migration preserves edits, review status and unrelated reco
   }
 });
 
+test("local strategy migration accepts Windows line endings while preserving edited content", async t => {
+  const previous = (await fs.readFile(new URL("./fixtures/trading-skill-v0.3.133.md", import.meta.url), "utf8")).trim().replace(/\r\n/g, "\n").replace(/\n/g, "\r\n");
+  const bundled = (await fs.readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
+  for (const content of [previous, `${previous}\r\n用户规则`]) {
+    const { adapter, open } = await fixture(t);
+    const skill = { id: "skill_local_trading", status: "APPROVED", version: "v1.0.0", content };
+    await adapter.saveSkill(skill);
+    await adapter.close();
+    const restored = (await (await open()).loadState()).skills[0];
+    if (content === previous) {
+      assert.equal(restored.version, "v1.0.2");
+      assert.equal(restored.content, bundled);
+    } else {
+      assert.deepEqual(restored, skill);
+    }
+  }
+});
+
 test("failed local write is surfaced, preserves the committed snapshot, and does not poison later writes", async t => {
   const { file, adapter, open } = await fixture(t);
   await adapter.saveProvider({ id: "p", model: "saved" });
