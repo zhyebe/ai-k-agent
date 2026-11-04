@@ -43,17 +43,18 @@ test("execution quote monitoring routes to an exit-capable desktop and rejects a
   t.after(resetDesktopAiForTests);
   const capable = new Socket();
   attachDesktopAiSocket("owner", capable);
-  capable.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1"] }));
+  capable.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1", "browser-ai-trading-plan-v2"] }));
   const older = new Socket();
   attachDesktopAiSocket("owner", older);
   older.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1"] }));
-  const task = { id: "t", symbol: "DGKZ", exitObservationIndex: [{ positionOrderId: "P-1" }] };
+  const task = { id: "t", symbol: "DGKZ", exitObservationIndex: 1, exitReviewTargets: [{ symbol: "DGJJ" }] };
   const operation = callBrowserMethod("observeExecutionMarket", "owner", { task }, { accountScope: "full" });
   await Promise.resolve();
   const message = capable.sent[0];
   assert.equal(message.type, "browser.call");
   assert.equal(message.method, "observeExecutionMarket");
   assert.deepEqual(message.input.task.exitObservationIndex, task.exitObservationIndex);
+  assert.deepEqual(message.input.task.exitReviewTargets, task.exitReviewTargets);
   assert.equal(message.options.accountScope, "full");
   assert.equal(older.sent.length, 0);
   const result = { ok: true, observedAt: "2026-10-14T07:00:00Z", positionsVerified: true };
@@ -100,7 +101,7 @@ for (const clockSkewMs of [-9000, 9000]) {
     t.mock.timers.enable({ apis: ["Date"], now: 1800000000000 });
     const socket = new Socket();
     attachDesktopAiSocket("clock-owner", socket);
-    socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1"] }));
+    socket.emit("message", JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1", "browser-ai-trading-plan-v2"] }));
     for (const elapsed of [120, 6000]) {
       const startedAt = Date.now();
       const call = callBrowserMethod("observeExecutionMarket", "clock-owner", { task: { id: "clock-task" } });
@@ -113,7 +114,7 @@ for (const clockSkewMs of [-9000, 9000]) {
       const market = await call;
       assert.equal(Date.parse(market.observedAt), startedAt);
       assert.equal(market.books[0].desktopObservedAt, desktopObservedAt);
-      assert.equal(executableExitQuote(market, { symbol: "DGKZ", side: "买入" })?.price ?? null, elapsed < 5000 ? 105 : null);
+      assert.equal(executableExitQuote(market, { symbol: "DGKZ", side: "买入", quantity: 1 })?.price ?? null, elapsed < 5000 ? 105 : null);
     }
   });
 }

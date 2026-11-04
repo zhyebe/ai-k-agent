@@ -1221,7 +1221,9 @@ export async function observeExecutionMarket(task, connector, { accountScope = "
   if (primary.code === "REAUTH_REQUIRED") return primary;
   // Rotate one held instrument per poll so earlier quotes cannot age out while
   // collecting other instruments. Submission rechecks the exact position/quote.
-  const targets = uniquePageInstruments([...(primary.account?.positionSummaries || []), ...(primary.account?.positions || [])]);
+  const heldTargets = uniquePageInstruments([...(primary.account?.positionSummaries || []), ...(primary.account?.positions || [])]);
+  const reviewTargets = uniquePageInstruments(task.exitReviewTargets || []).filter(target => !heldTargets.some(held => samePageInstrument(held, target)));
+  const targets = [...heldTargets, ...(heldTargets.length ? reviewTargets.slice(0, 1) : reviewTargets)];
   const index = Math.max(0, Math.floor(Number(task.exitObservationIndex) || 0));
   const target = requestedTarget || (targets.length ? targets[index % targets.length] : null);
   let book = { ...primary, observedAt: new Date(snapshot.capturedAt).toISOString() };

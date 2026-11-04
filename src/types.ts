@@ -130,7 +130,24 @@ export interface Forecast {
   invalidation?: string;
 }
 
+export interface TradingPlan {
+  setup: string;
+  entryZone: { min: number; max: number };
+  anchorPrice: number | null;
+  anchorTimestamp: string;
+  takeProfitPrice: number;
+  stopLossPrice: number;
+  hardStopPrice: number;
+  stopConfirmationSec: number;
+  validForSec: number;
+  maxHoldSec: number;
+  profitProtection: { activationPrice: number; floorPrice: number; trailingDistance: number };
+  rationale: string;
+  invalidation: string;
+}
+
 export interface Decision {
+  tradePlan?: TradingPlan | null;
   entryPurpose?: "NORMAL" | "RESCUE";
   rescuePositionIds?: string[];
   runId?: string;
@@ -328,7 +345,14 @@ export interface TradingSession {
 }
 
 export interface Task {
-  summaryLossObservations?: Array<{ key: string; signature: string; startedAt: number; lastObservedAt: number; flashEventId?: string; samples: Array<{ observedAt: number; price: number; pnlPoints: number }> }>;
+  tradingCosts?: Record<string, number>;
+  entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"] };
+  summaryTradingPlans?: Array<{ id: string; key: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
+    costPoints: number | null; bestPrice: number; profitArmed: boolean; expiresAt: string; maxHoldAt: string }>;
+  exitOutcomes?: Array<{ pendingId: string; confirmedAt: string; exitReason?: string;
+    after3Minutes?: { status: string; hypotheticalGrossPoints?: number } | null;
+    after5Minutes?: { status: string; hypotheticalGrossPoints?: number } | null }>;
+  summaryLossObservations?: Array<{ key: string; signature: string; startedAt: number; lastObservedAt: number; confirmationSec: number }>;
   summaryExitReviews?: Array<{ id: string; key: string; pnlPoints: number; status: "REQUESTING" | "REVIEWED" | "FAILED"; decision?: "EXIT" | "HOLD"; rationale?: string }>;
   id: string;
   name: string;
@@ -496,6 +520,7 @@ export interface OrderItem {
   targetPositionPct: number;
   maxOrderValuePct: number;
   suggestedPrice?: number | null;
+  submittedPrice?: number | null;
   suggestedQty?: number | null;
   entryPrice?: number | null;
   takeProfitPrice?: number | null;

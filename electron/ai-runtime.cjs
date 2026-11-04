@@ -143,7 +143,7 @@ function connect(app, session) {
   next.on("pong", () => { lastPongAt = Date.now(); });
   next.on("open", () => {
     reconnectAttempt = 0;
-    next.send(JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1"] }));
+    next.send(JSON.stringify({ type: "runtime.hello", capabilities: ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1", "browser-ai-trading-plan-v2"] }));
     heartbeatTimer = setInterval(() => {
       if (socket !== next) return;
       if (Date.now() - lastPongAt > 45000) { next.terminate(); return; }

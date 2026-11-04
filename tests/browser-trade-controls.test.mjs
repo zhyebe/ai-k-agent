@@ -12,9 +12,16 @@ import { positionProfitExit } from "../server/exit-policy.mjs";
 import { tradeFixture, refreshingTradeFixture, redrawNextControl, clearTradingAccount } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
 import { activateTradeControl, completeTradeDialogs, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
+import { entryGuard } from "./fixtures/trading-plan.mjs";
 
-async function submitSuggestionForm(input) { await clearTradingAccount(page); return submitNativeEntry(input); }
-async function continueManualEntry(input) { await clearTradingAccount(page); return submitManualEntry(input); }
+async function submitSuggestionForm(input) {
+  await clearTradingAccount(page);
+  return submitNativeEntry({ symbol: "DGKZ", orderType: "LIMIT", entryGuard: entryGuard(input.action, input.price), ...input });
+}
+async function continueManualEntry(input) {
+  await clearTradingAccount(page);
+  return submitManualEntry({ quantity: 1, orderType: "LIMIT", entryGuard: entryGuard(input.action, 20), ...input });
+}
 
 let browser;
 let page;
@@ -22,7 +29,7 @@ before(async () => {
   browser = await chromium.launch({ ...(process.platform === "darwin" ? { channel: "chrome" } : {}), headless: true });
   const context = await browser.newContext();
   page = await context.newPage();
-  await page.route("https://smyw.haohandahan.cn/client/**", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture }));
+  await page.route("https://smyw.haohandahan.cn/client/**", (route) => route.fulfill({ contentType: "text/html; charset=utf-8", body: tradeFixture.replace("<body>", "<body><div>DGKZ | 测试商品</div>") }));
   setBrowserSessionFactory(async () => ({ browser, context, page, ownsBrowser: false, mode: "test" }));
   await openBrowserPage({ sessionId: "trade-fixture", url: "https://smyw.haohandahan.cn/client/#/transcc", waitMs: 0 });
 });
@@ -628,6 +635,15 @@ test("fast observations rotate held instruments without collecting stale quotes 
   }
   const targeted = await observeExecutionMarket({ ...task, exitObservationIndex: 0 }, connector, { accountScope: "positions", target: { symbol: "DGJJ", symbolName: "第二商品" } });
   assert.equal(targeted.books[0].symbol, "DGJJ", "an immediate AI exit must read its own target, not the rotation's next board");
+  await page.evaluate(() => { document.querySelector("#positions tbody tr:last-child").remove(); });
+  const reviews = { ...task, exitReviewTargets: [{ symbol: "DGJJ", symbolName: "第二商品" }] };
+  const held = await observeExecutionMarket({ ...reviews, exitObservationIndex: 0 }, connector);
+  assert.equal(held.books[0].symbol, "DGKZ");
+  const review = await observeExecutionMarket({ ...reviews, exitObservationIndex: 1 }, connector);
+  assert.equal(review.books[0].symbol, "DGJJ");
+  await page.evaluate(() => { document.querySelector("#positions tbody").replaceChildren(); });
+  const flatReview = await observeExecutionMarket({ ...reviews, exitObservationIndex: 0 }, connector);
+  assert.equal(flatReview.books[0].symbol, "DGJJ");
 });
 
 test("fast observations collect chart evidence and confirm a stable K without a page reload", async t => {

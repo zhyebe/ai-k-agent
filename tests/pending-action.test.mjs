@@ -2,9 +2,18 @@ import assert from "node:assert/strict";
 import "./fixtures/open-market-clock.mjs";
 import test, { afterEach } from "node:test";
 import { suggestOrderPreview } from "../server/execution.mjs";
-import { buildPendingAction, cancelPendingAction, claimManual, confirmPendingAction, setAutoDecision, setTaskMode, startTask, stopController, stopTask, takeoverPendingAction } from "../server/engine.mjs";
+import { buildPendingAction, cancelPendingAction, claimManual, confirmPendingAction as confirmEnginePendingAction, setAutoDecision, setTaskMode, startTask, stopController, stopTask, takeoverPendingAction } from "../server/engine.mjs";
 import { isForbiddenTradeControl, isPositionListExitControlText, isTradeWriteResponse, normalizeBrowserPlan, positionListExitLabels, suggestionFormLabels, tradePaneLabel, tradeSubmissionOutcome, tradeSubmitLabels } from "../server/tools.mjs";
 import { state } from "../server/store.mjs";
+import { entryGuard, summaryAuthorization, tradingPlan } from "./fixtures/trading-plan.mjs";
+
+function confirmPendingAction(taskId, options = {}) {
+  const task = state.tasks.find(item => item.id === taskId);
+  return confirmEnginePendingAction(taskId, { ...options, runtime: {
+    observeExecutionMarket: async () => ({ ...task.market, ok: true, observedAt: new Date().toISOString() }),
+    ...options.runtime,
+  } });
+}
 
 afterEach(() => {
   for (const task of state.tasks) stopController(task.id);
@@ -32,6 +41,9 @@ function insertTask(id, extras = {}) {
     market: { latest: { price: 1800 }, account: { availableFunds: 18000, positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [] } },
     ...extras,
   };
+  task.market = { symbol: "DGJJ", observedAt: new Date().toISOString(),
+    orderBook: { bids: [{ price: 1800, volume: 100 }], asks: [{ price: 1800, volume: 100 }] }, ...task.market };
+  task.decision = { entryPrice: 1800, tradePlan: tradingPlan("LONG", 1800), entryGuard: entryGuard("BUY", 1800, "DGJJ"), ...task.decision };
   state.tasks.unshift(task);
   return task;
 }
@@ -323,7 +335,7 @@ test("live sell suggestion submits SELL action only after confirmation", async (
   assert.equal(order.status, "submitted");
 });
 
-test("live exit submits one whole summary row", async () => {
+test("live AI-authorized exit submits one whole summary row", async () => {
   const task = insertTask(`task_live_exit_${Date.now()}`, {
     mode: "LIVE",
     autoDecisionEnabled: true,
@@ -351,6 +363,9 @@ test("live exit submits one whole summary row", async () => {
       account: { availableFunds: 18000, positions: [{ quantity: 2, positionOrderId: "P-9", side: "买", symbol: "DGKZ" }] },
     },
   });
+  const authorization = summaryAuthorization(task.decision.targetSummary, 1200);
+  task.summaryExitReviews = [authorization];
+  task.decision.exitGuard = { summary: true, aiAuthorization: authorization, expiresAt: authorization.expiresAt, triggerPrice: 1200 };
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.exitType, "TAKE_PROFIT");
   assert.equal(task.pendingAction.suggestedQty, 2);
@@ -430,6 +445,9 @@ test("multi-board pending action uses and submits the selected board price and i
       ],
     },
   });
+  for (const book of task.market.books) Object.assign(book, { observedAt: new Date().toISOString(),
+    orderBook: { bids: [{ price: book.latest.price, volume: 100 }], asks: [{ price: book.latest.price, volume: 100 }] } });
+  task.decision.entryGuard = entryGuard("BUY", 1200, "DGKZ");
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.targetSymbol, "DGKZ");
   assert.equal(task.pendingAction.suggestedPrice, 1200);

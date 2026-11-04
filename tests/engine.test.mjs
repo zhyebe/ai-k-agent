@@ -5,6 +5,21 @@ import { applyEntryBoundary, attachPositionExit, bindDecisionToMarket, buildDeci
 import { createProvider, requestDecision } from "../server/provider.mjs";
 import { analysisLayerWindows } from "../server/analysis-context.mjs";
 import { getAgentOutput, state } from "../server/store.mjs";
+import { entryGuard, summaryAuthorization, tradingPlan } from "./fixtures/trading-plan.mjs";
+
+function plannedEntry(market, action = "BUY") {
+  const price = action === "BUY" ? market.orderBook.asks[0].price : market.orderBook.bids[0].price;
+  const field = action === "BUY" ? "low" : "high";
+  const candle = market.history.filter(item => item.timestamp < Date.now() - 60000
+    && (action === "BUY" ? item.low <= price : item.high >= price))
+    .sort((left, right) => Math.abs(left[field] - price) - Math.abs(right[field] - price))[0];
+  const anchorPrice = candle[field];
+  const plan = tradingPlan(action === "BUY" ? "LONG" : "SHORT", price, {
+    anchorPrice, anchorTimestamp: String(candle.timestamp),
+    entryZone: { min: Math.min(price - 0.5, anchorPrice), max: Math.max(price + 0.5, anchorPrice) },
+  });
+  return { entryPrice: price, tradePlan: plan, entryGuard: { ...entryGuard(action, price, market.symbol), plan } };
+}
 
 test("实盘只限制单笔数量，不把 AI BUY 意图改成 HOLD", () => {
   const decision = enforceDecisionLimits({
@@ -88,7 +103,7 @@ for (const autoDecisionEnabled of [false, true]) {
           fillSuggestionForm: async () => { filled += 1; return { ok: true, filled: true, submitted: false }; },
           submitSuggestionForm: async () => { submitted += 1; return { ok: true, filled: true, submitted: true }; },
           requestDecision: async (_provider, context) => ({
-            action, marketRegime: action === "SELL" ? "DOWN" : "UP", bullishProfitProbability: action === "BUY" ? probability : 0.42,
+            ...plannedEntry(market, action), action, marketRegime: action === "SELL" ? "DOWN" : "UP", bullishProfitProbability: action === "BUY" ? probability : 0.42,
             bearishProfitProbability: action === "SELL" ? probability : 0.42,
             targetPositionPct: 10, maxOrderValuePct: 4, evidenceIds: [context.evidenceIds[0]], riskFlags: [],
           }),
@@ -130,8 +145,9 @@ test("自动登录后保留未核实动作并在下一轮继续观测后执行",
     browserLoginStatus: async () => ({ ok: true, authenticated: ++loginChecks === 1 || loginChecks > 2 }),
     browserLogin: async () => ({ ok: true, authenticated: true }),
     observeMarket: async () => ({ ...market, fingerprint: `reauth-submit-${loginChecks}` }),
+    observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
     requestDecision: async (_provider, context) => ({
-      action: "BUY", marketRegime: "UP",
+      ...plannedEntry(market), action: "BUY", marketRegime: "UP",
       targetSymbol: context.market.symbol,
       bullishProfitProbability: 0.6,
       bearishProfitProbability: 0.3,
@@ -210,6 +226,9 @@ test("实时条件变化不记录自动下单失败，立即重新读取交给 A
   task.market = testMarketSnapshot("condition-change", 100);
   task.market.account.positions = [{ symbol: "BTC/USDT", positionOrderId: "P-change", side: "买", quantity: 1, orderPrice: 99 }];
   task.decision = { action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT", targetPositionIds: [], targetSummary: { symbol: "BTC/USDT", symbolName: "测试商品", side: "LONG", quantity: 1, averagePrice: 99 }, exitGuard: { summary: true, programProfit: true, expiresAt: new Date(Date.now()+30000).toISOString() }, targetSymbol: "BTC/USDT", bullishProfitProbability: 0.7, bearishProfitProbability: 0.7, riskFlags: [] };
+  const authorization = summaryAuthorization(task.decision.targetSummary, 100);
+  task.summaryExitReviews = [authorization];
+  task.decision.exitGuard = { summary: true, aiAuthorization: authorization, expiresAt: authorization.expiresAt, triggerPrice: 100 };
   task.pendingAction = buildPendingAction(task, task.decision);
   try {
     const result = await confirmPendingAction(taskId, {
@@ -227,6 +246,7 @@ test("实时条件变化不记录自动下单失败，立即重新读取交给 A
 
 test("实盘入场自动与手动默认数量为 1，观察模式不填实盘数量", () => {
   const base = { id: "quantity-limit", mode: "LIVE", autoDecisionCountdownSec: 30, autoDecisionEnabled: true, symbol: "A", metrics: { equity: 1000 }, market: { books: [{ symbol: "A", latest: { price: 1 } }] } };
+  Object.assign(base.market.books[0], { observedAt: new Date().toISOString(), orderBook: { bids: [{ price: 1, volume: 100 }], asks: [{ price: 1, volume: 100 }] } });
   const decision = { action: "BUY", marketRegime: "UP", targetSymbol: "A", profitProbability: 0.8, targetPositionPct: 30, maxOrderValuePct: 8 };
   const automated = buildPendingAction(base, decision);
   assert.equal(automated.suggestedQty, 1);
@@ -498,6 +518,7 @@ test("持续监控完成一轮后立即继续，只有入场阈值变化才触�
 function insertNorthstarTask(id) {
   const task = {
     id,
+    tradingCosts: { "BTC/USDT": 0.2 },
     name: "northstar-readonly-check",
     status: "READY",
     mode: "PAPER",
@@ -1024,21 +1045,27 @@ test("生产客户端 AI 自动入场直接提交，不被浏览器分析模式�
   const market = testMarketSnapshot("client-auto-entry", 100);
   market.account = { ...market.account, positionSummariesVerified: true, positionSummaries: [], positionsVerified: true, openOrdersVerified: true, positions: [], openOrders: [] };
   const submissions = [];
+  let analysisInput;
   try {
     await runAnalysis(taskId, "", { runtime: {
       openMarketBrowser: async () => ({ ok: true, mode: "desktop-embedded" }),
       browserLoginStatus: async () => ({ ok: true, authenticated: true }),
       observeMarket: async () => market,
       observeExecutionMarket: async () => ({ ...market, observedAt: new Date().toISOString() }),
-      requestMarketAnalysis: async (_provider, context) => ({ market, decision: {
-        action: "BUY", marketRegime: "UP", targetSymbol: "BTC/USDT", targetSymbolName: "测试品种", targetPrice: 100,
-        bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, profitProbability: 0.55,
-        evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
-      }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } }),
+      requestMarketAnalysis: async (_provider, context) => {
+        analysisInput = context;
+        return { market, decision: {
+          ...plannedEntry(market), action: "BUY", marketRegime: "UP", targetSymbol: "BTC/USDT", targetSymbolName: "测试品种", targetPrice: 100,
+          bullishProfitProbability: 0.55, bearishProfitProbability: 0.45, profitProbability: 0.55,
+          evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
+        }, coverage: { mode: "direct_client", complete: true, bookCount: 1, totalKlineRows: 25 } };
+      },
       submitSuggestionForm: async (input) => { submissions.push(input); return { ok: true, submitted: true, filled: true }; },
     } });
     assert.equal(submissions.length, 1);
     assert.equal(submissions[0].action, "BUY");
+    assert.deepEqual(analysisInput.strategy.tradingCosts, task.tradingCosts);
+    assert.deepEqual(analysisInput.exitOutcomes, []);
     assert.equal(task.pendingAction.status, "AWAITING_FILL");
   } finally {
     stopController(taskId);
@@ -1398,7 +1425,7 @@ test(`LIVE 规则标记不阻止自动${exitType || "入场"}提交`, async () =
     fillSuggestionForm: async () => ({ ok: true, filled: true, submitted: false }),
     submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; },
     requestDecision: async (_provider, context) => ({
-      action: "BUY", marketRegime: "UP", exitType, targetPositionIds: exitType ? ["P-auto-short"] : [], confidence: 0.7,
+      ...plannedEntry(market), action: "BUY", marketRegime: "UP", exitType, targetPositionIds: exitType ? ["P-auto-short"] : [], confidence: 0.7,
       profitProbability: exitType ? 0.2 : 0.7, bullishProfitProbability: exitType ? 0.2 : 0.7, bearishProfitProbability: 0.2,
       evidenceIds: [context.evidenceIds[0]], riskFlags: [], decisionTtlSec: 300,
     }),
@@ -1428,10 +1455,12 @@ test(`实盘${autoDecisionEnabled ? "自动" : "手动"}入场，持仓变化后
   flat.account.positions = [];
   task.market = flat;
   task.metrics.equity = 1000;
-  task.decision = { action: "BUY", marketRegime: "UP", targetSymbol: "BTC/USDT", bullishProfitProbability: 0.6, bearishProfitProbability: 0.2, targetPositionPct: 10, maxOrderValuePct: 4, riskFlags: [] };
+  task.decision = { ...plannedEntry(flat), action: "BUY", marketRegime: "UP", targetSymbol: "BTC/USDT", bullishProfitProbability: 0.6, bearishProfitProbability: 0.2, targetPositionPct: 10, maxOrderValuePct: 4, riskFlags: [] };
   task.pendingAction = buildPendingAction(task, task.decision);
   let browserSubmits = 0;
-  const acknowledged = await confirmPendingAction(taskId, { source: "manual_confirm", runtime: { submitSuggestionForm: async () => { browserSubmits += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; } } });
+  const acknowledged = await confirmPendingAction(taskId, { source: "manual_confirm", runtime: {
+    observeExecutionMarket: async () => ({ ...flat, observedAt: new Date().toISOString() }),
+    submitSuggestionForm: async () => { browserSubmits += 1; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; } } });
   assert.equal(browserSubmits, autoDecisionEnabled ? 1 : 0);
   assert.equal(acknowledged.pendingAction.status, "AWAITING_FILL");
   task.monitoringEnabled = true;
@@ -1473,6 +1502,9 @@ test("程序汇总离场自动提交，持仓归零后自动核实", async () =>
   holding.account = withSummarySnapshot(holding).account;
   task.market = holding;
   task.decision = { action: "SELL", marketRegime: "DOWN", exitType: "TAKE_PROFIT", targetPositionIds: [], targetSummary: { symbol: "BTC/USDT", symbolName: "测试品种", side: "LONG", quantity: 2, averagePrice: 100 }, exitGuard: { summary: true, programProfit: true, expiresAt: new Date(Date.now()+30000).toISOString() }, targetSymbol: "BTC/USDT", bearishProfitProbability: 0.5, bullishProfitProbability: 0.3, riskFlags: [] };
+  const authorization = summaryAuthorization(task.decision.targetSummary, 101);
+  task.summaryExitReviews = [authorization];
+  task.decision.exitGuard = { summary: true, aiAuthorization: authorization, expiresAt: authorization.expiresAt, triggerPrice: 101 };
   task.pendingAction = buildPendingAction(task, task.decision);
   assert.equal(task.pendingAction.baselinePositionQty, 2);
   await confirmPendingAction(taskId, { source: "manual_confirm", runtime: { submitSuggestionForm: async () => ({ ok: true, submitted: true, code: "TRADE_SUBMITTED" }) } });

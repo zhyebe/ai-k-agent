@@ -495,3 +495,6 @@ kbd { padding: 2px 5px; color: #7d8994; background: var(--bg-deep); border: 1px 
 .browser-error { padding: 0 18px; font-size: 12px; overflow-wrap: anywhere; }
 .form-section-label { padding-top: 5px; color: var(--text-strong); border-top: 1px solid var(--border-soft); font-size: 11px; font-weight: 600; }
 .modal-form input[type="datetime-local"] { color-scheme: dark; min-width: 0; }
+.trading-costs { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 5px; }
+.trading-costs legend { padding: 0 4px; color: var(--muted-strong); font-size: 11px; font-weight: 500; }
+.trading-costs p { margin: 0; color: var(--muted); font-size: 10px; font-weight: 400; line-height: 1.5; }

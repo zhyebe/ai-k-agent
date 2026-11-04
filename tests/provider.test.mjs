@@ -698,8 +698,8 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     assert.ok(seen[0].body.system);
     const prompt = seen[0].body.system;
     assert.match(prompt, /选定方向盈利概率>=40%/);
-    assert.match(prompt, /盈利点差>=1时程序立即整行离场，不等待AI/);
-    assert.match(prompt, /亏损点差<=-2时先连续观察30秒排查闪K，再独立AI请求决定EXIT或HOLD/);
+    assert.match(prompt, /到达目标立即离场/);
+    assert.match(prompt, /硬止损立即执行/);
     assert.match(prompt, /Price response outranks static displayed depth/);
     assert.match(prompt, /correct persistent directional bias/);
 

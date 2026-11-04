@@ -33,7 +33,8 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
   };
   if (input.task) {
     const task = input.task;
-    browserInput.task = { id: task.id, symbol: task.symbol, timeframe: task.timeframe, target: task.target, exitObservationIndex: task.exitObservationIndex };
+    browserInput.task = { id: task.id, symbol: task.symbol, timeframe: task.timeframe, target: task.target,
+      exitObservationIndex: task.exitObservationIndex, exitReviewTargets: task.exitReviewTargets };
   }
   const { signal, ...callOptions } = options || {};
   // Browser runtime may run on a different machine or have a skewed clock.
@@ -43,7 +44,7 @@ export async function callBrowserMethod(method, userId, input = {}, options = {}
   // desktop timestamp is old/future or the browser call spent time in queue.
   const result = await invokeDesktopAi(userId, method, {
     channel: "browser",
-    requiredCapability: input.targetSummary || method === "observeExecutionMarket" ? "browser-ai-summary-exit-v1" : "",
+    requiredCapability: input.targetSummary || ["observeExecutionMarket", "submitSuggestionForm", "continueManualEntry", "fillSuggestionForm"].includes(method) ? "browser-ai-trading-plan-v2" : "",
     input: browserInput,
     provider: browserProvider,
     credential: credential ? { username: credential.username, password: credential.password, target: credential.target } : undefined,

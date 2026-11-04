@@ -325,9 +325,10 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
   const confirmationToken = `${Date.now()}-${Math.random()}`;
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
   let confirmed = false;
+  let submittedPrice = null;
   let failureCode = "TRADE_DIALOG_NOT_CONFIRMED";
   do {
-    if (finished()) return { ok: true, confirmed };
+    if (finished()) return { ok: true, confirmed, submittedPrice };
     const boxes = page.locator(selector);
     for (let index = 0; index < await boxes.count(); index += 1) {
       const box = boxes.nth(index);
@@ -385,9 +386,10 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       if (!fresh) continue;
       await control.click({ timeout: 5000 });
       confirmed = true;
+      if (dialogPrice !== null) submittedPrice = dialogPrice;
       await page.waitForTimeout(150);
     }
-    if (finished()) return { ok: true, confirmed };
+    if (finished()) return { ok: true, confirmed, submittedPrice };
     if (cancelOrder && confirmed) {
       const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
       // The caller verifies current orders and fresh feedback after the modal closes.
@@ -396,10 +398,10 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     const hint = await page.locator(".el-message:visible, .el-notification__content:visible").evaluateAll((nodes, token) => nodes
       .filter((node) => !token || node.dataset.axiomNoticeBaseline !== token || node.dataset.axiomNoticeText !== String(node.textContent || "").trim())
       .map((node) => node.textContent || ""), baselineToken);
-    if (hint.some((text) => /成功|已提交|失败|不足|拒绝|错误/.test(text))) return { ok: true, confirmed };
+    if (hint.some((text) => /成功|已提交|失败|不足|拒绝|错误/.test(text))) return { ok: true, confirmed, submittedPrice };
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
-  return { ok: !exitType || confirmed, confirmed, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
+  return { ok: !exitType || confirmed, confirmed, submittedPrice, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
 }
 
 export async function dismissTransferDialogs(page, token) {

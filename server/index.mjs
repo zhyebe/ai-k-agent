@@ -6,6 +6,7 @@ import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { createPersistence } from "./persistence.mjs";
 import { DEFAULT_ENTRY_QUANTITY, parseEntryQuantity } from "./order-quantity.mjs";
+import { parseTradingCosts } from "./trading-plan.mjs";
 import { DEFAULT_SESSION_CLOSE, parseSessionClose } from "./exit-policy.mjs";
 import { assertTradingSessionOpen, defaultTradingSession, parseTradingSession, rolledTradingSession, tradingSessionFromEnv } from "./trading-session.mjs";
 import { createProvider, publicProvider } from "./provider.mjs";
@@ -443,7 +444,7 @@ if (stateLoadFailed) {
     if (!restoredState) {
       const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
       if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
-      const skill = { id: "skill_local_trading", ownerUserId: "local-user", title: "AI 趋势交易：入场、持仓与离场", kind: "expert", status: "APPROVED", version: "v1.0.0", tags: ["优先参考"], source: "应用内置", content, summary: "主动趋势预测、多空持仓、闪 K 排除与条件离场", chunks: 0, createdAt: new Date().toISOString() };
+      const skill = { id: "skill_local_trading", ownerUserId: "local-user", title: "AI 趋势交易：入场、持仓与离场", kind: "expert", status: "APPROVED", version: "v1.0.2", tags: ["优先参考"], source: "应用内置", content, summary: "主动趋势预测、多空持仓、闪 K 排除与条件离场", chunks: 0, createdAt: new Date().toISOString() };
       await persistSkill(skill);
       state.skills.push(skill);
       indexSkill(skill);
@@ -609,6 +610,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
+  if (body.tradingCosts !== undefined && parseTradingCosts(body.tradingCosts) === null) return reply.code(400).send({ error: "INVALID_TRADING_COSTS" });
   const targetType = body.targetType === "app" ? "app" : "website";
   const targetInput = { type: targetType, name: body.targetName, url: body.url, installPath: body.installPath, appId: body.appId };
   let profile = null;
@@ -652,6 +654,7 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     automationAuthorized: false,
     autoDecisionEnabled: body.autoDecisionEnabled === true,
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
+    tradingCosts: parseTradingCosts(body.tradingCosts) || {},
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
     tradingSession: tradingSessionFromEnv() || defaultTradingSession(),
@@ -725,8 +728,10 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
   const body = request.body || {};
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
-  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt };
+  if (body.tradingCosts !== undefined && parseTradingCosts(body.tradingCosts) === null) return reply.code(400).send({ error: "INVALID_TRADING_COSTS" });
+  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, tradingCosts: task.tradingCosts, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt };
   if (body.entryQuantity !== undefined) task.entryQuantity = parseEntryQuantity(body.entryQuantity);
+  if (body.tradingCosts !== undefined) task.tradingCosts = parseTradingCosts(body.tradingCosts);
   if (body.sessionClose !== undefined) task.sessionClose = parseSessionClose(body.sessionClose);
   task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;

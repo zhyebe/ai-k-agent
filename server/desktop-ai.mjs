@@ -42,7 +42,7 @@ export function attachDesktopAiSocket(userId, socket) {
       const message = JSON.parse(parsed);
       state.alive = true;
       if (message.type === "runtime.hello") {
-        state.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter((item) => ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1"].includes(item)) : [];
+        state.capabilities = Array.isArray(message.capabilities) ? message.capabilities.filter((item) => ["browser-v1", "browser-exit-v1", "browser-summary-exit-v1", "browser-ai-summary-exit-v1", "browser-ai-trading-plan-v2"].includes(item)) : [];
         return;
       }
       handleDesktopAiMessage(message, socket);
@@ -219,7 +219,7 @@ export async function invokeDesktopAi(userId, method, payload = {}) {
 }
 
 export async function callProviderMethod(method, userId, payload = {}) {
-  if (desktopAiRequired() || method === "requestMarketAnalysis") return invokeDesktopAi(userId, method, { ...payload, channel: "ai", requiredCapability: method === "requestSummaryExitDecision" ? "browser-ai-summary-exit-v1" : method === "requestMarketAnalysis" ? "browser-v1" : "" });
+  if (desktopAiRequired() || method === "requestMarketAnalysis") return invokeDesktopAi(userId, method, { ...payload, channel: "ai", requiredCapability: method === "requestSummaryExitDecision" ? "browser-ai-trading-plan-v2" : method === "requestMarketAnalysis" ? "browser-v1" : "" });
   if (method === "requestDecision") return requestDecision(payload.provider, payload.context, payload.options);
   if (method === "requestSummaryExitDecision") return requestSummaryExitDecision(payload.provider, payload.context, payload.options);
   if (method === "requestBrowserActions") return requestBrowserActions(payload.provider, payload.context, payload.options);

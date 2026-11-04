@@ -221,6 +221,58 @@ test("shared providers enforce creator controls and cache each user's enabled mo
 });
 
 for (const width of [1440, 390]) {
+  test(`per-symbol round-trip costs preserve explicit zero and unknown values at ${width}px`, async t => {
+    const { page, navigate } = await openPage(t, { width });
+    const sample = structuredClone(workspace);
+    let createdPayload, updatedPayload;
+    await page.route("**/api/workspace", route => route.fulfill({ json: sample }));
+    await page.route("**/api/tasks", async route => {
+      createdPayload = route.request().postDataJSON();
+      const task = { ...structuredClone(sample.tasks[0]), ...createdPayload, id: "fee-settings",
+        status: "MANUAL_CONTROL", monitoringEnabled: false, stopLocked: true };
+      sample.tasks.unshift(task);
+      await route.fulfill({ json: { task } });
+    });
+    await page.route("**/api/tasks/fee-settings", async route => {
+      updatedPayload = route.request().postDataJSON();
+      Object.assign(sample.tasks[0], updatedPayload);
+      await route.fulfill({ json: { task: sample.tasks[0] } });
+    });
+    await navigate();
+    if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("button", { name: "任务管理", exact: true }).click();
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    let dialog = page.getByRole("dialog", { name: "创建任务", exact: true });
+    assert.equal(await dialog.getByLabel("DGKZ 往返费用", { exact: true }).inputValue(), "");
+    assert.equal(await dialog.getByLabel("DGJJ 往返费用", { exact: true }).inputValue(), "");
+    await dialog.getByLabel("DGKZ 往返费用", { exact: true }).fill("0.2");
+    await dialog.getByLabel("DGJJ 往返费用", { exact: true }).fill("0");
+    await dialog.getByLabel("登录账号", { exact: true }).fill("isolated-ui-account");
+    await dialog.getByLabel("登录密码", { exact: true }).fill("isolated-ui-password");
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await capture(page, `fee-settings-create-${width}`);
+    await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.deepEqual(createdPayload.tradingCosts, { DGKZ: 0.2, DGJJ: 0 });
+    if (width === 390) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("button", { name: "任务管理", exact: true }).click();
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    dialog = page.getByRole("dialog", { name: "编辑任务", exact: true });
+    assert.equal(await dialog.getByLabel("DGKZ 往返费用", { exact: true }).inputValue(), "0.2");
+    assert.equal(await dialog.getByLabel("DGJJ 往返费用", { exact: true }).inputValue(), "0");
+    await dialog.getByLabel("DGKZ 往返费用", { exact: true }).fill("0.3");
+    await dialog.getByLabel("DGJJ 往返费用", { exact: true }).fill("");
+    await capture(page, `fee-settings-edit-${width}`);
+    await dialog.getByRole("button", { name: "保存修改", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.deepEqual(updatedPayload.tradingCosts, { DGKZ: 0.3 });
+    await page.getByRole("button", { name: "编辑", exact: true }).click();
+    assert.equal(await dialog.getByLabel("DGKZ 往返费用", { exact: true }).inputValue(), "0.3");
+    assert.equal(await dialog.getByLabel("DGJJ 往返费用", { exact: true }).inputValue(), "");
+  });
+}
+
+for (const width of [1440, 390]) {
   test(`daily close settings persist through task creation and editing at ${width}px`, async (t) => {
     const { page, navigate } = await openPage(t, { width });
     const sample = structuredClone(workspace);

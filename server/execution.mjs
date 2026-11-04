@@ -1,5 +1,6 @@
 import { addEvent } from "./store.mjs";
 import { entryQuantityForTask } from "./order-quantity.mjs";
+import { executableEntryQuote } from "./trading-plan.mjs";
 
 export const executionLimits = Object.freeze({ maxPositionPct: 30, maxOrderValuePct: 8 });
 export const tradingExecutionPolicy = Object.freeze({ enabled: true, mode: "CONFIRM_THEN_SUBMIT" });
@@ -56,7 +57,9 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
   const price = Number.isFinite(requestedPrice) && requestedPrice > 0
     ? requestedPrice
     : Number(decision?.targetSummary && decision?.exitGuard?.triggerPrice != null
-      ? decision.exitGuard.triggerPrice : targetMarket?.latest?.price ?? targetMarket?.quote?.price);
+      ? decision.exitGuard.triggerPrice : isLiveTask(task) && !decision?.exitType
+        ? executableEntryQuote(targetMarket, decision?.action, entryQuantityForTask(task))?.price
+        : targetMarket?.latest?.price ?? targetMarket?.quote?.price);
   const equity = Number(task?.metrics?.equity || task?.market?.account?.availableFunds || 0);
   const requestedPct = Number(decision?.targetPositionPct || 0);
   const orderPct = Number(decision?.maxOrderValuePct || executionLimits.maxOrderValuePct);

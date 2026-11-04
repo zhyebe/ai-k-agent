@@ -84,8 +84,18 @@ export function executableExitQuote(market, position, now = Date.now()) {
   const depth = summarizeOrderBook(book?.orderBook || book?.pageView?.orderBook);
   if (depth.status === "CROSSED") return null;
   const direction = heldDirection(position);
-  const quote = direction === "LONG" ? depth.bids[0] : direction === "SHORT" ? depth.asks[0] : null;
-  return quote?.price > 0 && quote.volume > 0 ? { price: quote.price, volume: quote.volume, observedAt } : null;
+  const levels = direction === "LONG" ? depth.bids : direction === "SHORT" ? depth.asks : [];
+  const quantity = Number(position.quantity);
+  if (!(quantity > 0)) return null;
+  let remaining = quantity, value = 0;
+  for (const level of levels) {
+    const filled = Math.min(remaining, level.volume);
+    if (!filled) continue;
+    remaining -= filled;
+    value += filled * level.price;
+    if (remaining <= 0) return { price: level.price, averagePrice: value / quantity, volume: quantity, observedAt };
+  }
+  return null;
 }
 
 function positionAmountTriggerPrice(pnl, long, amount) {

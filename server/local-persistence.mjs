@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { tradingSkillUpgrade } from "./trading-skill-upgrade.mjs";
 
 const collections = ["tasks", "skills", "providers", "connectors", "credentials", "orders", "events", "users", "sessions", "assignments"];
 
@@ -59,7 +60,20 @@ export async function createLocalPersistence({ directory, compactTaskRuntime }) 
   return {
     mode: "file", get available() { return !writeError; }, detail: "本机文件存储",
     async health() { await queue; return { mode: "file", available: !writeError, detail: writeError ? `本机保存失败：${writeError.message}` : "本机文件存储" }; },
-    async loadState() { await queue; return exists ? structuredClone(data) : null; },
+    async loadState() {
+      await queue;
+      if (!exists) return null;
+      for (const skill of structuredClone(data.skills)) {
+        const revision = await tradingSkillUpgrade(skill);
+        if (!revision) continue;
+        await change(next => {
+          const current = next.skills.find(item => item.id === skill.id);
+          if (current?.status === skill.status && current?.version === skill.version && current?.content === skill.content) Object.assign(current, revision);
+        });
+      }
+      await queue;
+      return structuredClone(data);
+    },
     loadCredentials: () => read("credentials"),
     loadUsers: () => read("users"),
     loadUserSessions: () => read("sessions"),

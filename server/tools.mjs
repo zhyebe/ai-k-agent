@@ -12,6 +12,7 @@ import { summaryExitAllowsPrice, summaryKey } from "./summary-exit-policy.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote } from "./exit-policy.mjs";
+import { entryPlanAllowsPrice, executableEntryQuote, matchesInstrument } from "./trading-plan.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -854,22 +855,49 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
   return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };
 }
 
-async function entryFlatGuard(sessionId) {
+async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType = "MARKET", checkFields = false } = {}) {
+  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_PLAN_REQUIRED" };
   const snapshot = await readVisiblePage(sessionId, { quick: true, inspectPositions: true });
-  const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot) : null;
+  const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot, { symbol: entryGuard.symbol }) : null;
   const account = market?.account;
   const verified = account?.positionsVerified === true && account?.positionSummariesVerified === true && account?.openOrdersVerified === true;
-  return { ok: Boolean(verified && !account.positions?.some(p => Number(p.quantity) > 0)
+  const flat = Boolean(verified && !account.positions?.some(p => Number(p.quantity) > 0)
     && !account.positionSummaries?.some(p => Number(p.quantity) > 0)
-    && !account.openOrders?.some(p => Number(p.remainingQuantity) > 0)), code: verified ? "ROUND_NOT_FLAT" : "ACCOUNT_UNVERIFIED" };
+    && !account.openOrders?.some(p => Number(p.remainingQuantity) > 0));
+  if (!flat) return { ok: false, code: verified ? "ROUND_NOT_FLAT" : "ACCOUNT_UNVERIFIED" };
+  if (!matchesInstrument(entryGuard, market)) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED" };
+  let submittedPrice = Number(price);
+  if (checkFields) {
+    const page = await getBrowserPage(sessionId);
+    const fields = await page.locator("input").evaluateAll((inputs, side) => {
+      const values = { price: [], quantity: [] };
+      for (const input of inputs) {
+        const rect = input.getBoundingClientRect();
+        if (!rect.width || !rect.height || input.type === "checkbox" || input.disabled) continue;
+        const label = input.closest(".inputWrap, .el-form-item, li, label, .form-item")?.textContent || input.placeholder || "";
+        if ((side === "BUY" ? /买价|买入价格/ : /卖价|卖出价格/).test(label)) values.price.push(Number(input.value));
+        if ((side === "BUY" ? /买量|买入数量/ : /卖量|卖出数量/).test(label)) values.quantity.push(Number(input.value));
+      }
+      return values;
+    }, action);
+    if (fields.price.length !== 1 || fields.quantity.length !== 1 || fields.quantity[0] !== Number(quantity)) return { ok: false, code: "ENTRY_FORM_CHANGED" };
+    submittedPrice = fields.price[0];
+  }
+  const quote = executableEntryQuote(market, action, quantity);
+  if (!quote) return { ok: false, code: "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED" };
+  if (!entryPlanAllowsPrice(entryGuard, submittedPrice)
+    || (orderType === "MARKET" && (!entryPlanAllowsPrice(entryGuard, quote.price)
+      || (action === "BUY" ? submittedPrice < quote.price : submittedPrice > quote.price)))) return { ok: false, code: "ENTRY_PRICE_OUTSIDE_AI_PLAN" };
+  return { ok: true, price: submittedPrice };
 }
 
-export async function continueManualEntry({ sessionId = "default", action, entryDeadlineAt = null } = {}) {
+export async function continueManualEntry({ sessionId = "default", action, entryGuard, quantity, orderType = "MARKET" } = {}) {
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND" };
   const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
   if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
-  const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page), canConfirm: () => entryFlatGuard(sessionId) });
+  const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page),
+    canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, orderType, checkFields: true }) });
   return { ok: result.ok, code: result.code, continued: result.confirmed === true };
 }
 
@@ -984,18 +1012,20 @@ async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolNa
     if (!dialog.ok) return { ok: false, code: dialog.code, submitted: false, uncertain: confirmed };
     const feedback = await observeTradeFeedback(page, response, baselineToken);
     return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
-      pageHint: feedback.pageHint, clicked: result }), submittedQuantity: targetSummary.quantity, targetSummary, targetPositionIds: [] };
+      pageHint: feedback.pageHint, clicked: result }), submittedQuantity: targetSummary.quantity, submittedPrice: dialog.submittedPrice,
+      targetSummary, targetPositionIds: [] };
   } catch (error) {
     return { ok: false, code: "SUMMARY_TRANSFER_FAILED", message: error.message, submitted: false, uncertain: clicked };
   } finally { response.dispose(); await dismissTransferDialogs(page, baselineToken); }
 }
 
-export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetSummary = null, exitGuard = null, browserProvider = null, provider = null } = {}) {
+export async function submitSuggestionForm({ sessionId = "default", action, price, quantity, symbol = "", symbolName = "", instrumentId = "", exitType = null, orderType = "MARKET", targetSummary = null, exitGuard = null, entryGuard = null, browserProvider = null, provider = null } = {}) {
   if (!["BUY", "SELL"].includes(action)) return { ok: false, code: "NO_DIRECTIONAL_ACTION", submitted: false };
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND", submitted: false };
   if (exitType) {
-    if (!targetSummary || exitGuard?.summary !== true || !(exitType === "TAKE_PROFIT" ? exitGuard.programProfit === true : exitType === "STOP_LOSS" && exitGuard.aiAuthorization)) return { ok: false, code: "AI_SUMMARY_EXIT_REQUIRED", submitted: false };
+    if (!targetSummary || exitGuard?.summary !== true || !exitGuard.aiAuthorization
+      || !["TAKE_PROFIT", "STOP_LOSS"].includes(exitType)) return { ok: false, code: "AI_SUMMARY_EXIT_REQUIRED", submitted: false };
     return submitSummaryTransfer(page, { sessionId, action, symbol, symbolName, instrumentId, targetSummary, exitGuard, exitType });
   }
   if (!(Number(price) > 0) || !(Number(quantity) > 0)) return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", submitted: false };
@@ -1004,7 +1034,8 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   const aiProvider = browserProvider || provider;
   let response;
   try {
-    const allowed = await entryFlatGuard(sessionId);
+    if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED", submitted: false };
+    const allowed = await entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType });
     if (!allowed.ok) return { ...allowed, submitted: false };
     const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
     if (!filled.ok) return { ...filled, submitted: false };
@@ -1016,7 +1047,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     clicked = true;
     stage = "confirm";
     const dialog = await completeTradeDialogs(page, { orderType, price, baselineToken, finished: () => Boolean(response.peek()),
-      canConfirm: () => entryFlatGuard(sessionId),
+      canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType, checkFields: true }),
       resolveConfirmation: aiProvider ? box => agentTradeConfirmation(page, box, aiProvider, { action, price, quantity }) : undefined });
     confirmed = dialog.confirmed === true;
     if (!dialog.ok) return { ok: false, code: dialog.code, submitted: false, uncertain: confirmed };

@@ -47,6 +47,36 @@ test("corrupt or unsupported local state fails without overwriting files", async
   }
 });
 
+test("local reviewed built-in strategy upgrades once and never restores a deleted skill", async t => {
+  const { adapter, file, open } = await fixture(t);
+  const previous = (await fs.readFile(new URL("./fixtures/trading-skill-v0.3.133.md", import.meta.url), "utf8")).trim();
+  const bundled = (await fs.readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
+  await adapter.saveSkill({ id: "skill_local_trading", status: "APPROVED", version: "v1.0.0", content: previous, ownerUserId: "local-user" });
+  await adapter.saveProvider({ id: "keep-provider", encryptedKey: "encrypted" });
+  const restored = await open();
+  const first = await restored.loadState();
+  assert.equal(first.skills[0].version, "v1.0.2");
+  assert.equal(first.skills[0].content, bundled);
+  assert.equal(first.skills[0].ownerUserId, "local-user");
+  assert.equal(first.providers[0].id, "keep-provider");
+  assert.equal(JSON.parse(await fs.readFile(file, "utf8")).skills[0].version, "v1.0.2");
+  assert.equal((await restored.loadState()).skills[0].updatedAt, first.skills[0].updatedAt);
+  await restored.deleteSkill("skill_local_trading");
+  await restored.close();
+  assert.deepEqual((await (await open()).loadState()).skills, []);
+});
+
+test("local strategy migration preserves edits, review status and unrelated records", async t => {
+  const content = (await fs.readFile(new URL("./fixtures/trading-skill-v0.3.133.md", import.meta.url), "utf8")).trim();
+  for (const change of [{ content: `${content}\n用户规则` }, { status: "REVIEW" }, { version: "user-version" }, { id: "user-skill" }]) {
+    const { adapter, open } = await fixture(t);
+    const skill = { id: "skill_local_trading", status: "APPROVED", version: "v1.0.0", content, ...change };
+    await adapter.saveSkill(skill);
+    await adapter.close();
+    assert.deepEqual((await (await open()).loadState()).skills, [skill]);
+  }
+});
+
 test("failed local write is surfaced, preserves the committed snapshot, and does not poison later writes", async t => {
   const { file, adapter, open } = await fixture(t);
   await adapter.saveProvider({ id: "p", model: "saved" });

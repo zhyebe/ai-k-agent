@@ -4,14 +4,17 @@ import test, { afterEach, beforeEach } from 'node:test';
 import { runAnalysis, runPositionExitCycle, stopAllControllers } from '../server/engine.mjs';
 import { state } from '../server/store.mjs';
 import { requestDecision, requestSummaryExitDecision } from '../server/provider.mjs';
+import { anchorCandle, tradingPlan } from './fixtures/trading-plan.mjs';
 beforeEach(t => t.mock.timers.enable({ apis: ['setTimeout'] }));
 afterEach(stopAllControllers);
 function fixture(t, id, automatic = true, action = 'BUY', probability = 0.6) {
+  const plan = tradingPlan(action === 'BUY' ? 'LONG' : 'SHORT');
   const market = { ok: true, symbol: 'A', symbolName: '商品A', timeframe: '1m', observedAt: new Date().toISOString(), fingerprint: id, source: 'test', evidenceId: 'market:test',
-    history: [], historyCount: 0, latest: { price: 100 }, quote: { price: 100 }, books: [], indicators: {}, missingFields: [],
+    history: [anchorCandle(plan)], historyCount: 1, latest: { price: 100 }, quote: { price: 100 }, books: [], indicators: {}, missingFields: [],
     orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] },
     account: { positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [], availableFunds: 10000 } };
   const task = { id, ownerUserId: id, mode: 'LIVE', autoDecisionEnabled: automatic, status: 'MONITORING', monitoringEnabled: true,
+    tradingCosts: { A: 0.2 },
     target: { type: 'website', connectorId: 'connector_haohan_readonly', browserSessionId: id, url: 'https://smyw.haohandahan.cn/client/#/transcc' },
     market, rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: 'HOLD', riskFlags: [], evidenceIds: [] } };
   state.tasks.unshift(task); t.after(() => { state.tasks = state.tasks.filter(item => item !== task); });
@@ -24,7 +27,7 @@ function fixture(t, id, automatic = true, action = 'BUY', probability = 0.6) {
     requestSummaryExitDecision: async () => ({ ok: true, decision: 'EXIT', rationale: '本轮兑现' }),
     requestDecision: async (_provider, context) => { analyses.push(context); return { action, marketRegime: 'UNKNOWN', targetSymbol: 'A',
       bullishProfitProbability: action === 'BUY' ? probability : 0.9, bearishProfitProbability: action === 'SELL' ? probability : 0.9,
-      orderType: 'MARKET', riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }; } };
+      entryPrice: 100, tradePlan: plan, orderType: 'MARKET', riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }; } };
   return { task, market, runtime, submissions, forms, analyses };
 }
 for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const probability of [0.3999, 0.4, 0.42, 0.45, 0.6]) {
@@ -55,12 +58,15 @@ for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test
 
 for (const orderType of ['MARKET', 'LIMIT']) test(`40% AI-selected short ${orderType} submits once at the AI price`, async t => {
   const f = fixture(t, `ai-price-40-${orderType}`);
+  const plan = tradingPlan('SHORT', orderType === 'LIMIT' ? 101 : 100, { anchorTimestamp: f.market.history[0].timestamp });
+  f.market.history = [anchorCandle(plan)];
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => {
     calls++;
     return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
       action: 'SELL', bullish_profit_probability: 0.8, bearish_profit_probability: 0.4,
-      order_type: orderType, ...(orderType === 'LIMIT' ? { entry_price: 101, target_price: 101 } : {}),
+      order_type: orderType, entry_price: orderType === 'LIMIT' ? 101 : 100, trade_plan: plan,
+      ...(orderType === 'LIMIT' ? { target_price: 101 } : {}),
       target_symbol: 'A', analysis_summary: '主判断：偏跌，AI选择有盈利空间的入场价',
     }) } }] }));
   });
@@ -84,19 +90,20 @@ for (const probability of [0.4, 0.42, 0.45, 0.8]) test(`AI HOLD at eligible ${pr
   assert.equal(f.task.decision.action, 'HOLD');
   assert.equal(f.task.decision.riskFlags.includes('INCONSISTENT_ACTION_PROBABILITY'), false);
 });
-test('AI entry, holdings, immediate profit exit, verified flat, next entry completes a full round in the same K', async t => {
+test('AI entry, preserved target, verified flat and next entry complete a full round', async t => {
   const f = fixture(t, 'whole-round');
   await runAnalysis(f.task.id, '', { runtime: f.runtime });
   assert.equal(f.submissions.length, 1);
   f.market.account.positions = [{ positionOrderId: 'p', symbol: 'A', symbolName: '商品A', side: 'LONG', quantity: 1, orderPrice: 100, frozenQuantity: 0 }];
   f.market.account.positionSummaries = [{ symbol: 'A', symbolName: '商品A', side: 'LONG', quantity: 1, averagePrice: 100, frozenQuantity: 0 }];
-  f.market.orderBook.bids[0].price = 101; f.market.orderBook.asks[0].price = 101;
+  f.market.orderBook.bids[0].price = 104; f.market.orderBook.asks[0].price = 104;
   await runPositionExitCycle(f.task.id, { runtime: f.runtime }); await new Promise(resolve => setImmediate(resolve));
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
   assert.equal(f.submissions.length, 2);
   assert.equal(f.submissions[1].exitType, 'TAKE_PROFIT');
   f.market.account.positions = []; f.market.account.positionSummaries = [];
   await runPositionExitCycle(f.task.id, { runtime: f.runtime });
+  f.market.orderBook.bids[0].price = 100; f.market.orderBook.asks[0].price = 100;
   await runAnalysis(f.task.id, '', { runtime: f.runtime, skipIfUnchanged: true });
   assert.equal(f.submissions.length, 3);
   assert.equal(f.submissions[2].exitType, null);
@@ -116,10 +123,10 @@ for (const apiFormat of ['chat', 'responses', 'anthropic', 'gemini']) test(`${ap
     const body = JSON.parse(options.body); calls.push(body);
     const messages = body.input || body.messages || body.contents;
     const prompt = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
-    assert.match(prompt, /盈利.*>=1|盈利点差>=1/);
-    assert.match(prompt, /亏损.*<=-2|亏损点差<=-2/);
+    assert.match(prompt, /利润保护/);
+    assert.match(prompt, /硬止损/);
     const value = calls.length === 1 ? { action: 'SELL', bullish_profit_probability: 0.8, bearish_profit_probability: 0.46, analysis_summary: '主判断：偏跌' }
-      : { decision: 'HOLD', rationale: '价格仍有恢复机会，继续监控风险' };
+      : { decision: 'HOLD', plan: tradingPlan(), rationale: '价格仍有恢复机会，继续监控风险' };
     const text = JSON.stringify(value);
     return new Response(JSON.stringify(apiFormat === 'anthropic' ? { content: [{ type: 'text', text }] }
       : apiFormat === 'responses' ? { output_text: text } : apiFormat === 'gemini' ? { candidates: [{ content: { parts: [{ text }] } }] }
@@ -130,6 +137,8 @@ for (const apiFormat of ['chat', 'responses', 'anthropic', 'gemini']) test(`${ap
   assert.equal(entry.action, 'SELL');
   const exit = await requestSummaryExitDecision(provider, { reviewType: 'STOP_LOSS', pnlPoints: -2 });
   assert.equal(exit.decision, 'HOLD');
+  assert.equal(exit.plan.takeProfitPrice, 104);
+  assert.equal(exit.plan.hardStopPrice, 95);
   assert.equal(calls.length, 2);
 });
 

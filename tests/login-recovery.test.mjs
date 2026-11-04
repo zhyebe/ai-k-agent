@@ -3,6 +3,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { runAnalysis, runPositionExitCycle, startController, stopController } from "../server/engine.mjs";
 import { state } from "../server/store.mjs";
+import { anchorCandle, tradingPlan } from "./fixtures/trading-plan.mjs";
+import { installSummaryPlan, summaryExitReviewContexts } from "../server/summary-exit-policy.mjs";
+
+function armCurrentPlan(task, market) {
+  const context = summaryExitReviewContexts(market)[0], average = context.summary.averagePrice;
+  return installSummaryPlan(task, context, tradingPlan("LONG", average, { takeProfitPrice: average + 1,
+    profitProtection: { activationPrice: average + 0.8, floorPrice: average + 0.5, trailingDistance: 0.2 } }),
+  { id: "login-ai-plan", observedAt: market.observedAt });
+}
 
 function setup(t) {
   if (!t.name.startsWith("fast relogin wakes")) t.mock.timers.enable({ apis: ["setTimeout"] });
@@ -20,6 +29,8 @@ function setup(t) {
   market.account.positionSummariesVerified = true;
   Object.defineProperty(market.account, "positionSummaries", { enumerable: true, configurable: true, get: () => [{ symbol: "DGKZ", symbolName: "测试商品", side: "LONG", quantity: 1, frozenQuantity: 0, averagePrice: position.orderPrice, realtimeValueChange: 103 - position.orderPrice }] });
   task.market = market;
+  task.tradingCosts = { DGKZ: 0.2 };
+  armCurrentPlan(task, market);
   state.tasks.unshift(task);
   t.after(() => { stopController(id); state.tasks = state.tasks.filter(item => item !== task); });
   const calls = [];
@@ -36,7 +47,8 @@ function setup(t) {
       return { action: "HOLD", riskFlags: [], evidenceIds: [], orderAssessments: [{ orderId: "O1", decision: "KEEP" }] };
     },
     cancelOpenOrders: async () => { calls.push("cancel"); market.account.openOrders = []; return { ok: true, results: [{ orderId: "O1", cancelled: true }] }; },
-    requestSummaryExitDecision: async () => { calls.push("loss-review"); return { ok: true, decision: "HOLD", rationale: "继续观察风险" }; },
+    requestSummaryExitDecision: async (_provider, context) => { calls.push("loss-review"); return {
+      ok: true, decision: "HOLD", plan: tradingPlan("LONG", context.summary.averagePrice), rationale: "继续观察风险" }; },
     submitSuggestionForm: async () => { calls.push("submit"); return { ok: true, submitted: true }; },
   };
   return { task, market, runtime, calls };
@@ -65,9 +77,10 @@ test("fast position monitor recovers login and executes a qualified summary exit
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects immediate +1 profit and AI -2 loss: entry ${entryPrice}`, async t => {
+for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects AI target and confirmed stop: entry ${entryPrice}`, async t => {
   const f = setup(t);
   f.market.account.positions[0].orderPrice = entryPrice;
+  armCurrentPlan(f.task, f.market);
   let reads = 0, submitted;
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
@@ -126,6 +139,8 @@ test("relogin during slow analysis discards old-session actions and resumes with
   const f = setup(t);
   f.market.account.positions = [];
   Object.defineProperty(f.market.account, "positionSummaries", { configurable: true, value: [] });
+  const plan = tradingPlan("LONG", 104);
+  f.market.history = [anchorCandle(plan)];
   let first = true;
   f.runtime.requestDecision = async () => {
     if (first) {
@@ -135,7 +150,7 @@ test("relogin during slow analysis discards old-session actions and resumes with
         observeExecutionMarket: async () => ++reads === 1 ? expired : f.market,
       } });
     }
-    return { action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.65, bearishProfitProbability: 0.3,
+    return { action: "BUY", entryPrice: 104, tradePlan: plan, marketRegime: "UP", bullishProfitProbability: 0.65, bearishProfitProbability: 0.3,
       targetSymbol: "DGKZ", riskFlags: [], evidenceIds: [], cancelOrderIds: ["O1"] };
   };
   f.runtime.cancelOpenOrders = async () => { f.calls.push("cancel"); f.market.account.openOrders = []; return { ok: true, results: [{ orderId: "O1", cancelled: true }] }; };

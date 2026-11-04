@@ -9,6 +9,7 @@ import { parseHaohanPageSnapshot } from '../server/haohan.mjs';
 import { runPositionExitCycle, startController, stopAllControllers } from '../server/engine.mjs';
 import { state } from '../server/store.mjs';
 import { tradeFixture } from './fixtures/trade-page.mjs';
+import { tradingPlan } from './fixtures/trading-plan.mjs';
 let browser, page;
 const fixture = tradeFixture.replace('<body>', '<body><div>DGKZ | 测试商品</div>')
   .replace("['positions','orders','history']", "['positions','orders','history','summary']")
@@ -44,12 +45,18 @@ const input = (side='LONG', extras={}) => {
  const targetSummary={symbol:'DGKZ',symbolName:'测试商品',side,quantity:side==='LONG'?3:1,averagePrice:side==='LONG'?99:102};
  const value={sessionId:'summary-browser',action:side==='LONG'?'SELL':'BUY',symbol:'DGKZ',symbolName:'测试商品',exitType:'TAKE_PROFIT',targetSummary,...extras};
  const expiresAt=new Date(Date.now()+30000).toISOString();
- value.exitGuard={summary:true,programProfit:true,expiresAt,unusedLegacyAuthorization:{id:'ai-review',decision:'EXIT',key:summaryKey(value.targetSummary),signature:summarySignature(value.targetSummary),reviewType:'TAKE_PROFIT',expiresAt}};
+ const average=value.targetSummary.averagePrice,direction=side==='LONG'?1:-1;
+ const plan=tradingPlan(side,average,{takeProfitPrice:average+direction,
+   profitProtection:{activationPrice:average+direction*0.8,floorPrice:average+direction*0.5,trailingDistance:0.2}});
+ const record={id:'ai-review',key:summaryKey(value.targetSummary),signature:summarySignature(value.targetSummary),summary:value.targetSummary,
+   plan,bestPrice:average,profitArmed:false,maxHoldAt:new Date(Date.now()+300000).toISOString(),expiresAt};
+ value.exitGuard={summary:true,expiresAt,aiAuthorization:{id:'ai-review',decision:'EXIT',signature:record.signature,trigger:'TAKE_PROFIT',record,expiresAt}};
  return value;
 };
 for(const side of ['LONG','SHORT']) test(`${side} transfers once from the summary row, immediately without AI or detail controls`,async()=>{
  const result=await submitSuggestionForm(input(side,{browserProvider:{baseUrl:'https://must-not-call.invalid',apiKey:'test',model:'test'}}));
  assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.submittedPrice,side==='LONG'?100:101);
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[{side,quantity:side==='LONG'?3:1,price:side==='LONG'?100:101}]);
  assert.deepEqual(await page.evaluate(()=>window.exits),[]);
  assert.equal(await page.evaluate(()=>window.historyVisits+window.wrongGlobalExit+window.wrongStopDialog),0);
@@ -90,13 +97,12 @@ test('market price moving after fill cancels an unmarketable summary limit even 
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[]);
 });
 
-test('loss at -2 points requires matching fresh AI EXIT authorization before browser transfer', async () => {
+test('AI immediate loss exit requires a matching fresh price authorization before transfer', async () => {
  await page.evaluate(() => { document.querySelector('#summary [data-side="LONG"]').cells[2].textContent='102'; });
  const targetSummary={symbol:'DGKZ',symbolName:'测试商品',side:'LONG',quantity:3,averagePrice:102};
  const expiresAt=new Date(Date.now()+30000).toISOString();
- const end=Date.now();
- const lossObservation={signature:summarySignature(targetSummary),startedAt:end-30000,lastObservedAt:end,samples:[-30000,-20000,-10000,0].map(offset=>({observedAt:end+offset,price:100}))};
- const value={...input('LONG'),exitType:'STOP_LOSS',targetSummary,exitGuard:{summary:true,expiresAt,aiAuthorization:{id:'loss-ai',lossObservation,decision:'EXIT',signature:summarySignature(targetSummary),reviewType:'STOP_LOSS',expiresAt}}};
+ const value={...input('LONG'),exitType:'STOP_LOSS',targetSummary,exitGuard:{summary:true,expiresAt,aiAuthorization:{id:'loss-ai',decision:'EXIT',
+   signature:summarySignature(targetSummary),trigger:'AI_EXIT_NOW',exitPrice:100,expiresAt}}};
  assert.equal((await submitSuggestionForm({...value,exitGuard:{summary:true}})).code,'AI_SUMMARY_EXIT_REQUIRED');
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[]);
  const result=await submitSuggestionForm(value);
@@ -104,10 +110,11 @@ test('loss at -2 points requires matching fresh AI EXIT authorization before bro
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[{side:'LONG',quantity:3,price:100}]);
 });
 
-test('engine profit trigger reaches a real isolated summary transfer without any AI request', async t => {
- await page.evaluate(() => { document.querySelector('#summary [data-side="SHORT"]').cells[2].textContent='101.5'; document.querySelector('#orders tbody').innerHTML='<tr><td colspan="11">暂无数据</td></tr>'; });
+test('engine AI target reaches a real isolated summary transfer while model is unavailable', async t => {
+ await page.evaluate(() => { document.querySelector('#summary [data-side="SHORT"]').cells[4].textContent='1'; document.querySelector('#orders tbody').innerHTML='<tr><td colspan="11">暂无数据</td></tr>'; });
  const id='browser-profit-round';
  const task={id,mode:'LIVE',autoDecisionEnabled:false,status:'MONITORING',monitoringEnabled:true,rules:[],workflow:[],metrics:{},decision:{action:'HOLD'},target:{browserSessionId:'summary-browser',connectorId:'connector_haohan_readonly'}};
+ task.summaryTradingPlans=[input().exitGuard.aiAuthorization.record];
  state.tasks.unshift(task);
  t.after(()=>{stopAllControllers();state.tasks=state.tasks.filter(item=>item!==task);});
  const runtime={observeExecutionMarket:async()=>{
