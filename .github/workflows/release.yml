@@ -23,7 +23,7 @@ jobs:
   macos:
     name: Build macOS universal
     if: ${{ !inputs.artifact_run_id }}
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
       MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
