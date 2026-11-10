@@ -7,7 +7,7 @@ import { adapterCanLogin, getConnectorAdapter } from "./connectors.mjs";
 import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession, resolveSnapshotControl, scanBrowserControls, scanBrowserPage, selectPageBoardInstrument } from "./browser.mjs";
 import { requestBrowserActions } from "./provider.mjs";
 import { getCredential, initVault } from "./vault.mjs";
-import { clickPositionSummaryTransfer, preparePositionSummaryRow, clickTradeEntry, completeTradeDialogs, dismissOrderCancellationDialogs, dismissTransferDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
+import { clickPositionSummaryTransfer, preparePositionSummaryRow, clickTradeEntry, completeTradeDialogs, dismissEntryDialogs, dismissOrderCancellationDialogs, dismissTransferDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
 import { summaryExitAllowsPrice, summaryKey } from "./summary-exit-policy.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
@@ -858,7 +858,9 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
 async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType = "MARKET", checkFields = false } = {}) {
   if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_PLAN_REQUIRED" };
   const snapshot = await readVisiblePage(sessionId, { quick: true, inspectPositions: true });
-  const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot, { symbol: entryGuard.symbol }) : null;
+  if (!snapshot.ok) return { ok: false, code: snapshot.code, message: snapshot.message };
+  const market = parseHaohanPageSnapshot(snapshot, { symbol: entryGuard.symbol });
+  if (market.code === "REAUTH_REQUIRED") return { ok: false, code: market.code, message: market.message };
   const account = market?.account;
   const verified = account?.positionsVerified === true && account?.positionSummariesVerified === true && account?.openOrdersVerified === true;
   const flat = Boolean(verified && !account.positions?.some(p => Number(p.quantity) > 0)
@@ -874,7 +876,8 @@ async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, 
       for (const input of inputs) {
         const rect = input.getBoundingClientRect();
         if (!rect.width || !rect.height || input.type === "checkbox" || input.disabled) continue;
-        const label = input.closest(".inputWrap, .el-form-item, li, label, .form-item")?.textContent || input.placeholder || "";
+        const label = [...(input.labels || [])].map(node => node.textContent).join("")
+          || input.closest(".inputWrap, .el-form-item, li, label, .form-item")?.textContent || input.placeholder || "";
         if ((side === "BUY" ? /买价|买入价格/ : /卖价|卖出价格/).test(label)) values.price.push(Number(input.value));
         if ((side === "BUY" ? /买量|买入数量/ : /卖量|卖出数量/).test(label)) values.quantity.push(Number(input.value));
       }
@@ -896,9 +899,12 @@ export async function continueManualEntry({ sessionId = "default", action, entry
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND" };
   const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
   if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
-  const result = await completeTradeDialogs(page, { baselineToken: await markTradePageHints(page),
-    canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, orderType, checkFields: true }) });
-  return { ok: result.ok, code: result.code, continued: result.confirmed === true };
+  const baselineToken = await markTradePageHints(page);
+  try {
+    const result = await completeTradeDialogs(page, { baselineToken,
+      canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, orderType, checkFields: true }) });
+    return { ok: result.ok, code: result.code, continued: result.confirmed === true };
+  } finally { await dismissEntryDialogs(page, baselineToken); }
 }
 
 export async function cancelOpenOrders({ sessionId = "default", orderIds = [] } = {}) {
@@ -986,16 +992,18 @@ async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolNa
   const verify = async (dialogPrice = null) => {
     if (Date.now() >= Date.parse(exitGuard.expiresAt) || !Number.isFinite(Date.parse(exitGuard.expiresAt))) return { ok: false, code: "EXIT_SUMMARY_EXPIRED" };
     const snapshot = await readVisiblePage(sessionId, { quick: true });
-    const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot, { symbol }) : null;
+    if (!snapshot.ok) return { ok: false, code: snapshot.code, message: snapshot.message };
+    const market = parseHaohanPageSnapshot(snapshot, { symbol });
+    if (market.code === "REAUTH_REQUIRED") return { ok: false, code: market.code, message: market.message };
     const rows = market?.account?.positionSummaries?.filter(row => summaryKey(row) === summaryKey(targetSummary)) || [];
     const current = rows[0];
     const quote = current && executableExitQuote(market, { ...current, symbol, instrumentId });
     const matched = market?.account?.positionSummariesVerified && rows.length === 1 && current.averagePrice === targetSummary.averagePrice
       && Number(current.quantity) === targetSummary.quantity && Number(current.frozenQuantity) === 0;
-    const marketable = quote && (dialogPrice === null || (targetSummary.side === "LONG" ? dialogPrice <= quote.price : dialogPrice >= quote.price));
-    const priceAllowed = marketable && summaryExitAllowsPrice(current, quote.price, exitGuard.aiAuthorization)
-      && (dialogPrice === null || summaryExitAllowsPrice(current, dialogPrice, exitGuard.aiAuthorization));
-    return { ok: Boolean(matched && priceAllowed), code: "EXIT_SUMMARY_CONDITION_CHANGED", price: matched && priceAllowed ? quote.price : null };
+    if (!matched || !quote || !summaryExitAllowsPrice(current, quote.price, exitGuard.aiAuthorization)) return { ok: false, code: "EXIT_SUMMARY_CONDITION_CHANGED" };
+    if (dialogPrice !== null && (!(targetSummary.side === "LONG" ? dialogPrice <= quote.price : dialogPrice >= quote.price)
+      || !summaryExitAllowsPrice(current, dialogPrice, exitGuard.aiAuthorization))) return { ok: false, code: "EXIT_SUMMARY_PRICE_CHANGED", price: quote.price };
+    return { ok: true, price: quote.price };
   };
   const initial = await verify();
   if (!initial.ok) return { ...initial, submitted: false };
@@ -1032,14 +1040,14 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   const startedAt = Date.now();
   let clicked = false, confirmed = false, stage = "prepare";
   const aiProvider = browserProvider || provider;
-  let response;
+  let response, baselineToken;
   try {
     if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED", submitted: false };
     const allowed = await entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType });
     if (!allowed.ok) return { ...allowed, submitted: false };
     const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
     if (!filled.ok) return { ...filled, submitted: false };
-    const baselineToken = await markTradePageHints(page);
+    baselineToken = await markTradePageHints(page);
     response = watchTradeResponse(page);
     stage = "click";
     const result = await clickTradeEntry(page, action);
@@ -1057,7 +1065,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       pageHint: feedback.pageHint, clicked: result }), stage, submittedQuantity: quantity, executionDurationMs: Date.now() - startedAt };
   } catch (error) {
     return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, stage, submitted: false, uncertain: clicked };
-  } finally { response?.dispose(); }
+  } finally { response?.dispose(); await dismissEntryDialogs(page, baselineToken); }
 }
 
 export async function callTool(name, input) {

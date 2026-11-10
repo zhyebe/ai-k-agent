@@ -215,7 +215,7 @@ for (const autoDecisionEnabled of [false, true]) {
   }
 }
 
-test("实时条件变化不记录自动下单失败，立即重新读取交给 AI", async () => {
+for (const uncertain of [false, true]) test(`实时条件变化${uncertain ? "但提交未明时先对账" : "未提交时重新判断"}`, async () => {
   const taskId = `task_recheck_after_condition_change_${Date.now()}`;
   const task = insertNorthstarTask(taskId);
   task.mode = "LIVE";
@@ -233,12 +233,12 @@ test("实时条件变化不记录自动下单失败，立即重新读取交给 A
   try {
     const result = await confirmPendingAction(taskId, {
       source: "auto_timeout",
-      runtime: { submitSuggestionForm: async () => ({ ok: false, submitted: false, code: "EXIT_CONDITION_CHANGED" }) },
+      runtime: { submitSuggestionForm: async () => ({ ok: false, submitted: false, uncertain, code: "EXIT_SUMMARY_PRICE_CHANGED" }) },
     });
-    assert.equal(result.pendingAction.status, "CANCELLED");
-    assert.equal(result.pendingAction.source, "realtime_recheck");
-    assert.match(result.pendingAction.message, /未提交订单/);
-    assert.equal(result.nextTrigger, result.pendingAction.message);
+    assert.equal(result.pendingAction.status, uncertain ? "AWAITING_FILL" : "CANCELLED");
+    assert.equal(result.pendingAction.source, uncertain ? "auto_timeout" : "realtime_recheck");
+    assert.match(result.pendingAction.message, uncertain ? /核实成交/ : /未提交订单/);
+    if (!uncertain) assert.equal(result.nextTrigger, result.pendingAction.message);
   } finally {
     state.tasks = state.tasks.filter((item) => item.id !== taskId);
   }

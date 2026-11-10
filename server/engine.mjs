@@ -1175,14 +1175,28 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         return task;
       }
       if (!submitted?.ok || submitted.submitted !== true) {
-        if (["EXIT_CONDITION_CHANGED", "EXIT_QUOTE_UNVERIFIED", "EXIT_SUMMARY_CONDITION_CHANGED", "EXIT_SUMMARY_EXPIRED", "EXIT_SUMMARY_QUANTITY_CHANGED"].includes(String(submitted?.code || ""))) {
+        if (submitted?.uncertain === true) {
+          task.pendingAction = {
+            ...task.pendingAction,
+            status: "AWAITING_FILL",
+            source,
+            formSubmitBlocked: false,
+            message: `${actionLabel}已点击，页面未返回明确结果；继续监控持仓变化核实成交`,
+          };
+          task.status = "MONITORING";
+          task.nextTrigger = task.pendingAction.message;
+          persistTask(task);
+          return task;
+        }
+        if (["EXIT_CONDITION_CHANGED", "EXIT_QUOTE_UNVERIFIED", "EXIT_SUMMARY_CONDITION_CHANGED", "EXIT_SUMMARY_PRICE_CHANGED", "EXIT_SUMMARY_EXPIRED", "EXIT_SUMMARY_QUANTITY_CHANGED",
+          "ENTRY_INSTRUMENT_CHANGED", "ENTRY_FORM_CHANGED", "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED", "ENTRY_PRICE_OUTSIDE_AI_PLAN", "ROUND_NOT_FLAT", "ACCOUNT_UNVERIFIED"].includes(String(submitted?.code || ""))) {
           task.pendingAction = {
             ...task.pendingAction,
             status: "CANCELLED",
             source: "realtime_recheck",
             resolvedAt: new Date().toISOString(),
             formSubmitBlocked: false,
-            message: "确认前盘口或持仓条件已变化，未提交订单；继续由程序读取最新汇总重新判断",
+            message: "确认前盘口、表单或账户条件已变化，未提交订单；读取最新数据重新判断",
           };
           setNextPoll(task, 0);
           task.nextTrigger = task.pendingAction.message;
@@ -1195,19 +1209,6 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
             message: task.pendingAction.message,
             data: { pendingActionId: task.pendingAction.id, source: "realtime_recheck", submitted: false, retryScheduled: true, code: submitted.code },
           });
-          persistTask(task);
-          return task;
-        }
-        if (submitted?.uncertain === true) {
-          task.pendingAction = {
-            ...task.pendingAction,
-            status: "AWAITING_FILL",
-            source,
-            formSubmitBlocked: false,
-            message: `${actionLabel}已点击，页面未返回明确结果；继续监控持仓变化核实成交`,
-          };
-          task.status = "MONITORING";
-          task.nextTrigger = task.pendingAction.message;
           persistTask(task);
           return task;
         }

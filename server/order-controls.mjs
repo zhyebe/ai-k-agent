@@ -18,7 +18,12 @@ export async function turnOrderPage(page, direction) {
   if (!await button.count() || await button.isDisabled()) return false;
   const before = await paginationText(page);
   const tableText = await page.evaluate(() => [...document.querySelectorAll(".el-table, table, [role='table'], [role='grid']")].filter(node => node.getBoundingClientRect().height > 0).map(node => node.textContent));
-  await button.click();
+  const clicked = await button.evaluate(node => {
+    if (node.matches(":disabled") || node.closest('[aria-disabled="true"]')) return false;
+    node.click();
+    return true;
+  });
+  if (!clicked) return false;
   await page.waitForFunction(({ previous, tableText }) => {
     const pagination = [...document.querySelectorAll(".el-pagination")].find((node) => node.getBoundingClientRect().height > 0);
     const current = pagination?.querySelector(".el-pager .active, [aria-current='page']")?.textContent.trim() || pagination?.innerText;

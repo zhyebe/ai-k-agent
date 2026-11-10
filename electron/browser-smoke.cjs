@@ -25,6 +25,7 @@ module.exports = async function inspectBrowser({ app }, input) {
     const targetUrl = "https://smyw.haohandahan.cn/client/#/transcc";
     const html = await fetch(input.url).then(response => response.text());
     await page.route("https://smyw.haohandahan.cn/client/**", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: html
+      .replace("<head>", "<head><style>.el-message-box, .el-dialog { position: fixed; inset: 0; z-index: 9999; background: white; }</style>")
       .replace("<body>", '<body><div>DGKZ | 测试商品</div><div>最新价 100</div>') }));
     await page.goto(targetUrl);
     const prepareAccount = (holding = false, orders = false) => page.evaluate(({ holding, orders }) => {

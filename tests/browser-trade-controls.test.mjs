@@ -11,7 +11,7 @@ import { positionProfitExit } from "../server/exit-policy.mjs";
 
 import { tradeFixture, refreshingTradeFixture, redrawNextControl, clearTradingAccount } from "./fixtures/trade-page.mjs";
 import { observeExecutionMarket } from "../server/market.mjs";
-import { activateTradeControl, completeTradeDialogs, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
+import { activateTradeControl, completeTradeDialogs, dismissEntryDialogs, dismissTransferDialogs, fillTradeFields, findPositionRows } from "../server/trade-controls.mjs";
 import { entryGuard } from "./fixtures/trading-plan.mjs";
 
 async function submitSuggestionForm(input) {
@@ -76,6 +76,31 @@ test("a reordered holding keeps its exact identity instead of clicking the old r
 });
 
 for (const action of ["BUY", "SELL"]) {
+  test(`${action} confirmation keeps full account verification under a blocking modal`, async () => {
+    await page.reload();
+    await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 101, quantity: 2 });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: "101", quantity: "2" }]);
+    assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+  });
+
+  test(`${action} final confirmation reads explicit field labels`, async () => {
+    await page.reload();
+    await page.evaluate(action => {
+      const root = document.querySelector(action === "BUY" ? "#buy" : "#sell");
+      const prefix = action === "BUY" ? "买" : "卖";
+      const fields = [...root.querySelectorAll("li")];
+      fields.forEach(field => field.remove());
+      const container = document.createElement("div");
+      container.innerHTML = `<label for="bound-price">${prefix}价</label><input id="bound-price" type="number"><label for="bound-quantity">${prefix}量</label><input id="bound-quantity" type="number">`;
+      root.prepend(container);
+    }, action);
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 101, quantity: 2 });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: "101", quantity: "2" }]);
+  });
+
   test(`live ${action} entry does not wait for another AI request when controls are verified`, async () => {
     await page.reload();
     let requests = 0;
@@ -94,6 +119,62 @@ for (const action of ["BUY", "SELL"]) {
     } finally { await new Promise(resolve => server.close(resolve)); }
   });
 }
+
+test("a new order during entry confirmation still blocks submission under the modal", async () => {
+  await page.reload();
+  await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });
+  await page.evaluate(() => {
+    const enter = window.enter;
+    window.enter = side => {
+      enter(side);
+      document.querySelector("#orders tbody").innerHTML = "<tr><td></td><td>O-new</td><td>测试商品</td><td>买入</td><td>101</td><td>订立</td><td>1</td><td>0</td><td>1</td><td>已委托</td><td>2026-11-10 10:00:00</td></tr>";
+    };
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 1 });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.code, "ROUND_NOT_FLAT");
+  assert.equal(result.uncertain, false);
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
+test("missing entry confirmation fails explicitly and closes the blocking dialog", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    window.enter = () => {
+      const box = document.createElement("div");
+      box.className = "el-message-box";
+      box.innerHTML = "确认下单，是否继续？<button disabled>确定</button><button>取消</button>";
+      box.querySelectorAll("button")[1].onclick = () => box.remove();
+      document.body.append(box);
+    };
+  });
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 1 });
+  assert.equal(result.ok, false, JSON.stringify(result));
+  assert.equal(result.code, "TRADE_CONFIRM_DISABLED");
+  assert.equal(result.uncertain, false);
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
+for (const entry of [true, false]) for (const remove of [true, false]) test(`${entry ? "entry" : "transfer"} cleanup accepts a dialog ${remove ? "removed" : "hidden"} while its cancel control is resolved`, async () => {
+  await page.reload();
+  await page.evaluate(({ entry, remove }) => {
+    const box = document.createElement("div");
+    box.className = "el-dialog";
+    box.setAttribute(entry ? "data-axiom-entry-dialog" : "data-axiom-transfer-dialog", "cleanup-race");
+    box.innerHTML = "<button>取消</button>";
+    document.body.append(box);
+    const observer = new MutationObserver(() => {
+      observer.disconnect();
+      if (remove) box.remove();
+      else box.style.display = "none";
+    });
+    observer.observe(box, { subtree: true, attributes: true, attributeFilter: ["data-axiom-control"] });
+  }, { entry, remove });
+  await (entry ? dismissEntryDialogs : dismissTransferDialogs)(page, "cleanup-race");
+  assert.equal(await page.locator(".el-dialog:visible").count(), 0);
+});
 
 test("delayed entry fields on a Page wait for rendering without calling Locator.page", async () => {
   await page.reload();

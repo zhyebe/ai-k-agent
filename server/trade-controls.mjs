@@ -55,11 +55,21 @@ export async function activateTradeControl(page, label) {
     }
     const state = await controlState(control);
     if (!state) continue;
-    const active = ["当前委托", "持仓明细", "持仓汇总"].includes(label) && state.active;
+    const accountTab = ["当前委托", "持仓明细", "持仓汇总"].includes(label);
+    const active = accountTab && state.active;
     // The trading site refreshes tab data when a tab is mounted. Avoid clicking
     // an already active tab: its live DOM is already updating by itself.
     if (active) return true;
     try {
+      if (accountTab) {
+        const clicked = await control.evaluateAll(nodes => {
+          if (nodes.length !== 1 || nodes[0].matches(":disabled") || nodes[0].closest('[aria-disabled="true"]')) return false;
+          nodes[0].click();
+          return true;
+        });
+        if (clicked) return true;
+        continue;
+      }
       await control.scrollIntoViewIfNeeded({ timeout: 2500 });
       await control.click({ timeout: 5000 });
       return true;
@@ -326,6 +336,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
   const selector = ".el-message-box, .el-dialog, [role='dialog']";
   let confirmed = false;
   let submittedPrice = null;
+  let priceRefreshes = 0;
   let failureCode = "TRADE_DIALOG_NOT_CONFIRMED";
   do {
     if (finished()) return { ok: true, confirmed, submittedPrice };
@@ -336,6 +347,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       const text = (await box.innerText()).replace(/\s+/g, "");
       if (!(cancelOrder ? /撤单|撤销.*委托/.test(text) : exitType ? /转让/.test(text) : /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text)) || /止盈.*止损|所有委托|所有买|所有卖|全撤|快捷撤单/.test(text)) continue;
       if (exitType && baselineToken) await box.evaluate((node, token) => { node.dataset.axiomTransferDialog = token; }, baselineToken);
+      if (!exitType && !cancelOrder && baselineToken) await box.evaluate((node, token) => { node.dataset.axiomEntryDialog = token; }, baselineToken);
       let dialogPrice = null;
       if (/转让价格/.test(text)) {
         // The production dialog initializes counterparty price after 200 ms.
@@ -370,6 +382,11 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
       if (canConfirm) {
         const guard = await canConfirm(dialogPrice);
         if (!guard.ok) {
+          if (guard.code === "EXIT_SUMMARY_PRICE_CHANGED" && refreshTransferPrice && orderType === "MARKET" && resolveTransferPrice && priceRefreshes < 2) {
+            priceRefreshes += 1;
+            failureCode = guard.code;
+            continue;
+          }
           const cancel = await findControl(box, ["取消", "关闭"]);
           const cancelState = cancel ? await controlState(cancel) : null;
           if (cancelState && !cancelState.disabled) await cancel.click({ timeout: 1500 });
@@ -401,18 +418,38 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
     if (hint.some((text) => /成功|已提交|失败|不足|拒绝|错误/.test(text))) return { ok: true, confirmed, submittedPrice };
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
-  return { ok: !exitType || confirmed, confirmed, submittedPrice, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
+  return { ok: confirmed, confirmed, submittedPrice, code: confirmed ? "DIALOG_CONFIRMED" : failureCode };
+}
+
+async function dismissMarkedTradeDialogs(page, attribute, token) {
+  if (!token || page.isClosed()) return;
+  const dismissToken = controlToken();
+  const count = await page.locator(`[${attribute}]:visible`).evaluateAll((nodes, { attribute, token, dismissToken }) => {
+    const matches = nodes.filter(node => node.getAttribute(attribute) === token);
+    matches.forEach((node, index) => { node.dataset.axiomDismissDialog = `${dismissToken}-${index}`; });
+    return matches.length;
+  }, { attribute, token, dismissToken });
+  for (let index = 0; index < count; index += 1) {
+    const box = page.locator(`[data-axiom-dismiss-dialog="${dismissToken}-${index}"]`);
+    const cancel = await findControl(box, ["取消", "关闭"], BUTTONS, false);
+    const state = cancel ? await controlState(cancel) : null;
+    if (!await box.isVisible()) continue;
+    if (!state || state.disabled) {
+      throw new Error(attribute === "data-axiom-entry-dialog" ? "ENTRY_DIALOG_DISMISS_FAILED" : "TRANSFER_DIALOG_DISMISS_FAILED");
+    }
+    try { await cancel.click({ timeout: 1500 }); }
+    catch (error) { if (!page.isClosed() && await box.isVisible()) throw error; }
+    if (page.isClosed()) return;
+    await box.waitFor({ state: "hidden", timeout: 1500 });
+  }
 }
 
 export async function dismissTransferDialogs(page, token) {
-  for (const box of await page.locator("[data-axiom-transfer-dialog]:visible").all()) {
-    if (await box.getAttribute("data-axiom-transfer-dialog") !== token) continue;
-    const cancel = await findControl(box, ["取消", "关闭"], BUTTONS, false);
-    const state = cancel ? await controlState(cancel) : null;
-    if (!state || state.disabled) throw new Error("TRANSFER_DIALOG_DISMISS_FAILED");
-    await cancel.click({ timeout: 1500 });
-    await box.waitFor({ state: "hidden", timeout: 1500 });
-  }
+  await dismissMarkedTradeDialogs(page, "data-axiom-transfer-dialog", token);
+}
+
+export async function dismissEntryDialogs(page, token) {
+  await dismissMarkedTradeDialogs(page, "data-axiom-entry-dialog", token);
 }
 
 export async function dismissOrderCancellationDialogs(page) {

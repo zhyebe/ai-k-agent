@@ -97,6 +97,50 @@ test('market price moving after fill cancels an unmarketable summary limit even 
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[]);
 });
 
+for (const side of ['LONG','SHORT']) test(`${side} summary exit refreshes a moving executable price while the AI target remains valid`, async () => {
+ await page.evaluate(side => {
+  const long=side==='LONG';
+  document.querySelector('body > table tr:first-child td:nth-child(2)').textContent=long?'103':'99';
+  document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent=long?'102':'98';
+  const transfer = window.summaryTransfer;
+  window.summaryTransfer = (...args) => {
+   transfer(...args);
+   document.querySelector('.el-dialog input').addEventListener('input', () => {
+    document.querySelector(long?'body > table tr:nth-child(2) td:nth-child(2)':'body > table tr:first-child td:nth-child(2)').textContent=long?'101.99':'99.01';
+   }, { once: true });
+  };
+ },side);
+ const result = await submitSuggestionForm(input(side));
+ assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.submittedPrice,side==='LONG'?101.99:99.01);
+ assert.deepEqual(await page.evaluate(()=>window.summaryExits),[{side,quantity:side==='LONG'?3:1,price:side==='LONG'?101.99:99.01}]);
+ assert.equal(await page.locator('.el-dialog:visible').count(),0);
+});
+
+test('summary repricing is bounded and never submits an obsolete limit', async () => {
+ await page.evaluate(() => {
+  document.querySelector('body > table tr:first-child td:nth-child(2)').textContent='105';
+  document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent='104';
+  window.priceRefreshes=0;
+  const transfer=window.summaryTransfer;
+  window.summaryTransfer=(...args)=>{
+   transfer(...args);
+   document.querySelector('.el-dialog input').addEventListener('input',()=>{
+    window.priceRefreshes++;
+    const bid=document.querySelector('body > table tr:nth-child(2) td:nth-child(2)');
+    bid.textContent=String(Number(bid.textContent)-0.01);
+   });
+  };
+ });
+ const result=await submitSuggestionForm(input());
+ assert.equal(result.ok,false,JSON.stringify(result));
+ assert.equal(result.code,'EXIT_SUMMARY_PRICE_CHANGED');
+ assert.equal(result.uncertain,false);
+ assert.equal(await page.evaluate(()=>window.priceRefreshes),3);
+ assert.deepEqual(await page.evaluate(()=>window.summaryExits),[]);
+ assert.equal(await page.locator('.el-dialog:visible').count(),0);
+});
+
 test('AI immediate loss exit requires a matching fresh price authorization before transfer', async () => {
  await page.evaluate(() => { document.querySelector('#summary [data-side="LONG"]').cells[2].textContent='102'; });
  const targetSummary={symbol:'DGKZ',symbolName:'测试商品',side:'LONG',quantity:3,averagePrice:102};
