@@ -173,9 +173,10 @@ const riskLabels: Record<string, string> = {
   AI_PLAN_PRICE_INVALID: "目标或止损价格不合理",
   AI_PLAN_RISK_INVALID: "AI风险参数不完整",
   AI_PLAN_EXPIRED: "AI计划已过期",
-  AI_PLAN_PROTECTION_INVALID: "利润保护价位不合理",
-  AI_PLAN_NET_PROFIT_INVALID: "扣费后目标或保护空间不足",
-  TRADING_COSTS_REQUIRED: "请配置该商品的实际往返费用点数",
+  AI_PLAN_PROTECTION_INVALID: "旧版利润保护门槛（已取消）",
+  AI_PLAN_NET_PROFIT_INVALID: "旧版利润测算门槛（已取消）",
+  TRADING_COSTS_REQUIRED: "旧版费用门槛（已取消）",
+  AI_PROFIT_PROTECTION_UNAVAILABLE: "利润保护未启用，目标与止损仍有效",
   ENTRY_QUOTE_OR_DEPTH_UNVERIFIED: "入场报价或全部数量深度未核实",
   ENTRY_PRICE_OUTSIDE_AI_PLAN: "实际入场价格超出AI计划",
   ENTRY_RECHECK_FAILED: "提交前行情复核失败",
@@ -1201,9 +1202,10 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>AI 预测支撑低位买多、阻力高位买空；所选方向概率 ≥40%，且入场区间、费用、深度和风险计划核验通过才入场。到 AI 目标立即离场，启动利润保护后按回撤离场；普通止损连续确认，硬止损立即执行。</p>
+        <p><strong>本轮规则</strong>AI 按短线趋势在相对低位买涨、相对高位买跌，预测入场价与未来盈利离场 K。所选方向概率 ≥40%，账户、价格区间、深度和止损核验通过即执行，无需配置手续费。持续监控全部持仓，按整行可成交价差乘数量合计，正值立即全部离场。多空合计未盈利时先退出亏损侧；确认后保留盈利侧最多 60 秒，回落提前离场，持续增加到时也兑现。预测偏差只用真实定 K 核对，闪 K 不单独触发离场，硬风险边界继续生效。</p>
+        {task.summaryExitBatch && <p><strong>离场批次</strong>{({ EXIT_ALL: "合计盈利，全仓离场", EXIT_LOSERS: "多空持仓，先退亏损侧", WATCH_WINNERS: "亏损侧已离场，观察盈利侧", EXIT_WINNERS: "盈利侧离场中", COMPLETE: "批次已核实结束", INVALIDATED: "持仓变化，重新核对" })[task.summaryExitBatch.phase]}{task.summaryExitBatch.winnerDeadlineAt ? ` · 盈利侧最晚提交 ${formatTime(task.summaryExitBatch.winnerDeadlineAt)}` : ""}{task.summaryExitBatch.lastWinnerProfit !== undefined ? ` · 当前保留价差合计 ${task.summaryExitBatch.lastWinnerProfit}` : ""}</p>}
         {decision.tradePlan ? <p><strong>AI 入场计划</strong>区间 {decision.tradePlan.entryZone.min}～{decision.tradePlan.entryZone.max} · 目标 {decision.tradePlan.takeProfitPrice} · 止损 {decision.tradePlan.stopLossPrice} · 硬止损 {decision.tradePlan.hardStopPrice}</p> : null}
-        {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · AI 离场计划</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（确认 {record.plan.stopConfirmationSec} 秒）· 硬止损 {record.plan.hardStopPrice}</p><p>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 最好可成交价 {record.bestPrice} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点 · 最晚离场 {formatTime(record.maxHoldAt)}</p><span>{record.costPoints === null ? "往返费用未知，净收益未核实" : `往返费用 ${record.costPoints} 点/单位`} · {record.plan.rationale}</span></div>)}
+        {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · AI 离场计划</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（确认 {record.plan.stopConfirmationSec} 秒）· 硬止损 {record.plan.hardStopPrice}</p><p>{record.profitProtectionEnabled === false ? "利润保护未启用，目标与止损继续执行" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {formatTime(record.maxHoldAt)}</p><span>{record.plan.rationale}</span></div>)}
         {task.summaryLossObservations?.map(observation => <p key={observation.key}><strong>{observation.key}</strong> 止损观察 {Math.floor((observation.lastObservedAt - observation.startedAt) / 1000)}/{observation.confirmationSec} 秒 · 新闪 K 不重置持续风险，硬止损持续有效。</p>)}
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
         {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
@@ -1387,23 +1389,12 @@ function RunsView({ runs, agentRuns, orders = [] }: { runs: Workspace["runs"]; a
   return <><section className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />可观测性</div><h1>运行记录</h1><p>每一轮分析、规则裁决和建议结果均可回放。</p></div></section><div className="run-summary"><SummaryTile label="Agent 运行" value={String(agentRuns.length)} icon={<Activity size={17} />} tone="green" /><SummaryTile label="总决策" value={runs.reduce((sum, run) => sum + run.decisions, 0).toString()} icon={<Bot size={17} />} tone="blue" /><SummaryTile label="交易订单" value={String(orders?.length || 0)} icon={<BarChart3 size={17} />} tone="muted" /><SummaryTile label="规则拦截" value={runs.reduce((sum, run) => sum + run.blocked, 0).toString()} icon={<ShieldCheck size={17} />} tone="amber" /></div><section className="panel runs-panel"><div className="panel-header"><div><div className="panel-kicker"><History size={14} />任务运行</div><h2>运行实例</h2></div></div><div className="run-table"><div className="table-head"><span>运行 ID</span><span>阶段</span><span>开始时间</span><span>建议</span><span>路由</span><span>状态</span></div>{agentRuns.length ? agentRuns.map((run) => <div className="run-row" key={run.id}><span className="run-id tabular">{run.id}</span><span>{displayLabel(run.currentStage, stageLabels, "其他阶段")}</span><span className="tabular">{formatTime(run.startedAt)}</span><span className="tabular">{run.finalAction ? displaySuggestion(run.finalAction) : "--"}</span><span className="tabular">{displayLabel(run.route, routeLabels, "仅输出建议")}</span><span className="approval-label">{displayLabel(run.status, runStatusLabels, "待确认")}</span></div>) : <div className="empty-state"><CircleDashed size={16} />还没有分析运行</div>}</div></section></>;
 }
 
-function TradingCostInputs({ symbol, costs, onChange, disabled }: { symbol: string; costs: Record<string, number>; onChange: (value: Record<string, number>) => void; disabled: boolean }) {
-  const symbols = [...new Set(["DGKZ", "DGJJ", symbol.trim(), ...Object.keys(costs)].filter(Boolean))];
-  return <fieldset className="trading-costs" disabled={disabled}><legend>商品往返费用（每单位折合价格点）</legend><p>按实际费率折算每单位往返费用点数。留空表示未知，该商品不新开仓；确认免手续费才填 0。</p>{symbols.map(code => <label key={code}>{code}<input type="number" min="0" step="any" aria-label={`${code} 往返费用`} value={costs[code] ?? ""} onChange={event => {
-    const next = { ...costs };
-    if (event.target.value === "") delete next[code];
-    else next[code] = Number(event.target.value);
-    onChange(next);
-  }} /></label>)}</fieldset>;
-}
-
 function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
   const [name, setName] = useState(task.name);
   const [symbol, setSymbol] = useState(task.symbol);
   const [timeframe, setTimeframe] = useState(task.timeframe);
   const [mode, setMode] = useState<string>(task.mode);
   const [entryQuantity, setEntryQuantity] = useState(String(task.entryQuantity ?? 1));
-  const [tradingCosts, setTradingCosts] = useState<Record<string, number>>(task.tradingCosts || {});
   const [opensAt] = useState(shanghaiInputValue(task.tradingSession?.opensAt) || defaultSessionInputs().opensAt);
   const [closesAt] = useState(shanghaiInputValue(task.tradingSession?.closesAt) || defaultSessionInputs().closesAt);
   const [busy, setBusy] = useState(false);
@@ -1414,7 +1405,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     lock.current = true;
     setBusy(true);
     try {
-      await onSave({ name, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), tradingCosts });
+      await onSave({ name, symbol, timeframe, mode, entryQuantity: Number(entryQuantity) });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1424,7 +1415,6 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label>
     <div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div>
     <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
-    <TradingCostInputs symbol={symbol} costs={tradingCosts} onChange={setTradingCosts} disabled={busy} />
     <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={closesAt} readOnly disabled /></label></div>
     <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
     <div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div>
@@ -1448,7 +1438,6 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   const [timeframe, setTimeframe] = useState("15m");
   const [mode, setMode] = useState("LIVE");
   const [entryQuantity, setEntryQuantity] = useState("1");
-  const [tradingCosts, setTradingCosts] = useState<Record<string, number>>({});
   const initialSession = defaultSessionInputs();
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
@@ -1460,7 +1449,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
     lock.current = true;
     setBusy(true);
     try {
-      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), tradingCosts, analysisName, analysisUrl, analysisUsername, analysisPassword });
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), analysisName, analysisUrl, analysisUsername, analysisPassword });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1476,7 +1465,6 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
         </div>
         <label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>
         <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
-        <TradingCostInputs symbol={symbol} costs={tradingCosts} onChange={setTradingCosts} disabled={busy} />
         <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={initialSession.opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={initialSession.closesAt} readOnly disabled /></label></div>
         {targetType === "website"
           ? <label>网站地址<input value={url} onChange={(event) => setUrl(event.target.value)} type="url" placeholder="https://" /></label>

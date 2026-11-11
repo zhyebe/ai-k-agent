@@ -14,7 +14,6 @@ function fixture(t, id, automatic = true, action = 'BUY', probability = 0.6) {
     orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] },
     account: { positionsVerified: true, positions: [], positionSummariesVerified: true, positionSummaries: [], openOrdersVerified: true, openOrders: [], availableFunds: 10000 } };
   const task = { id, ownerUserId: id, mode: 'LIVE', autoDecisionEnabled: automatic, status: 'MONITORING', monitoringEnabled: true,
-    tradingCosts: { A: 0.2 },
     target: { type: 'website', connectorId: 'connector_haohan_readonly', browserSessionId: id, url: 'https://smyw.haohandahan.cn/client/#/transcc' },
     market, rules: [], workflow: [], metrics: { equity: 10000 }, decision: { action: 'HOLD', riskFlags: [], evidenceIds: [] } };
   state.tasks.unshift(task); t.after(() => { state.tasks = state.tasks.filter(item => item !== task); });
@@ -29,6 +28,21 @@ function fixture(t, id, automatic = true, action = 'BUY', probability = 0.6) {
       bullishProfitProbability: action === 'BUY' ? probability : 0.9, bearishProfitProbability: action === 'SELL' ? probability : 0.9,
       entryPrice: 100, tradePlan: plan, orderType: 'MARKET', riskFlags: [], evidenceIds: [], decisionTtlSec: 300 }; } };
   return { task, market, runtime, submissions, forms, analyses };
+}
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
+  test(`${automatic ? 'automatic' : 'manual'} ${action} enters without fee configuration despite unusable optional protection`, async t => {
+    const f = fixture(t, `advisory-protection-${automatic}-${action}`, automatic, action);
+    const original = f.runtime.requestDecision;
+    f.runtime.requestDecision = async (...args) => {
+      const decision = await original(...args);
+      decision.tradePlan.profitProtection = { activationPrice: null, floorPrice: null, trailingDistance: null };
+      return decision;
+    };
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal((automatic ? f.submissions : f.forms).length, 1);
+    assert.equal(f.task.decision.action, action);
+    assert.ok(f.task.decision.riskFlags.includes('AI_PROFIT_PROTECTION_UNAVAILABLE'));
+  });
 }
 for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const probability of [0.3999, 0.4, 0.42, 0.45, 0.6]) {
   test(`${automatic ? 'automatic' : 'manual'} ${action} selected probability ${probability}`, async t => {

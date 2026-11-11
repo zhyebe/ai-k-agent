@@ -66,7 +66,8 @@ test("direct analysis sends shared approved experience and both order books in o
     assert.equal(context.market.account.openOrders[0].frozenMargin, 1800);
     assert.equal(context.market.account.openOrders[0].orderDeposit, 3600);
     assert.match(payload.messages[0].content, /点差不是金额/);
-    assert.match(payload.messages[0].content, /每单位往返费用折合价格点/);
+    assert.match(payload.messages[0].content, /手续费无需配置/);
+    assert.match(payload.messages[0].content, /盈利侧最多观察60秒/);
     assert.match(payload.messages[0].content, /到达目标立即离场/);
     assert.match(payload.messages[0].content, /选定方向盈利概率>=40%/);
     assert.equal(context.market.operatorContext.orderBookSnapshotCount, 3);

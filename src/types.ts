@@ -141,7 +141,7 @@ export interface TradingPlan {
   stopConfirmationSec: number;
   validForSec: number;
   maxHoldSec: number;
-  profitProtection: { activationPrice: number; floorPrice: number; trailingDistance: number };
+  profitProtection: { activationPrice: number | null; floorPrice: number | null; trailingDistance: number | null };
   rationale: string;
   invalidation: string;
 }
@@ -291,6 +291,7 @@ export interface MarketSnapshot {
   evidenceId: string;
   fingerprint?: string;
   observedAt: string;
+  accountObservedAt?: string;
   dataAt?: string | null;
   dataQuality?: string;
   missingFields?: string[];
@@ -345,10 +346,11 @@ export interface TradingSession {
 }
 
 export interface Task {
-  tradingCosts?: Record<string, number>;
+  summaryExitBatch?: { id: string; phase: "EXIT_ALL" | "EXIT_LOSERS" | "WATCH_WINNERS" | "EXIT_WINNERS" | "COMPLETE" | "INVALIDATED";
+    triggerPnl: number; winnerDeadlineAt?: string; lastWinnerProfit?: number; reason?: string } | null;
   entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"] };
   summaryTradingPlans?: Array<{ id: string; key: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
-    costPoints: number | null; bestPrice: number; profitArmed: boolean; expiresAt: string; maxHoldAt: string }>;
+    profitProtectionEnabled?: boolean; bestPrice: number; profitArmed: boolean; expiresAt: string; maxHoldAt: string }>;
   exitOutcomes?: Array<{ pendingId: string; confirmedAt: string; exitReason?: string;
     after3Minutes?: { status: string; hypotheticalGrossPoints?: number } | null;
     after5Minutes?: { status: string; hypotheticalGrossPoints?: number } | null }>;

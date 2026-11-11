@@ -1236,7 +1236,8 @@ export async function observeExecutionMarket(task, connector, { accountScope = "
     if (!samePageInstrument(parsed, target)) return { ok: false, code: "PAGE_INSTRUMENT_MISMATCH" };
     book = { ...parsed, observedAt: new Date(next.capturedAt).toISOString() };
   }
-  return markObservedMarketCandles({ ...book, ok: true, account: primary.account, books: [book] }, sessionId);
+  return markObservedMarketCandles({ ...book, ok: true, account: primary.account,
+    accountObservedAt: new Date(snapshot.capturedAt).toISOString(), books: [book] }, sessionId);
 }
 
 export async function observeMarket(task, connector, { withBrowser = async (operation) => operation() } = {}) {

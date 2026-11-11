@@ -33,11 +33,12 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /主动、大胆预测/);
   assert.match(content, /即使HOLD也给出预测路径和具体价格依据/);
   assert.match(content, /普通入场必须由AI明确BUY买多或SELL买空，选定方向盈利概率>=40%才允许/);
-  assert.match(content, /多单点差=当前bid-均价；空单点差=均价-当前ask/);
-  assert.match(content, /点差不乘数量，不是盈亏金额/);
+  assert.match(content, /多单点差=整行最差可成交bid-均价；空单点差=均价-整行最差可成交ask/);
+  assert.match(content, /合计时乘各自真实数量/);
+  assert.match(content, /盈利侧最多观察60秒/);
   assert.match(content, /到达AI目标立即整行离场/);
   assert.match(content, /硬止损立即执行/);
-  assert.match(content, /新闪K事件不能重置持续风险/);
+  assert.match(content, /新闪K不重置持续风险/);
   assert.match(content, /持仓汇总对应商品方向整行“转让”，一次提交整行数量/);
   assert.match(content, /持仓及当前委托全部核实清零才结束本轮/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);

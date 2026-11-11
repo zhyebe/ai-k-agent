@@ -76,7 +76,7 @@ function publicMarket(market) {
 
 export function publicTask(task) {
   if (!task) return task;
-  const { ownerUserId, automationTestMode, providerId, ...safeTask } = task;
+  const { ownerUserId, automationTestMode, providerId, tradingCosts, ...safeTask } = task;
   const target = task.target ? { ...task.target, credentialRef: "" } : task.target;
   if (target?.marketAnalysis) target.marketAnalysis = { ...target.marketAnalysis, credentialRef: "" };
   if (target) {

@@ -9,7 +9,7 @@ on:
       release_tag:
         description: Existing or new release tag to publish
         required: true
-        default: v1.0.5
+        default: v1.0.6
       artifact_run_id:
         description: Reuse artifacts from a previous release run without rebuilding
         required: false
@@ -113,7 +113,7 @@ jobs:
         run: |
           npx playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/browser-trade-controls.test.mjs tests/browser-summary-exit.test.mjs tests/browser-login.test.mjs tests/desktop-runtime-recovery.test.mjs
+          node --test tests/browser-trade-controls.test.mjs tests/browser-summary-exit.test.mjs tests/browser-login.test.mjs tests/desktop-runtime-recovery.test.mjs tests/trading-plan.test.mjs tests/portfolio-exit.test.mjs tests/summary-exit.test.mjs tests/entry-timing.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Windows artifacts
         run: npm run check; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx electron-builder --win --x64 --publish never

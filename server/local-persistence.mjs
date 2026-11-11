@@ -80,7 +80,7 @@ export async function createLocalPersistence({ directory, compactTaskRuntime }) 
     loadAssignments: () => read("assignments"),
     loadEvents: () => read("events"),
     saveTask(task) {
-      const { providerId, ...saved } = task;
+      const { providerId, tradingCosts, ...saved } = task;
       return upsert("tasks", { ...saved, ...compactTaskRuntime(task) });
     },
     deleteTaskData({ taskId, ownerUserId }) {

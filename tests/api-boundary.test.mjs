@@ -173,23 +173,20 @@ test("connector test enforces task binding and clears credentials on target chan
     const second = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ name: "boundary-b", targetType: "website", url: "https://example.org" }) });
     assert.equal(first.status, 201);
     assert.equal(first.body.task.entryQuantity, 1);
-    assert.deepEqual(first.body.task.tradingCosts, {});
+    assert.equal(Object.hasOwn(first.body.task, "tradingCosts"), false);
     const quantityUpdate = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers,
       body: JSON.stringify({ entryQuantity: 3, tradingCosts: { DGKZ: 0.2, DGJJ: 0 } }) });
     assert.equal(quantityUpdate.status, 200);
     assert.equal(quantityUpdate.body.task.entryQuantity, 3);
-    assert.deepEqual(quantityUpdate.body.task.tradingCosts, { DGKZ: 0.2, DGJJ: 0 });
+    assert.equal(Object.hasOwn(quantityUpdate.body.task, "tradingCosts"), false);
     for (const entryQuantity of [0, -1, 1.5, "bad", true]) {
       const invalidQuantity = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ entryQuantity }) });
       assert.equal(invalidQuantity.status, 400);
     }
     for (const tradingCosts of [null, [], { DGKZ: "" }, { DGKZ: true }, { DGKZ: -1 }, { DGKZ: "bad" }]) {
-      const invalidCosts = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ tradingCosts }) });
-      assert.equal(invalidCosts.status, 400);
-      assert.equal(invalidCosts.body.error, "INVALID_TRADING_COSTS");
-      const invalidCreate = await request(baseUrl, "/api/tasks", { method: "POST", headers, body: JSON.stringify({ tradingCosts }) });
-      assert.equal(invalidCreate.status, 400);
-      assert.equal(invalidCreate.body.error, "INVALID_TRADING_COSTS");
+      const ignoredCosts = await request(baseUrl, `/api/tasks/${first.body.task.id}`, { method: "PATCH", headers, body: JSON.stringify({ tradingCosts }) });
+      assert.equal(ignoredCosts.status, 200);
+      assert.equal(Object.hasOwn(ignoredCosts.body.task, "tradingCosts"), false);
     }
     assert.equal(second.status, 201);
     assert.equal(first.body.task.providerId, undefined);

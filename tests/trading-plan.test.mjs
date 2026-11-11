@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { costPointsFor, entryPlanAllowsPrice, executableEntryQuote, normalizeTradingPlan, parseTradingCosts, validateEntryPlan, validateHoldingPlan } from "../server/trading-plan.mjs";
+import { directionalProfitPoints, entryPlanAllowsPrice, executableEntryQuote, normalizeTradingPlan, profitProtectionFor, validateEntryPlan, validateHoldingPlan } from "../server/trading-plan.mjs";
 import { executableExitQuote } from "../server/exit-policy.mjs";
 import { installSummaryPlan, observeSummaryPlans, summaryExitAllowsPrice, summaryExitCandidates, summaryExitReviewContexts, summaryReviewType } from "../server/summary-exit-policy.mjs";
 import { anchorCandle, tradingPlan } from "./fixtures/trading-plan.mjs";
@@ -12,7 +12,7 @@ function fixture(side = "LONG", now = Date.now()) {
     orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] } };
   const plan = tradingPlan(side);
   market.history = [anchorCandle(plan)];
-  const task = { tradingCosts: { A: 0.2 }, entryQuantity: 3 };
+  const task = { entryQuantity: 3 };
   const context = summaryExitReviewContexts(market, now)[0];
   const installed = installSummaryPlan(task, context, plan, { id: "plan-ai", observedAt: market.observedAt, now });
   assert.ok(installed.record, installed.code);
@@ -29,10 +29,9 @@ for (const side of ["LONG", "SHORT"]) test(`${side} AI entry requires an executa
   market.orderBook.asks[0].price = outside;
   assert.equal(validateEntryPlan(decision, market, task, now).code, "ENTRY_PRICE_OUTSIDE_AI_PLAN");
 });
-for (const fault of ["missing-costs", "unknown-anchor", "provisional-anchor", "provisional-marker", "future-anchor", "wrong-setup", "loss-target", "invalid-hard-stop", "no-protection", "expired", "stale-book", "insufficient-depth"]) {
+for (const fault of ["unknown-anchor", "provisional-anchor", "provisional-marker", "future-anchor", "wrong-setup", "loss-target", "invalid-hard-stop", "expired", "stale-book", "insufficient-depth"]) {
   test(`entry rejects ${fault} without inventing a fallback plan`, () => {
     const { market, plan, task, now } = fixture();
-    if (fault === "missing-costs") task.tradingCosts = {};
     if (fault === "unknown-anchor") plan.anchorPrice = 99.6;
     if (fault === "provisional-anchor") market.history[0].confirmation = "PROVISIONAL";
     if (fault === "provisional-marker") market.history[0].confirmation = { status: "PROVISIONAL" };
@@ -40,24 +39,52 @@ for (const fault of ["missing-costs", "unknown-anchor", "provisional-anchor", "p
     if (fault === "wrong-setup") plan.setup = "CHASE_BREAKOUT";
     if (fault === "loss-target") plan.takeProfitPrice = 99;
     if (fault === "invalid-hard-stop") plan.hardStopPrice = 99;
-    if (fault === "no-protection") plan.profitProtection = {};
     if (fault === "expired") plan.validForSec = 0;
     if (fault === "stale-book") market.observedAt = new Date(now - 6000).toISOString();
     if (fault === "insufficient-depth") market.orderBook.asks[0].volume = 1;
     assert.ok(validateEntryPlan({ action: "BUY", entryPrice: 100, tradePlan: plan }, market, task, now).code);
   });
 }
-test("unknown and blank fees stay unknown; explicit zero remains valid", () => {
-  for (const value of [null, "", " ", false, [], {}, -1, Infinity]) assert.equal(parseTradingCosts({ A: value }), null);
-  assert.equal(costPointsFor({ symbol: "A" }, {}), null);
-  assert.equal(costPointsFor({ symbol: "A" }, { A: 0 }), 0);
-  assert.deepEqual(parseTradingCosts({ A: "0.2" }), { A: 0.2 });
+test("directional price arithmetic keeps invalid data unknown and reverses shorts", () => {
+  assert.equal(directionalProfitPoints({ side: "LONG", averagePrice: 100 }, 100.1), 0.1);
+  assert.equal(directionalProfitPoints({ side: "SHORT", averagePrice: 100 }, 99.9), 0.1);
+  for (const price of [null, "", " ", false, [], {}, -1, Infinity]) {
+    assert.equal(directionalProfitPoints({ side: "LONG", averagePrice: 100 }, price), null);
+  }
+  assert.equal(directionalProfitPoints({ side: "UNKNOWN", averagePrice: 100 }, 101), null);
 });
-test("entry price must preserve profitable protection after actual fill", () => {
+test("legacy costs and optional protection cannot veto a valid executable entry", () => {
   const { market, plan, task, now } = fixture();
   const { guard } = validateEntryPlan({ action: "BUY", entryPrice: 100, tradePlan: plan }, market, task, now);
   assert.equal(entryPlanAllowsPrice(guard, 100.5, now), true);
-  assert.equal(entryPlanAllowsPrice({ ...guard, costPoints: 1 }, 100.5, now), false);
+  assert.equal(entryPlanAllowsPrice({ ...guard, costPoints: 1000 }, 100.5, now), true);
+  for (const profitProtection of [null, {}, { activationPrice: 99, floorPrice: 98, trailingDistance: 2 }]) {
+    const result = validateEntryPlan({ action: "BUY", entryPrice: 100, tradePlan: { ...plan, profitProtection } }, market, task, now);
+    assert.ok(result.guard);
+    assert.deepEqual(result.warnings, ["AI_PROFIT_PROTECTION_UNAVAILABLE"]);
+  }
+});
+for (const side of ["LONG", "SHORT"]) test(`${side} a confirmed relative anchor may sit outside the executable entry zone`, () => {
+  const { market, plan, task, now } = fixture(side);
+  plan.anchorPrice = side === "LONG" ? 98.5 : 101.5;
+  market.history[0][side === "LONG" ? "low" : "high"] = plan.anchorPrice;
+  assert.ok(validateEntryPlan({ action: side === "LONG" ? "BUY" : "SELL", entryPrice: 100, tradePlan: plan }, market, task, now).guard);
+});
+test("screenshot entry 1256-1257 remains executable with an unusable optional protection", () => {
+  const { market, task, now } = fixture();
+  const plan = tradingPlan("LONG", 1256, { entryZone: { min: 1256, max: 1257 }, takeProfitPrice: 1259,
+    stopLossPrice: 1255, hardStopPrice: 1253, profitProtection: { activationPrice: 1258, floorPrice: 1255, trailingDistance: 5 } });
+  plan.anchorPrice = 1254;
+  market.history = [{ ...anchorCandle(plan), low: 1254 }];
+  market.orderBook.bids[0].price = market.orderBook.asks[0].price = 1256.5;
+  const result = validateEntryPlan({ action: "BUY", entryPrice: 1256, tradePlan: plan }, market, task, now);
+  assert.ok(result.guard, result.code);
+  assert.equal(result.price, 1256.5);
+  const installed = installSummaryPlan(task, { key: "screenshot", signature: "screenshot",
+    summary: { side: "LONG", averagePrice: 1256.5, quantity: 3 }, quote: { price: 1256.5 } },
+  plan, { id: "screenshot", observedAt: market.observedAt, now });
+  assert.equal(installed.record.plan.hardStopPrice, 1253);
+  assert.equal(installed.record.profitProtectionEnabled, false);
 });
 test("normalizer preserves AI risk fields and does not create default prices", () => {
   const plan = normalizeTradingPlan({ take_profit_price: 104, stop_loss_price: 98 });
@@ -88,7 +115,7 @@ for (const side of ["LONG", "SHORT"]) test(`${side} target and trailing protecti
   assert.equal(record.profitArmed, true);
   const protection = tick(2.4, 2000)[0];
   assert.equal(protection.decision.exitReason, "PROFIT_PROTECTION");
-  assert.equal(protection.decision.netPoints, 2.2);
+  assert.equal(protection.decision.pnlPoints, 2.4);
   assert.equal(summaryExitAllowsPrice(summary, 100 + direction * 2.4, protection.decision.exitGuard.aiAuthorization, now + 2000), true);
   assert.equal(tick(4, 3000)[0].decision.exitReason, "TAKE_PROFIT");
 });
@@ -128,19 +155,33 @@ test("new AI plan cannot widen stops, move target away, extend hold, or erase pr
   assert.equal(result.record.bestPrice, 103);
   assert.equal(result.record.profitArmed, true);
 });
-test("fees greater than target profit reject the plan; missing cost is never verified net profit", () => {
+for (const side of ["LONG", "SHORT"]) test(`${side} tighter targets or incompatible refresh fields cannot erase existing profit protection`, () => {
+  const { task, market, plan, record, summary, now } = fixture(side);
+  const direction = side === "LONG" ? 1 : -1;
+  record.bestPrice = 100 + direction * 3;
+  record.profitArmed = true;
+  const context = summaryExitReviewContexts(market, now)[0];
+  const result = installSummaryPlan(task, context, { ...plan, takeProfitPrice: 100 + direction,
+    profitProtection: null }, { id: "earlier-target", observedAt: market.observedAt, now });
+  assert.equal(result.record.profitProtectionEnabled, true);
+  assert.equal(summaryReviewType(summary, 100 + direction * 0.9, result.record, now), "PROFIT_PROTECTION");
+  const refreshed = installSummaryPlan(task, context, { ...plan,
+    profitProtection: { activationPrice: 100 + direction * 4, floorPrice: 100 + direction * 3, trailingDistance: 0.2 } },
+  { id: "conflicting-protection", observedAt: market.observedAt, now });
+  assert.equal(refreshed.record.profitProtectionEnabled, true);
+  assert.deepEqual(refreshed.record.plan.profitProtection, plan.profitProtection);
+});
+test("fees do not reject the core holding plan or create a net profit claim", () => {
   const { plan, summary, market, task, now } = fixture();
-  assert.equal(validateHoldingPlan(plan, summary, { observedAt: market.observedAt, now, costs: { A: 5 } }).code, "AI_PLAN_NET_PROFIT_INVALID");
+  assert.equal(validateHoldingPlan(plan, summary, { observedAt: market.observedAt, now, costs: { A: 5 } }).code, undefined);
   task.tradingCosts = {};
   market.orderBook.bids[0].price = market.orderBook.asks[0].price = 104;
   observeSummaryPlans(task, market, now);
-  assert.equal(summaryExitCandidates(task, market, now)[0].decision.netPoints, null);
+  assert.equal(summaryExitCandidates(task, market, now)[0].decision.netPoints, undefined);
 });
-test("known whole-position fees cannot be ignored in favor of a smaller configured point cost", () => {
+test("optional protection allows breakeven and a wider trailing distance without imposing a minimum profit", () => {
   const { summary, plan, market, now } = fixture();
-  summary.roundTripFee = 15;
-  assert.equal(costPointsFor(summary, { A: 0.2 }), 5);
-  assert.equal(validateHoldingPlan(plan, summary, { observedAt: market.observedAt, now, costs: { A: 0.2 } }).code, "AI_PLAN_NET_PROFIT_INVALID");
-  assert.equal(costPointsFor({ ...summary, roundTripFee: undefined, totalFees: 15 }, {}), 5);
-  assert.equal(costPointsFor({ symbol: "A" }, { A: 0, a: 0.2 }), 0.2);
+  plan.profitProtection = { activationPrice: 100, floorPrice: 100, trailingDistance: 5 };
+  assert.ok(profitProtectionFor(summary, plan));
+  assert.equal(validateHoldingPlan(plan, summary, { observedAt: market.observedAt, now }).profitProtectionEnabled, true);
 });

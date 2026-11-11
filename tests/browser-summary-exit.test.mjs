@@ -61,6 +61,18 @@ for(const side of ['LONG','SHORT']) test(`${side} transfers once from the summar
  assert.deepEqual(await page.evaluate(()=>window.exits),[]);
  assert.equal(await page.evaluate(()=>window.historyVisits+window.wrongGlobalExit+window.wrongStopDialog),0);
 });
+for (const side of ['LONG', 'SHORT']) for (const trigger of ['TOTAL_PROFIT', 'HEDGE_LOSS', 'HEDGE_WINNER_DEADLINE', 'HEDGE_WINNER_PULLBACK']) {
+ test(`${side} executes the user-authorized ${trigger} through the final dialog`, async () => {
+  const value = input(side);
+  value.exitGuard.aiAuthorization = { id: 'user-batch-leg', batchId: 'user-batch', source: 'USER_RULE',
+   decision: 'EXIT', trigger, signature: summarySignature(value.targetSummary), expiresAt: value.exitGuard.expiresAt };
+  const result = await submitSuggestionForm(value);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(await page.evaluate(() => window.summaryExits),
+   [{ side, quantity: side === 'LONG' ? 3 : 1, price: side === 'LONG' ? 100 : 101 }]);
+  assert.equal(await page.locator('.el-dialog:visible').count(), 0);
+ });
+}
 for(const fault of ['quote','average','quantity','frozen'])test(`summary ${fault} change before confirmation cancels the entire action`,async()=>{
  await page.evaluate(fault=>{window.summaryFault=fault},fault);
  const result=await submitSuggestionForm(input());

@@ -1,7 +1,7 @@
 import "./fixtures/open-market-clock.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { installSummaryPlan, summaryExitReviewContexts } from "../server/summary-exit-policy.mjs";
+import { installSummaryPlan, summaryExitReviewContexts, summarySignature } from "../server/summary-exit-policy.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
 import { dueExitReviewTargets, runPositionExitCycle, stopAllControllers, confirmPendingAction, stopTask, updateExitOutcomes } from "../server/engine.mjs";
@@ -20,7 +20,7 @@ function fixture(t, id, { side = "LONG", plan = true } = {}) {
     orderBook: { bids: [{ price: 100, volume: 100 }], asks: [{ price: 100, volume: 100 }] } };
   const task = { id, ownerUserId: "summary-test", mode: "LIVE", status: "MONITORING", monitoringEnabled: true,
     stopLocked: false, monitorGeneration: 0, market, rules: [], workflow: [], metrics: {}, decision: { action: "HOLD" },
-    tradingCosts: { A: 0.2 }, target: { browserSessionId: id, connectorId: "connector_haohan_readonly" } };
+    target: { browserSessionId: id, connectorId: "connector_haohan_readonly" } };
   state.tasks.unshift(task);
   t.after(() => { state.tasks = state.tasks.filter(item => item !== task); });
   if (plan) installSummaryPlan(task, summaryExitReviewContexts(market, clock)[0], tradingPlan(side),
@@ -48,14 +48,14 @@ function fixture(t, id, { side = "LONG", plan = true } = {}) {
 }
 
 for (const side of ["LONG", "SHORT"]) for (const automatic of [false, true]) {
-  test(`${side} ${automatic ? "automatic" : "manual"} entry exits exactly at AI target and deduplicates unsettled transfer`, async t => {
+  test(`${side} ${automatic ? "automatic" : "manual"} entry exits on positive total and deduplicates unsettled transfer`, async t => {
     const f = fixture(t, `target-${side}-${automatic}`, { side });
     f.task.autoDecisionEnabled = automatic;
     await f.tick(side === "LONG" ? 104 : 96);
     assert.equal(f.submitted.length, 1);
     assert.equal(f.submitted[0].quantity, 3);
     assert.equal(f.submitted[0].action, side === "LONG" ? "SELL" : "BUY");
-    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TAKE_PROFIT");
+    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
     await f.tick(side === "LONG" ? 105 : 95, 2000);
     assert.equal(f.submitted.length, 1);
     assert.equal(f.task.exitMonitor.status, "RECONCILING");
@@ -72,7 +72,7 @@ test("holdings missing a plan immediately request structured AI with original fo
   await f.tick(100);
   assert.equal(f.reviews.length, 1);
   assert.equal(f.reviews[0].entryForecast.forecastHorizon.nextK.path, "先回支撑再上行");
-  assert.equal(f.reviews[0].costPoints, 0.2);
+  assert.equal(Object.hasOwn(f.reviews[0], "costPoints"), false);
   assert.equal(f.task.summaryTradingPlans.length, 1);
   await f.tick(104, 2000);
   assert.equal(f.submitted.length, 1);
@@ -107,10 +107,10 @@ test("expired manual suggestion reconciles an already filled entry before retiri
 });
 test("AI plan is not discarded when response also contains explicit EXIT price", async t => {
   const f = fixture(t, "ai-exit-now", { plan: false });
-  f.runtime.requestSummaryExitDecision = async () => ({ ok: true, decision: "EXIT", exitPrice: 101,
+  f.runtime.requestSummaryExitDecision = async () => ({ ok: true, decision: "EXIT", exitPrice: 100,
     plan: tradingPlan(), rationale: "结构转弱，兑现当前可成交利润" });
-  await f.tick(101);
-  await f.tick(101, 2000);
+  await f.tick(100);
+  await f.tick(100, 2000);
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "AI_EXIT_NOW");
 });
@@ -142,7 +142,7 @@ test("brief pullback recovery avoids soft exit; hard invalidation exits immediat
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
 });
-test("profit peak and original max-hold deadline survive AI refresh and persistence", async t => {
+test("positive total batch, profit peak and original deadline survive AI refresh and persistence", async t => {
   const f = fixture(t, "persist-plan");
   await f.tick(103);
   const deadline = f.task.summaryTradingPlans[0].maxHoldAt;
@@ -152,10 +152,11 @@ test("profit peak and original max-hold deadline survive AI refresh and persiste
   const saved = compactTaskRuntime(f.task);
   assert.equal(saved.summaryTradingPlans[0].bestPrice, 103);
   assert.equal(saved.summaryTradingPlans[0].profitArmed, true);
-  assert.deepEqual(saved.tradingCosts, { A: 0.2 });
+  assert.equal(Object.hasOwn(saved, "tradingCosts"), false);
+  assert.equal(saved.summaryExitBatch.phase, "EXIT_ALL");
   await f.tick(102.4, 2000);
   assert.equal(f.submitted.length, 1);
-  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "PROFIT_PROTECTION");
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
 });
 for (const change of ["stop", "average", "quantity"]) test(`late AI result cannot bind after ${change}`, async t => {
   const f = fixture(t, `late-${change}`, { plan: false });
@@ -223,6 +224,15 @@ test("old fixed-profit pending authorization cannot execute after upgrade", asyn
   await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /SUMMARY_EXIT_AUTHORIZATION_REQUIRED/);
   assert.equal(f.submitted.length, 0);
 });
+test("a user-rule exit cannot borrow an AI plan ID to authorize a missing cohort", async t => {
+  const f = fixture(t, "missing-user-cohort");
+  const expiresAt = new Date(Date.now() + 60000).toISOString();
+  f.task.pendingAction = { status: "WAITING", action: "SELL", exitType: "TAKE_PROFIT", targetSummary: row(), suggestedPrice: 104,
+    exitGuard: { summary: true, expiresAt, aiAuthorization: { id: "initial-ai-plan", decision: "EXIT", source: "USER_RULE",
+      trigger: "TOTAL_PROFIT", batchId: "missing", signature: summarySignature(row()), expiresAt } } };
+  await assert.rejects(confirmPendingAction(f.task.id, { runtime: f.runtime }), /SUMMARY_EXIT_AUTHORIZATION_REQUIRED/);
+  assert.equal(f.submitted.length, 0);
+});
 test("post-exit review records only real 3/5 minute quotes and never labels a limit price as filled", () => {
   const start = Date.now(), summary = row();
   const task = { exitOutcomes: [{ pendingId: "p", summary, confirmedAt: new Date(start).toISOString(), submittedLimitPrice: 98, fillPrice: null }] };
@@ -282,4 +292,62 @@ test("summary parser rejects duplicate and loading rows without inventing fees",
   assert.equal(account.positionSummaries[0].roundTripCostPoints, undefined);
   assert.equal(parseHaohanAccount("", [{ ...table, loading: true }]).positionSummariesVerified, false);
   assert.equal(parseHaohanAccount("", [{ ...table, rows: [...rows, rows[1]] }]).positionSummariesVerified, false);
+});
+
+test("a failed leg does not block all other holdings and only that leg retries", async t => {
+  const f = fixture(t, "portfolio-failure", { plan: false });
+  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("LONG", { symbol: "B", symbolName: "商品B", quantity: 1 })];
+  f.market.books = [{ symbol: "B", symbolName: "商品B", observedAt: new Date(Date.now()).toISOString(),
+    orderBook: { bids: [{ price: 98, volume: 100 }], asks: [{ price: 98, volume: 100 }] } }];
+  f.runtime.observeExecutionMarket = async () => ({ ...f.market, observedAt: new Date(Date.now()).toISOString(),
+    books: [{ ...f.market, books: undefined }, { ...f.market.books[0], observedAt: new Date(Date.now()).toISOString() }] });
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  f.runtime.submitSuggestionForm = async input => {
+    f.submitted.push(input);
+    return input.symbol === "A" ? { ok: false, submitted: false, code: "FIXTURE_CONFIRM_FAILED" } : { ok: true, submitted: true };
+  };
+  await f.tick(103);
+  assert.equal(f.submitted.length, 2);
+  assert.equal(f.task.exitMonitor.failures.length, 1);
+  await f.tick(102, 2000);
+  assert.equal(f.submitted.length, 3);
+  assert.equal(f.submitted[2].symbol, "A");
+  assert.equal(f.submitted[2].exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
+});
+
+for (const gap of [2000, 6000]) test(`rotating quote collection combines all holdings only within freshness, gap ${gap}`, async t => {
+  const f = fixture(t, `portfolio-quote-${gap}`, { plan: false });
+  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("LONG", { symbol: "B", symbolName: "商品B", quantity: 1 })];
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  await f.tick(103);
+  assert.equal(f.submitted.length, 0);
+  f.runtime.observeExecutionMarket = async () => ({ ok: true, symbol: "B", symbolName: "商品B", account: f.market.account,
+    observedAt: new Date(Date.now()).toISOString(),
+    orderBook: { bids: [{ price: 98, volume: 100 }], asks: [{ price: 98, volume: 100 }] } });
+  await f.tick(103, gap);
+  assert.equal(f.submitted.length, gap <= 5000 ? 2 : 0);
+});
+
+test("hedge cleanup confirms the losing side before observing winners and exits growing profit within a minute", async t => {
+  const f = fixture(t, "hedge-minute", { plan: false });
+  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("SHORT", { quantity: 2 })];
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  await f.tick(103);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].action, "BUY");
+  assert.equal(f.submitted[0].quantity, 2);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HEDGE_LOSS");
+  f.market.account.positionSummaries.pop();
+  await f.tick(103, 2000);
+  assert.equal(f.task.pendingAction.status, "CONFIRMED");
+  assert.equal(f.task.summaryExitBatch.phase, "WATCH_WINNERS");
+  const deadline = f.task.summaryExitBatch.winnerDeadlineAt;
+  await f.tick(104, 30000);
+  assert.equal(f.submitted.length, 1);
+  await f.tick(105, 30000);
+  assert.equal(f.task.summaryExitBatch.winnerDeadlineAt, deadline);
+  assert.equal(f.submitted.length, 2);
+  assert.equal(f.submitted[1].action, "SELL");
+  assert.equal(f.submitted[1].quantity, 1);
+  assert.equal(f.submitted[1].exitGuard.aiAuthorization.trigger, "HEDGE_WINNER_DEADLINE");
 });

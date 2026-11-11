@@ -13,8 +13,8 @@ import { normalizeUnitProbability } from "./provider.mjs";
 import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
-import { summaryExitCandidates, summaryExitAllowsPrice, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan } from "./summary-exit-policy.mjs";
-import { costPointsFor, entryPlanAllowsPrice, executableEntryQuote, matchesInstrument, validateEntryPlan } from "./trading-plan.mjs";
+import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan } from "./summary-exit-policy.mjs";
+import { entryPlanAllowsPrice, executableEntryQuote, matchesInstrument, validateEntryPlan } from "./trading-plan.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -27,6 +27,7 @@ const positionExitCancels = new Map();
 const liveAnalyses = new Map();
 const liveObservations = new Map();
 const summaryReviewRuns = new Map();
+const executionQuoteBooks = new Map();
 const actionPhaseLocks = new Set();
 const loginRecoveryRuns = new Map();
 const LOGIN_HEARTBEAT_INTERVAL_MS = 5000;
@@ -114,6 +115,25 @@ function recordLiveObservation(task, market) {
 function recentLiveObservations(task) {
   const observations = liveObservations.get(task.id);
   return observations?.generation === taskGeneration(task) ? observations.samples : [];
+}
+
+function withRecentExitQuotes(task, market, now) {
+  const identity = JSON.stringify([taskGeneration(task), task.target?.browserSessionId,
+    (market.account?.positionSummaries || []).map(summarySignature).sort()]);
+  const prior = executionQuoteBooks.get(task.id);
+  const books = prior?.identity === identity ? prior.books : [];
+  for (const book of market.books?.length ? market.books : [market]) {
+    const index = books.findIndex(item => matchesInstrument(item, book));
+    if (index >= 0) books[index] = book;
+    else books.push(book);
+  }
+  const fresh = books.filter(book => {
+    const timestamp = Date.parse(book.observedAt || "");
+    return timestamp <= now && now - timestamp <= 5000
+      && (market.account?.positionSummaries || []).some(summary => Number(summary.quantity) > 0 && matchesInstrument(summary, book));
+  });
+  executionQuoteBooks.set(task.id, { identity, books: fresh });
+  return { ...market, books: fresh };
 }
 
 function taskGeneration(task) {
@@ -506,6 +526,7 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
     exitType: decision.exitType || null,
     exitReason: decision.exitReason || null,
     netPoints: decision.netPoints ?? null,
+    pnlPoints: decision.pnlPoints ?? null,
     exitGuard: decision.exitGuard || null,
     entryGuard: decision.entryGuard || null,
     tradePlan: decision.tradePlan || null,
@@ -809,6 +830,7 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
     suggestedQty: pending.suggestedQty,
     exitReason: pending.exitReason || null,
     netPoints: pending.netPoints ?? null,
+    pnlPoints: pending.pnlPoints ?? null,
     entryPrice: pending.entryPrice,
     takeProfitPrice: pending.takeProfitPrice,
     stopLossPrice: pending.stopLossPrice,
@@ -1003,13 +1025,15 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   }
   if (isLiveTask(task) && task.pendingAction.exitType) {
     const pending = task.pendingAction;
-    const authorized = summaryExitAllowsPrice(pending.targetSummary, pending.suggestedPrice, exitGuard?.aiAuthorization)
-      && ((task.summaryTradingPlans || []).some(plan => plan.id === exitGuard?.aiAuthorization?.id
-        && plan.signature === exitGuard.aiAuthorization.signature)
-        || (task.summaryExitReviews || []).some(r => r.id === exitGuard?.aiAuthorization?.id && r.decision === "EXIT"));
+    const authorization = exitGuard?.aiAuthorization;
+    const authorized = summaryExitAllowsPrice(pending.targetSummary, pending.suggestedPrice, authorization)
+      && (authorization?.source === "USER_RULE"
+        ? summaryRuleAuthorizationCurrent(task, pending.targetSummary, authorization)
+        : (task.summaryTradingPlans || []).some(plan => plan.id === authorization?.id && plan.signature === authorization.signature)
+          || (task.summaryExitReviews || []).some(review => review.id === authorization?.id && review.decision === "EXIT"));
     if (!["TAKE_PROFIT", "STOP_LOSS"].includes(pending.exitType) || !authorized) {
       pending.status = "CANCELLED";
-      pending.message = "AI离场计划或当前持仓绑定已失效，重新读取持仓并请求有效计划";
+      pending.message = "离场授权或当前持仓绑定已失效，重新读取持仓并核对规则";
       persistTask(task);
       throw new Error("SUMMARY_EXIT_AUTHORIZATION_REQUIRED");
     }
@@ -1988,10 +2012,10 @@ function decisionExecutionPolicy(task) {
   return isLiveTask(task) ? {
     entryMode: task.autoDecisionEnabled ? "automatic" : "manual_submit", entryDecision: "AI_ONLY",
     minimumProbability: MIN_PROFIT_PROBABILITY, emptyOnly: true,
-    exitsAutomatic: true, exitDecision: "AI_PRICE_PLAN", cancellationsAutomatic: true,
+    exitsAutomatic: true, exitDecision: "USER_RULES_THEN_AI_PRICE_PLAN", cancellationsAutomatic: true,
     summaryExitReview: { unit: "DIRECTIONAL_PRICE_POINTS", execution: "SUMMARY_TRANSFER",
-      requiresTakeProfit: true, requiresHardStop: true, requiresProfitProtection: true, noRiskWidening: true },
-    tradingCosts: task.tradingCosts || {},
+      requiresTakeProfit: true, requiresHardStop: true, requiresProfitProtection: false, noRiskWidening: true,
+      totalPositiveExitAll: true, mixedNonPositiveExitLosers: true, retainedWinnerMaxHoldSec: 60 },
     currentOrderCancellation: { waitMs: CURRENT_ORDER_WAIT_MS, scope: "unfilled_remainder", priceIndependent: true },
     rulesRole: "advisory", rulesBlockExecution: false,
   } : undefined;
@@ -2059,7 +2083,7 @@ export function buildDecisionContext(task, market, evidence, trigger, analysisMa
     realtimeObservations: recentLiveObservations(task),
     rules: task.rules,
     executionPolicy: decisionExecutionPolicy(task),
-    strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task), tradingCosts: task.tradingCosts || {} },
+    strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
     exitOutcomes: (task.exitOutcomes || []).slice(-10),
     approvedSkills: approvedSkillsForContext(evidence),
     experiencePrompt: buildApprovedExperiencePrompt(evidence),
@@ -2531,7 +2555,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
           rawPositions: market.account?.positions || [],
           rules: task.rules,
           executionPolicy: decisionExecutionPolicy(task),
-          strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task), tradingCosts: task.tradingCosts || {} },
+          strategy: { ...LIVE_BOARD_STRATEGY, entryQuantity: entryQuantityForTask(task) },
           exitOutcomes: (task.exitOutcomes || []).slice(-10),
           approvedSkills: approvedSkillsForContext(knowledge),
           evidence,
@@ -2655,7 +2679,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       if (validated.code) decision = { ...decision, action: "HOLD", entryBlock: { requestedAction: decision.action, reason: validated.code },
         riskFlags: [...new Set([...(decision.riskFlags || []), validated.code])] };
       else {
-        decision = { ...decision, tradePlan: validated.plan, entryGuard: validated.guard };
+        decision = { ...decision, tradePlan: validated.plan, entryGuard: validated.guard,
+          riskFlags: [...new Set([...(decision.riskFlags || []), ...validated.warnings])] };
         exitMarket = { ...market, ...fresh, history: market.history, timeframes: market.timeframes };
         task.market = exitMarket;
       }
@@ -2955,8 +2980,8 @@ function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
       const provider = findProviderForUser(String(task.providerId || ""), String(task.ownerUserId || ""));
       const result = await runtime.requestSummaryExitDecision(provider, {
         observedAt, pnlPoints: context.pnlPoints, summary: context.summary,
-        costPoints: costPointsFor(context.summary, task.tradingCosts),
         entryForecast: task.entryForecast || null, activePlan: activePlan || null,
+        summaryExitBatch: task.summaryExitBatch || null,
         exitOutcomes: (task.exitOutcomes || []).slice(-10),
         market: { observedAt: snapshot?.observedAt || market.observedAt, orderBook: snapshot?.orderBook || snapshot?.pageView?.orderBook,
           history: evidence.history || [], historyObservedAt: snapshot?.history?.length ? snapshot.observedAt : history?.observedAt || null,
@@ -3028,6 +3053,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     assertCurrent();
     task.exitObservationIndex = Number(task.exitObservationIndex || 0) + 1;
     if (!market?.ok) throw new Error(market?.code || "EXIT_OBSERVATION_FAILED");
+    market = withRecentExitQuotes(task, market, currentTime());
     recordLiveObservation(task, market);
     reconcilePendingPosition(task, market);
     updateExitOutcomes(task, market, currentTime());
@@ -3053,6 +3079,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       }
       task.market = { ...task.market, account: market.account };
       reconcilePendingPosition(task, market);
+      market = withRecentExitQuotes(task, market, currentTime());
       scheduleSummaryExitReviews(task, market, runtime, currentTime());
     }
     const candidates = summaryExitCandidates(task, market, currentTime());
@@ -3079,7 +3106,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       const key = summaryKey(candidate.summary);
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: "ai_summary_plan", runtime }); }
+      try { await confirmPendingAction(taskId, { source: decision.exitGuard?.aiAuthorization?.source === "USER_RULE" ? "user_summary_rule" : "ai_summary_plan", runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: key, code: error.message });
@@ -3103,14 +3130,18 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       : market.account.positionSummariesVerified !== true ? "SUMMARY_UNVERIFIED"
       : unsettledActions(task).some(action => action.exitType) ? "RECONCILING"
       : unverifiedQuotes ? "QUOTE_OR_DEPTH_UNVERIFIED"
+      : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? "WINNER_OBSERVING"
+      : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "EXIT_BATCH"
       : (task.summaryExitReviews || []).some(r => r.status === "REQUESTING") ? "AI_REVIEWING"
       : missingPlans.length ? "AI_PLAN_MISSING"
       : task.summaryLossObservations?.length ? "LOSS_OBSERVING" : "WATCHING",
       checkedAt: market.observedAt, message: market.account.positionSummariesVerified !== true
         ? "持仓汇总未核实，继续读取，不猜测离场"
         : unverifiedQuotes ? "缺少该持仓的新鲜报价或整行可成交深度，继续读取；无法确认整行成交价格"
-        : missingPlans.length ? `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；禁止新增仓位`
-        : "按AI目标自动离场；回撤保护已获利润；普通止损按AI确认时长观察，硬止损立即执行，闪K不重置累计风险" };
+        : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? `亏损侧已核实离场；盈利侧最晚${task.summaryExitBatch.winnerDeadlineAt}提交离场，回落提前兑现`
+        : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "正在执行已锁定的离场批次，逐笔核实结果；单笔失败继续处理其他持仓"
+        : missingPlans.length ? `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；用户盈利离场规则仍独立生效，禁止新增仓位`
+        : "监控全部持仓合计可成交价差，正值立即全部离场；多空合计未盈利先退亏损侧，盈利侧最多观察60秒；普通止损依AI确认，硬止损立即执行" };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: "ERROR", failures, message: `${failures.length}笔离场未完成；${task.exitMonitor.message}` };
     persistTask(task);
     return { submitted };
@@ -3232,6 +3263,7 @@ export function stopController(taskId) {
   }
   liveAnalyses.get(taskId)?.abort.abort(new CycleAbortError("CYCLE_INVALIDATED"));
   liveObservations.delete(taskId);
+  executionQuoteBooks.delete(taskId);
   positionExitCancels.get(taskId)?.();
   pendingSubmissionCancels.get(taskId)?.();
   const entry = controllerLoops.get(taskId);
@@ -3245,5 +3277,5 @@ export function stopController(taskId) {
 
 export function stopAllControllers() {
   for (const taskId of new Set([...controllerLoops.keys(), ...positionExitCancels.keys(), ...pendingSubmissionCancels.keys(),
-    ...[...summaryReviewRuns.values()].map(run => run.taskId)])) stopController(taskId);
+    ...executionQuoteBooks.keys(), ...[...summaryReviewRuns.values()].map(run => run.taskId)])) stopController(taskId);
 }

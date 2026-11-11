@@ -1064,7 +1064,7 @@ test("生产客户端 AI 自动入场直接提交，不被浏览器分析模式�
     } });
     assert.equal(submissions.length, 1);
     assert.equal(submissions[0].action, "BUY");
-    assert.deepEqual(analysisInput.strategy.tradingCosts, task.tradingCosts);
+    assert.equal(Object.hasOwn(analysisInput.strategy, "tradingCosts"), false);
     assert.deepEqual(analysisInput.exitOutcomes, []);
     assert.equal(task.pendingAction.status, "AWAITING_FILL");
   } finally {

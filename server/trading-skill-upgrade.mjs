@@ -4,6 +4,7 @@ import { chunkDocument } from "./rag.mjs";
 
 const previousSkillId = "skill_04ef36d5-3002-40fd-b51f-3914867e29f1";
 const previousContentHashes = new Map([
+  ["v0.3.134", "ae188e9a3a7cfba4e5f6fd778c2ef894b17ded680363b98d623c509d8eaf5048"],
   ["v0.3.133", "c84d0811b1e30928425360e0c9773687918f31a6dba8e6cc7b0624844961a06d"],
   ["v0.3.132", "dfc2a7200c6dc0343c2e366faa5ad90d72ccc6995e75a44b7f13594b6a9d2db9"],
   ["v0.3.131", "6be9216142ff8e7d5af0ac1ae5f97550a22ea5413abc6bc396b1da595ef6852a"],
@@ -39,8 +40,9 @@ const previousContentHashes = new Map([
 // The persistence adapter applies this with an atomic old-content/version check
 // and reloads the database record before hydrating the runtime knowledge index.
 export async function tradingSkillUpgrade(skill) {
-  const local = skill?.id === "skill_local_trading" && skill.version === "v1.0.0";
-  const expectedHash = local ? previousContentHashes.get("v0.3.133") : skill?.id === previousSkillId ? previousContentHashes.get(skill.version) : null;
+  const local = skill?.id === "skill_local_trading";
+  const localVersions = { "v1.0.0": "v0.3.133", "v1.0.2": "v0.3.134" };
+  const expectedHash = local ? previousContentHashes.get(localVersions[skill.version]) : skill?.id === previousSkillId ? previousContentHashes.get(skill.version) : null;
   if (skill?.status !== "APPROVED" || !expectedHash) return null;
   const hash = createHash("sha256").update(String(skill.content || "").replace(/\r\n/g, "\n").trim()).digest("hex");
   if (hash !== expectedHash) return null;
@@ -48,7 +50,7 @@ export async function tradingSkillUpgrade(skill) {
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: local ? "v1.0.2" : "v0.3.134",
+    version: local ? "v1.0.3" : "v0.3.135",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),
