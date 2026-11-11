@@ -96,7 +96,7 @@ test("local strategy migration accepts Windows line endings while preserving edi
 });
 
 test("the shipped v1.0.2 knowledge upgrades exactly while edits and a live exit batch survive restart", async t => {
-  const previous = (await fs.readFile(new URL("./fixtures/trading-skill-v1.0.2.md", import.meta.url), "utf8")).trim();
+  const previous = (await fs.readFile(new URL("./fixtures/trading-skill-v1.0.2.md", import.meta.url), "utf8")).replace(/\r\n/g, "\n").trim();
   const bundled = (await fs.readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
   for (const edited of [false, true]) {
     const { adapter, open } = await fixture(t);
