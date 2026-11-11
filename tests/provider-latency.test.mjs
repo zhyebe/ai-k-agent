@@ -24,7 +24,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     const messages = body.input || body.messages || body.contents.map(m => ({ role: m.role, content: m.parts[0].text }));
     const system = body.system || body.systemInstruction?.parts[0].text || messages.filter(m => m.role === "system").map(m => m.content).join("\n");
     assert.equal(system.split("唯一当前交易流程").length - 1, 1);
-    assert.match(system, /选定方向盈利概率>=40%/);
+    assert.match(system, /方向盈利概率仅作参考，不设概率门槛/);
     assert.match(system, /到达目标立即离场/);
     assert.match(system, /硬止损立即执行/);
     assert.match(system, /下一根及随后1～3根K/);

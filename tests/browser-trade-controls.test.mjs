@@ -76,6 +76,26 @@ test("a reordered holding keeps its exact identity instead of clicking the old r
 });
 
 for (const action of ["BUY", "SELL"]) {
+  test(`${action} market entry refreshes a moving price under its confirmation without a trade plan`, async () => {
+    await page.reload();
+    await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });
+    const expected = action === "BUY" ? 103 : 97;
+    await page.evaluate(({ action, expected }) => {
+      const original = window.enter;
+      window.enter = side => {
+        const rows = document.querySelector("table").rows;
+        rows[action === "BUY" ? 0 : 1].cells[1].textContent = String(expected);
+        original(side);
+      };
+    }, { action, expected });
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 100, quantity: 2, orderType: "MARKET",
+      entryGuard: { action, symbol: "DGKZ", expiresAt: new Date(Date.now() + 60000).toISOString() } });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.submittedPrice, expected);
+    assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: String(expected), quantity: "2" }]);
+    assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+  });
+
   test(`${action} confirmation keeps full account verification under a blocking modal`, async () => {
     await page.reload();
     await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });

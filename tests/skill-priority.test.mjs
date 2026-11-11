@@ -32,7 +32,8 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /预测当前周期下一根及随后1～3根K/);
   assert.match(content, /主动、大胆预测/);
   assert.match(content, /即使HOLD也给出预测路径和具体价格依据/);
-  assert.match(content, /普通入场必须由AI明确BUY买多或SELL买空，选定方向盈利概率>=40%才允许/);
+  assert.match(content, /普通入场必须由AI明确BUY买多或SELL买空/);
+  assert.match(content, /方向盈利概率仅作参考，不设概率门槛/);
   assert.match(content, /多单点差=整行最差可成交bid-均价；空单点差=均价-整行最差可成交ask/);
   assert.match(content, /合计时乘各自真实数量/);
   assert.match(content, /盈利侧最多观察60秒/);

@@ -10,7 +10,7 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities, MIN_PROFIT_PROBABILITY } from "./entry-policy.mjs";
+import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan } from "./summary-exit-policy.mjs";
@@ -436,7 +436,7 @@ export function profitSignalTier(value) {
   if (probability > 0.8) return "STRONG";
   if (probability > 0.7) return "STANDARD";
   if (probability > 0.6) return "CAUTIOUS";
-  if (probability >= MIN_PROFIT_PROBABILITY) return "EXPLORATORY";
+  if (probability > 0) return "EXPLORATORY";
   return "HOLD";
 }
 
@@ -471,21 +471,13 @@ function signalTierForDecision(decision) {
 
 export function meetsOrderBoundary(decision) {
   if (decision?.exitType === "TAKE_PROFIT" || decision?.exitType === "STOP_LOSS") return true;
-  if (decision?.action !== "BUY" && decision?.action !== "SELL") return false;
-  return decision.directionalProbabilitiesComplete !== false
-    && hasDirectionalProbabilities(decision) && chosenSideProbability(decision) >= MIN_PROFIT_PROBABILITY;
+  return decision?.action === "BUY" || decision?.action === "SELL";
 }
 
 export function applyEntryBoundary(decision, market = {}) {
   const next = { ...decision };
   delete next.entryBlock;
   if (["TAKE_PROFIT", "STOP_LOSS"].includes(next.exitType)) return next;
-  if (["BUY", "SELL"].includes(next.action) && !meetsOrderBoundary(next)) {
-    const reason = hasDirectionalProbabilities(next) ? "LOW_PROFIT_PROBABILITY" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES";
-    next.action = "HOLD";
-    next.entryBlock = { requestedAction: decision.action, reason };
-    next.riskFlags = [...new Set([...(next.riskFlags || []), reason])];
-  }
   next.signalTier = signalTierForDecision(next);
   return next;
 }
@@ -499,11 +491,7 @@ export function enforceProfitProbability(decision) {
     bearishProfitProbability: normalizeUnitProbability(decision?.bearishProfitProbability),
   };
   next.signalTier = signalTierForDecision(next);
-  if (meetsOrderBoundary(next)) {
-    next.riskFlags = (next.riskFlags || []).filter((flag) => flag !== "LOW_PROFIT_PROBABILITY");
-  } else if (next.action === "BUY" || next.action === "SELL") {
-    next.riskFlags = [...new Set([...(next.riskFlags || []), hasDirectionalProbabilities(next) ? "LOW_PROFIT_PROBABILITY" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES"])];
-  }
+  next.riskFlags = (next.riskFlags || []).filter((flag) => !["LOW_PROFIT_PROBABILITY", "INCOMPLETE_DIRECTIONAL_PROBABILITIES"].includes(flag));
   return next;
 }
 
@@ -515,7 +503,8 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
   const decisionProbability = chosenSideProbability(decision);
   const signalTier = decision.signalTier || signalTierForDecision(decision);
   const signalLabel = profitSignalLabel(signalTier);
-  const probabilityLabel = `${profitProbabilityLabel(decisionProbability)}%`;
+  const probabilityLabel = decision.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision)
+    ? `获利概率 ${profitProbabilityLabel(decisionProbability)}%，仅供参考` : "概率未完整提供，不影响AI决定";
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     decisionRunId: decision.runId || null,
@@ -564,7 +553,7 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
     deadlineAt: null,
     countdownSec: 0,
     resolvedAt: null,
-    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（获利概率 ${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${!decision.exitType && isLiveTask(task) ? ` 单笔入场数量 ${entryQuantityForTask(task)}` : ""}`,
+    message: `${targetLabel}：${pendingActionLabel({ action, exitType: decision.exitType })}，${signalLabel}（${probabilityLabel}）。${pendingWaitMessage(task, { auto })}${!decision.exitType && isLiveTask(task) ? ` 单笔入场数量 ${entryQuantityForTask(task)}` : ""}`,
   };
 }
 
@@ -611,7 +600,7 @@ async function openPendingAction(task, { runtime, run, market = task.market } = 
   clearPendingActionTimer(task.id);
   archivePendingSubmission(task);
   task.pendingAction = buildPendingAction({ ...task, market }, task.decision);
-  if (!task.pendingAction.exitType && task.pendingAction.tradePlan) task.entryForecast = {
+  if (!task.pendingAction.exitType) task.entryForecast = {
     pendingId: task.pendingAction.id, action: task.pendingAction.action, tradePlan: task.pendingAction.tradePlan,
     forecastHorizon: task.pendingAction.forecastHorizon, observedAt: task.pendingAction.forecastObservedAt,
     symbol: task.pendingAction.targetSymbol, symbolName: task.pendingAction.targetSymbolName, instrumentId: task.pendingAction.targetInstrumentId,
@@ -860,7 +849,7 @@ function reconcilePositionAction(task, market, pending) {
     : null;
   const filled = pending.exitType ? baseline > 0 && observed <= Math.max(0, baseline - quantity)
     : addedPositions ? addedPositions.reduce((sum, item) => sum + item.added, 0) >= quantity : observed >= baseline + quantity;
-  if (!pending.exitType && pending.tradePlan && observed > baseline) task.entryForecast = {
+  if (!pending.exitType && observed > baseline) task.entryForecast = {
     pendingId: pending.id, action: pending.action, tradePlan: pending.tradePlan, forecastHorizon: pending.forecastHorizon,
     observedAt: pending.forecastObservedAt, confirmedAt: market.observedAt,
     symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId,
@@ -919,7 +908,7 @@ function cancelInvalidEntrySuggestion(task, now = Date.now()) {
       || !entryPlanAllowsPrice(waiting.entryGuard, waiting.suggestedPrice, now))) {
     waiting.status = "CANCELLED";
     waiting.resolvedAt = new Date(now).toISOString();
-    waiting.message = "入场建议已过期或不符合当前AI价格计划、方向概率及普通入场规则，已取消并等待重新分析";
+    waiting.message = "入场授权已过期或来自已停用的旧动作，已取消并重新请求AI决定";
     task.nextTrigger = waiting.message;
     task.lastAnalyzedFingerprint = "";
     clearPendingActionTimer(task.id);
@@ -1042,9 +1031,9 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
     if (task.pendingAction.entryPurpose && task.pendingAction.entryPurpose !== "NORMAL") throw new Error("RETIRED_ENTRY_PURPOSE");
     const block = entryRoundBlock(task, task.market, { pendingId: task.pendingAction.id });
     if (block) throw new Error(block);
-    if (!meetsOrderBoundary(task.pendingAction)) throw new Error("ENTRY_PROBABILITY_BELOW_40");
+    if (!meetsOrderBoundary(task.pendingAction)) throw new Error("AI_ENTRY_ACTION_REQUIRED");
     const guard = task.pendingAction.entryGuard;
-    if (!entryPlanAllowsPrice(guard, task.pendingAction.suggestedPrice)) throw new Error("ENTRY_PRICE_OUTSIDE_AI_PLAN");
+    if (!entryPlanAllowsPrice(guard, task.pendingAction.suggestedPrice)) throw new Error("AI_ENTRY_DECISION_EXPIRED");
   }
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
@@ -1078,9 +1067,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         const book = decisionTargetBook(task.pendingAction, fresh || {}) || fresh;
         const block = entryRoundBlock(task, fresh, { pendingId });
         const quote = fresh?.ok && book && executableEntryQuote(book, task.pendingAction.action, task.pendingAction.suggestedQty);
-        if (block || !quote || !matchesInstrument(task.pendingAction.entryGuard, book)
-          || (task.pendingAction.orderType === "MARKET" && !entryPlanAllowsPrice(task.pendingAction.entryGuard, quote.price))) {
-          throw new Error(block || "ENTRY_PRICE_OUTSIDE_AI_PLAN");
+        if (block) throw new Error(block);
+        if (!quote) throw new Error("ENTRY_QUOTE_OR_DEPTH_UNVERIFIED");
+        if (!matchesInstrument(task.pendingAction.entryGuard, book)) throw new Error("ENTRY_INSTRUMENT_CHANGED");
+        if (!entryPlanAllowsPrice(task.pendingAction.entryGuard, quote.price)) throw new Error("AI_ENTRY_DECISION_EXPIRED");
+        if (task.pendingAction.orderType === "MARKET") {
+          task.pendingAction.suggestedPrice = quote.price;
+          task.pendingAction.targetPrice = quote.price;
         }
       }
       task.pendingAction = {
@@ -1213,7 +1206,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
           return task;
         }
         if (["EXIT_CONDITION_CHANGED", "EXIT_QUOTE_UNVERIFIED", "EXIT_SUMMARY_CONDITION_CHANGED", "EXIT_SUMMARY_PRICE_CHANGED", "EXIT_SUMMARY_EXPIRED", "EXIT_SUMMARY_QUANTITY_CHANGED",
-          "ENTRY_INSTRUMENT_CHANGED", "ENTRY_FORM_CHANGED", "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED", "ENTRY_PRICE_OUTSIDE_AI_PLAN", "ROUND_NOT_FLAT", "ACCOUNT_UNVERIFIED"].includes(String(submitted?.code || ""))) {
+          "ENTRY_INSTRUMENT_CHANGED", "ENTRY_FORM_CHANGED", "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED", "AI_ENTRY_DECISION_EXPIRED", "ROUND_NOT_FLAT", "ACCOUNT_UNVERIFIED"].includes(String(submitted?.code || ""))) {
           task.pendingAction = {
             ...task.pendingAction,
             status: "CANCELLED",
@@ -2011,7 +2004,7 @@ function recentAnalysisRounds(taskId, limit = 8) {
 function decisionExecutionPolicy(task) {
   return isLiveTask(task) ? {
     entryMode: task.autoDecisionEnabled ? "automatic" : "manual_submit", entryDecision: "AI_ONLY",
-    minimumProbability: MIN_PROFIT_PROBABILITY, emptyOnly: true,
+    probabilityRole: "advisory", entryPlanRole: "advisory", emptyOnly: true,
     exitsAutomatic: true, exitDecision: "USER_RULES_THEN_AI_PRICE_PLAN", cancellationsAutomatic: true,
     summaryExitReview: { unit: "DIRECTIONAL_PRICE_POINTS", execution: "SUMMARY_TRANSFER",
       requiresTakeProfit: true, requiresHardStop: true, requiresProfitProtection: false, noRiskWidening: true,
@@ -2367,6 +2360,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       assertCurrent();
       if (continued?.continued) {
         task.pendingAction = { ...task.pendingAction, status: "AWAITING_FILL", source: "manual_browser", message: "用户已点击入场，Agent 已自动处理网页确认；继续监控成交与离场" };
+        if (Number(continued.submittedPrice) > 0) task.pendingAction.submittedPrice = Number(continued.submittedPrice);
       }
     }
 
@@ -2814,7 +2808,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         skipped: true,
         reason: duplicateExit ? "EXIT_ALREADY_SUBMITTED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE" : "BOUNDARY",
         route,
-        code: roundEntryBlock || (sessionChangedDuringAnalysis ? "SESSION_CHANGED_DURING_ANALYSIS" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : "INCOMPLETE_DIRECTIONAL_PROBABILITIES"),
+        code: roundEntryBlock || (sessionChangedDuringAnalysis ? "SESSION_CHANGED_DURING_ANALYSIS" : accountUnverified ? "POSITIONS_UNVERIFIED" : staleDecision ? "DECISION_EXPIRED" : positionChangedDuringAnalysis ? "POSITION_CHANGED_DURING_ANALYSIS" : duplicateExit ? "EXIT_ALREADY_SUBMITTED" : task.decision.action === "HOLD" ? "HOLD" : rulePaused || holdRequired ? "RISK_GATE_BLOCKED" : browserActionInProgress ? "CONFIRM_IN_PROGRESS" : "AI_ENTRY_ACTION_REQUIRED"),
       };
     assertCurrent();
     task.decision.riskFlags = [...new Set([...(task.decision.riskFlags || []), ...(execution.ok ? [] : [execution.code].filter(Boolean))])];
@@ -2847,9 +2841,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.status = task.stopLocked ? "MANUAL_CONTROL" : rulePaused ? "PAUSED" : "MONITORING";
       const actionMessage = execution.reason === "EXIT_ALREADY_SUBMITTED" ? "目标持仓已提交转让，继续核实持仓与委托"
 
-          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "模型动作或方向证据不完整，未执行" : "已记录受控动作";
+          : execution.reason === "HOLD" ? "保持观望" : execution.reason === "RISK_GATE" ? "风险或数据规则未通过，禁止下单" : execution.reason === "BOUNDARY" ? "执行授权或账户状态未通过，未提交" : "已记录受控动作";
       const boundaryMessage = roundEntryBlock ? `本轮尚未结束（${roundEntryBlock}），继续核实持仓与委托`
-        : task.decision.entryBlock?.reason === "LOW_PROFIT_PROBABILITY" ? "AI选定方向盈利概率不足40%，继续观察"
+        : task.decision.entryBlock ? `执行暂缓：${task.decision.entryBlock.reason}，继续读取账户和报价`
         : sessionChangedDuringAnalysis ? "分析期间登录已恢复，立即用新会话数据重新分析"
         : accountUnverified ? "持仓未核实，禁止下单" : staleDecision ? "AI结果已过期，重新分析"
         : positionChangedDuringAnalysis ? "分析期间持仓动作已执行，丢弃旧动作" : actionMessage;

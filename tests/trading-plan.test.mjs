@@ -19,18 +19,22 @@ function fixture(side = "LONG", now = Date.now()) {
   return { market, summary, plan, task, record: installed.record, now };
 }
 
-for (const side of ["LONG", "SHORT"]) test(`${side} AI entry requires an executable plan and actual profitable price`, () => {
+for (const side of ["LONG", "SHORT"]) test(`${side} AI entry follows real quotes without a risk-plan or reference-zone veto`, () => {
   const { market, plan, task, now } = fixture(side);
   const decision = { action: side === "LONG" ? "BUY" : "SELL", entryPrice: 100, orderType: "MARKET", tradePlan: plan };
   assert.ok(validateEntryPlan(decision, market, task, now).guard);
-  assert.equal(validateEntryPlan({ ...decision, tradePlan: null }, market, task, now).code, "AI_ENTRY_PLAN_REQUIRED");
+  const withoutPlan = validateEntryPlan({ ...decision, tradePlan: null, entryPrice: null }, market, task, now);
+  assert.ok(withoutPlan.guard);
+  assert.deepEqual(withoutPlan.warnings, ["AI_ENTRY_RISK_PLAN_PENDING"]);
   const outside = side === "LONG" ? 110 : 90;
   market.orderBook.bids[0].price = outside;
   market.orderBook.asks[0].price = outside;
-  assert.equal(validateEntryPlan(decision, market, task, now).code, "ENTRY_PRICE_OUTSIDE_AI_PLAN");
+  const refreshed = validateEntryPlan(decision, market, task, now);
+  assert.ok(refreshed.guard);
+  assert.equal(refreshed.price, outside);
 });
 for (const fault of ["unknown-anchor", "provisional-anchor", "provisional-marker", "future-anchor", "wrong-setup", "loss-target", "invalid-hard-stop", "expired", "stale-book", "insufficient-depth"]) {
-  test(`entry rejects ${fault} without inventing a fallback plan`, () => {
+  test(`entry treats ${fault} as advisory except unreadable execution quotes`, () => {
     const { market, plan, task, now } = fixture();
     if (fault === "unknown-anchor") plan.anchorPrice = 99.6;
     if (fault === "provisional-anchor") market.history[0].confirmation = "PROVISIONAL";
@@ -42,9 +46,25 @@ for (const fault of ["unknown-anchor", "provisional-anchor", "provisional-marker
     if (fault === "expired") plan.validForSec = 0;
     if (fault === "stale-book") market.observedAt = new Date(now - 6000).toISOString();
     if (fault === "insufficient-depth") market.orderBook.asks[0].volume = 1;
-    assert.ok(validateEntryPlan({ action: "BUY", entryPrice: 100, tradePlan: plan }, market, task, now).code);
+    const result = validateEntryPlan({ action: "BUY", entryPrice: 100, tradePlan: plan }, market, task, now);
+    if (["stale-book", "insufficient-depth"].includes(fault)) assert.equal(result.code, "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED");
+    else {
+      assert.ok(result.guard, result.code);
+      assert.equal(result.plan.takeProfitPrice, plan.takeProfitPrice);
+      assert.equal(result.plan.hardStopPrice, plan.hardStopPrice);
+    }
   });
 }
+test("entry authorization retains AI TTL and explicit limit price without inventing a price", () => {
+  const { market, task, now } = fixture();
+  assert.equal(validateEntryPlan({ action: "HOLD" }, market, task, now).code, "AI_ENTRY_ACTION_REQUIRED");
+  assert.equal(validateEntryPlan({ action: "BUY", orderType: "LIMIT" }, market, task, now).code, "ENTRY_LIMIT_PRICE_REQUIRED");
+  const result = validateEntryPlan({ action: "BUY", orderType: "LIMIT", targetPrice: 90, decisionTtlSec: 120 }, market, task, now);
+  assert.equal(result.price, 90);
+  assert.equal(result.guard.targetPrice, 90);
+  assert.equal(entryPlanAllowsPrice(result.guard, 200, now), true);
+  assert.equal(entryPlanAllowsPrice(result.guard, 100, now + 120000), false);
+});
 test("directional price arithmetic keeps invalid data unknown and reverses shorts", () => {
   assert.equal(directionalProfitPoints({ side: "LONG", averagePrice: 100 }, 100.1), 0.1);
   assert.equal(directionalProfitPoints({ side: "SHORT", averagePrice: 100 }, 99.9), 0.1);

@@ -856,7 +856,7 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
 }
 
 async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType = "MARKET", checkFields = false } = {}) {
-  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_PLAN_REQUIRED" };
+  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_ACTION_REQUIRED" };
   const snapshot = await readVisiblePage(sessionId, { quick: true, inspectPositions: true });
   if (!snapshot.ok) return { ok: false, code: snapshot.code, message: snapshot.message };
   const market = parseHaohanPageSnapshot(snapshot, { symbol: entryGuard.symbol });
@@ -868,7 +868,10 @@ async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, 
     && !account.openOrders?.some(p => Number(p.remainingQuantity) > 0));
   if (!flat) return { ok: false, code: verified ? "ROUND_NOT_FLAT" : "ACCOUNT_UNVERIFIED" };
   if (!matchesInstrument(entryGuard, market)) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED" };
-  let submittedPrice = Number(price);
+  const quote = executableEntryQuote(market, action, quantity);
+  if (!quote) return { ok: false, code: "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED" };
+  if (!entryPlanAllowsPrice(entryGuard, quote.price)) return { ok: false, code: "AI_ENTRY_DECISION_EXPIRED" };
+  let submittedPrice = orderType === "MARKET" ? quote.price : Number(price);
   if (checkFields) {
     const page = await getBrowserPage(sessionId);
     const fields = await page.locator("input").evaluateAll((inputs, side) => {
@@ -885,12 +888,15 @@ async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, 
     }, action);
     if (fields.price.length !== 1 || fields.quantity.length !== 1 || fields.quantity[0] !== Number(quantity)) return { ok: false, code: "ENTRY_FORM_CHANGED" };
     submittedPrice = fields.price[0];
+    if (orderType === "MARKET" && submittedPrice !== quote.price) {
+      const labels = suggestionFormLabels(action);
+      const filled = await fillTradeFields(page, [{ labels: [labels.price, ...labels.extras.filter(item => /价/.test(item))], value: quote.price }]);
+      if (filled.length !== 1) return { ok: false, code: "ENTRY_FORM_CHANGED" };
+      submittedPrice = quote.price;
+    }
   }
-  const quote = executableEntryQuote(market, action, quantity);
-  if (!quote) return { ok: false, code: "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED" };
-  if (!entryPlanAllowsPrice(entryGuard, submittedPrice)
-    || (orderType === "MARKET" && (!entryPlanAllowsPrice(entryGuard, quote.price)
-      || (action === "BUY" ? submittedPrice < quote.price : submittedPrice > quote.price)))) return { ok: false, code: "ENTRY_PRICE_OUTSIDE_AI_PLAN" };
+  const limitPrice = Number(entryGuard.targetPrice ?? price);
+  if (!(submittedPrice > 0) || (orderType === "LIMIT" && limitPrice > 0 && submittedPrice !== limitPrice)) return { ok: false, code: "ENTRY_FORM_CHANGED" };
   return { ok: true, price: submittedPrice };
 }
 
@@ -903,7 +909,7 @@ export async function continueManualEntry({ sessionId = "default", action, entry
   try {
     const result = await completeTradeDialogs(page, { baselineToken,
       canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, orderType, checkFields: true }) });
-    return { ok: result.ok, code: result.code, continued: result.confirmed === true };
+    return { ok: result.ok, code: result.code, continued: result.confirmed === true, submittedPrice: result.submittedPrice };
   } finally { await dismissEntryDialogs(page, baselineToken); }
 }
 
@@ -1045,6 +1051,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED", submitted: false };
     const allowed = await entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType });
     if (!allowed.ok) return { ...allowed, submitted: false };
+    price = allowed.price;
     const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
     if (!filled.ok) return { ...filled, submitted: false };
     baselineToken = await markTradePageHints(page);
@@ -1062,7 +1069,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     stage = "feedback";
     const feedback = await observeTradeFeedback(page, response, baselineToken);
     return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
-      pageHint: feedback.pageHint, clicked: result }), stage, submittedQuantity: quantity, executionDurationMs: Date.now() - startedAt };
+      pageHint: feedback.pageHint, clicked: result }), stage, submittedPrice: dialog.submittedPrice, submittedQuantity: quantity, executionDurationMs: Date.now() - startedAt };
   } catch (error) {
     return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, stage, submitted: false, uncertain: clicked };
   } finally { response?.dispose(); await dismissEntryDialogs(page, baselineToken); }

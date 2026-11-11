@@ -392,6 +392,7 @@ export async function completeTradeDialogs(page, { exitType, cancelOrder = false
           if (cancelState && !cancelState.disabled) await cancel.click({ timeout: 1500 });
           return { ...guard, confirmed };
         }
+        if (!exitType && !cancelOrder && Number(guard.price) > 0) submittedPrice = Number(guard.price);
       }
       const fresh = await control.evaluateAll((nodes, token) => {
         if (nodes.length !== 1) return false;

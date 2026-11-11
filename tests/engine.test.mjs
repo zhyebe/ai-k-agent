@@ -37,8 +37,8 @@ test("实盘只限制单笔数量，不把 AI BUY 意图改成 HOLD", () => {
   assert.equal(decision.riskFlags.includes("RISK_LIMIT_EXCEEDED"), false);
 });
 
-test("获利概率分档：大于等于 40% 允许方向性提示", () => {
-  assert.equal(profitSignalTier(0.399), "HOLD");
+test("获利概率仅作展示，低概率仍有提示", () => {
+  assert.equal(profitSignalTier(0.399), "EXPLORATORY");
   assert.equal(profitSignalTier(0.4), "EXPLORATORY");
   assert.equal(profitSignalTier(0.4001), "EXPLORATORY");
   assert.equal(profitSignalTier(0.44), "EXPLORATORY");
@@ -49,7 +49,7 @@ test("获利概率分档：大于等于 40% 允许方向性提示", () => {
   assert.equal(profitSignalTier(0.9001), "VERY_STRONG");
 });
 
-test("入场所选方向至少40%，不替AI比较多空概率", () => {
+test("明确AI方向不受概率门槛或缺失概率否决", () => {
   for (const action of ["BUY", "SELL"]) {
     for (const probability of [0, 0.03, 0.21, 0.39, 0.399999, 0.4, 0.400001, 0.41, 0.44, 0.45]) {
       for (const otherProbability of [probability, Math.max(0, probability - 0.02), 0.9]) {
@@ -60,17 +60,17 @@ test("入场所选方向至少40%，不替AI比较多空概率", () => {
           bearishProfitProbability: action === "SELL" ? probability : otherProbability,
           riskFlags: [],
         }));
-        assert.equal(decision.action, probability >= 0.4 ? action : "HOLD");
+        assert.equal(decision.action, action);
         assert.equal(decision.profitProbability, probability);
-        assert.equal(meetsOrderBoundary(decision), probability >= 0.4);
-        assert.equal(decision.signalTier, probability >= 0.4 ? "AI_RECOGNITION" : "HOLD");
-        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), probability < 0.4);
+        assert.equal(meetsOrderBoundary(decision), true);
+        assert.equal(decision.signalTier, "AI_RECOGNITION");
+        assert.equal(decision.riskFlags.includes("LOW_PROFIT_PROBABILITY"), false);
       }
     }
   }
   for (const missing of [undefined, null, "", "invalid", -0.01]) {
     const incomplete = enforceProfitProbability({ action: "BUY", marketRegime: "UP", bullishProfitProbability: 0.03, bearishProfitProbability: missing });
-    assert.equal(meetsOrderBoundary(incomplete), false);
+    assert.equal(meetsOrderBoundary(incomplete), true);
   }
 });
 

@@ -1,6 +1,5 @@
 import { summarizeOrderBook } from "./order-book.mjs";
 import { heldDirection } from "./exit-policy.mjs";
-import { confirmedCandlesForAnalysis } from "./analysis-context.mjs";
 
 const number = value => !["number", "string"].includes(typeof value) || String(value).trim() === "" ? null
   : Number.isFinite(Number(value)) ? Number(value) : null;
@@ -97,49 +96,27 @@ export function executableEntryQuote(market, action, quantity, now = Date.now())
 }
 
 export function entryPlanAllowsPrice(guard, price, now = Date.now()) {
-  if (!guard || !["BUY", "SELL"].includes(guard.action) || !(number(price) > 0)
-    || !Number.isFinite(Date.parse(guard.expiresAt)) || now >= Date.parse(guard.expiresAt)) return false;
-  const plan = normalizeTradingPlan(guard.plan);
-  if (!plan || !(plan.entryZone.min > 0) || plan.entryZone.max < plan.entryZone.min
-    || price < plan.entryZone.min || price > plan.entryZone.max
-    || ![plan.takeProfitPrice, plan.stopLossPrice, plan.hardStopPrice].every(value => value > 0)) return false;
-  const direction = guard.action === "BUY" ? 1 : -1;
-  return direction * (plan.takeProfitPrice - price) > 0
-    && direction * (price - plan.stopLossPrice) > 0
-    && direction * (price - plan.hardStopPrice) > 0;
+  return Boolean(guard && ["BUY", "SELL"].includes(guard.action) && number(price) > 0
+    && Number.isFinite(Date.parse(guard.expiresAt)) && now < Date.parse(guard.expiresAt));
 }
 
 export function validateEntryPlan(decision, market, task, now = Date.now()) {
-  const plan = normalizeTradingPlan(decision.tradePlan);
-  const long = decision.action === "BUY";
-  const entry = number(decision.entryPrice);
-  if (!plan || !(entry > 0)) return { code: "AI_ENTRY_PLAN_REQUIRED" };
-  if (plan.setup !== (long ? "SUPPORT_REBOUND" : "RESISTANCE_REJECTION")
-    || !(plan.entryZone.min > 0) || plan.entryZone.max < plan.entryZone.min
-    || entry < plan.entryZone.min || entry > plan.entryZone.max
-    || !(plan.anchorPrice > 0) || !plan.anchorTimestamp
-    || (long ? plan.anchorPrice > plan.entryZone.max : plan.anchorPrice < plan.entryZone.min)
-    || (long ? plan.stopLossPrice >= plan.entryZone.min : plan.stopLossPrice <= plan.entryZone.max)) return { code: "AI_ENTRY_ZONE_INVALID" };
-  const groups = [[market.timeframe || "1m", market.history || []],
-    ...Object.entries(market.timeframes || {}).map(([timeframe, frame]) => [timeframe, frame?.history || []])];
-  const candles = groups.flatMap(([timeframe, rows]) => confirmedCandlesForAnalysis(rows.map(item => ({
-    ...item, sourceTimestamp: String(item.timestamp),
-    timestamp: number(item.timestamp) ?? Date.parse(item.timestamp),
-  })).filter(item => Number.isFinite(item.timestamp) && item.timestamp <= now && item.confirmation !== "PROVISIONAL"
-    && [item.open, item.high, item.low, item.close].every(price => number(price) > 0)
-    && item.low <= Math.min(item.open, item.close) && item.high >= Math.max(item.open, item.close)), timeframe, now));
-  const candle = candles.find(item => item.sourceTimestamp === plan.anchorTimestamp && Number(item[long ? "low" : "high"]) === plan.anchorPrice);
-  if (!candle) return { code: "AI_ENTRY_ANCHOR_UNVERIFIED" };
-  const summary = { ...market, side: long ? "LONG" : "SHORT", averagePrice: entry };
-  const validated = validateHoldingPlan(plan, summary, { observedAt: decision.observedAt || market.observedAt, now });
-  if (validated.code) return validated;
-  const guard = { action: decision.action, plan, expiresAt: validated.expiresAt,
-    symbol: market.symbol, symbolName: market.symbolName, instrumentId: market.instrumentId };
+  if (!["BUY", "SELL"].includes(decision.action)) return { code: "AI_ENTRY_ACTION_REQUIRED" };
   const quote = executableEntryQuote(market, decision.action, task.entryQuantity || 1, now);
   if (!quote) return { code: "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED" };
-  const price = decision.orderType === "LIMIT" ? number(decision.targetPrice ?? entry) : quote.price;
-  if (!entryPlanAllowsPrice(guard, price, now)) return { code: "ENTRY_PRICE_OUTSIDE_AI_PLAN" };
-  return { plan, guard, quote, price, warnings: validated.warnings };
+  const price = decision.orderType === "LIMIT" ? number(decision.targetPrice ?? decision.entryPrice) : quote.price;
+  if (!(price > 0)) return { code: "ENTRY_LIMIT_PRICE_REQUIRED" };
+  const observedAt = decision.observedAt || market.observedAt;
+  const timestamp = Date.parse(observedAt || "");
+  const ttlSec = number(decision.decisionTtlSec) || 300;
+  if (!Number.isFinite(timestamp) || timestamp > now || timestamp + ttlSec * 1000 <= now) return { code: "AI_ENTRY_DECISION_EXPIRED" };
+  const plan = normalizeTradingPlan(decision.tradePlan);
+  const summary = { ...market, side: decision.action === "BUY" ? "LONG" : "SHORT", averagePrice: price };
+  const validated = validateHoldingPlan(plan, summary, { observedAt, now });
+  const guard = { action: decision.action, plan, orderType: decision.orderType || "MARKET",
+    targetPrice: decision.orderType === "LIMIT" ? price : null, expiresAt: new Date(timestamp + ttlSec * 1000).toISOString(),
+    symbol: market.symbol, symbolName: market.symbolName, instrumentId: market.instrumentId };
+  return { plan, guard, quote, price, warnings: validated.code ? ["AI_ENTRY_RISK_PLAN_PENDING"] : validated.warnings };
 }
 
 export function tightenHoldingPlan(previous, next) {

@@ -162,13 +162,16 @@ const riskLabels: Record<string, string> = {
   TARGET_BOARD_NOT_MONITORED: "建议盘不在当前监控范围",
   BOARD_COVERAGE_INCOMPLETE: "部分盘口未采集完整",
   LOW_PROFIT_PROBABILITY: "历史概率提示",
-  INCOMPLETE_DIRECTIONAL_PROBABILITIES: "AI 方向预测字段不完整",
+  INCOMPLETE_DIRECTIONAL_PROBABILITIES: "概率未完整提供，仅供参考",
   RANGE_MARKET_NO_ENTRY: "旧版横盘限制（已取消）",
   ENTRY_MARKET_REGIME_UNKNOWN: "目标盘当前趋势字段不足，无法核实入场条件",
   EXIT_PROFIT_NOT_VERIFIED: "入场成本或可成交盈利未核实",
-  AI_ENTRY_PLAN_REQUIRED: "AI未提供完整入场计划",
-  AI_ENTRY_ZONE_INVALID: "入场区间或多空方向不合理",
-  AI_ENTRY_ANCHOR_UNVERIFIED: "支撑或阻力不对应已确认K线",
+  AI_ENTRY_PLAN_REQUIRED: "旧版入场计划限制（已取消）",
+  AI_ENTRY_ZONE_INVALID: "旧版入场区间限制（已取消）",
+  AI_ENTRY_ANCHOR_UNVERIFIED: "旧版K线锚点限制（已取消）",
+  AI_ENTRY_RISK_PLAN_PENDING: "入场预测风险计划待完善，持仓后独立请求，不阻止入场",
+  AI_ENTRY_DECISION_EXPIRED: "AI入场授权已过期，正在重新分析",
+  ENTRY_LIMIT_PRICE_REQUIRED: "AI限价单未给出明确价格",
   AI_PLAN_REQUIRED: "AI持仓计划缺失",
   AI_PLAN_PRICE_INVALID: "目标或止损价格不合理",
   AI_PLAN_RISK_INVALID: "AI风险参数不完整",
@@ -178,7 +181,7 @@ const riskLabels: Record<string, string> = {
   TRADING_COSTS_REQUIRED: "旧版费用门槛（已取消）",
   AI_PROFIT_PROTECTION_UNAVAILABLE: "利润保护未启用，目标与止损仍有效",
   ENTRY_QUOTE_OR_DEPTH_UNVERIFIED: "入场报价或全部数量深度未核实",
-  ENTRY_PRICE_OUTSIDE_AI_PLAN: "实际入场价格超出AI计划",
+  ENTRY_PRICE_OUTSIDE_AI_PLAN: "旧版参考区间限制（已取消）",
   ENTRY_RECHECK_FAILED: "提交前行情复核失败",
 };
 const reasonLabels: Record<string, string> = {
@@ -1168,13 +1171,14 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
   const actionText = analysisFailure ? displayLabel(analysisFailure, riskLabels, "分析未完成") : analyzed ? exitActionLabel(decision.action, decision.exitType) : "尚未分析";
   const bullishProbability = Number(decision.bullishProfitProbability ?? 0);
   const bearishProbability = Number(decision.bearishProfitProbability ?? 0);
+  const probabilitiesProvided = decision.directionalProbabilitiesComplete !== false;
   const profitProbability = decision.action === "BUY"
     ? bullishProbability
     : decision.action === "SELL"
       ? bearishProbability
       : Number(decision.profitProbability ?? 0);
   const target = decisionTargetLabel(decision);
-  const entryBlockReason = decision.entryBlock?.reason || decision.riskFlags.find(flag => ["LOW_PROFIT_PROBABILITY", "INCOMPLETE_DIRECTIONAL_PROBABILITIES"].includes(flag));
+  const entryBlockReason = decision.entryBlock?.reason;
   const forecasts = [
     { label: "下一 K", value: decision.forecastHorizon?.nextK },
     { label: "随后 1～3 根 K", value: decision.forecastHorizon?.next3K },
@@ -1197,12 +1201,12 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%` : ""} · ${confidenceLabel}` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? probabilitiesProvided ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%（仅参考）` : " · 概率未完整提供，不影响AI决定" : ""} · ${confidenceLabel}` : "点击「立即分析」读取目标并给出建议"}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
-      {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
+      {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>AI 按短线趋势在相对低位买涨、相对高位买跌，预测入场价与未来盈利离场 K。所选方向概率 ≥40%，账户、价格区间、深度和止损核验通过即执行，无需配置手续费。持续监控全部持仓，按整行可成交价差乘数量合计，正值立即全部离场。多空合计未盈利时先退出亏损侧；确认后保留盈利侧最多 60 秒，回落提前离场，持续增加到时也兑现。预测偏差只用真实定 K 核对，闪 K 不单独触发离场，硬风险边界继续生效。</p>
+        <p><strong>本轮规则</strong>AI 按短线趋势在相对低位买涨、相对高位买跌，有机会就决定入场，预测未来盈利离场 K。明确买卖即执行；概率、固定形态、锚点、参考区间和计划格式不再拦截，无需配置手续费。市价入场跟随最新可成交价，限价保留 AI 指定价格。持仓后独立请求目标与止损计划。持续监控全部持仓，按整行可成交价差乘数量合计，正值立即全部离场。多空合计未盈利时先退出亏损侧；确认后保留盈利侧最多 60 秒，回落提前离场，持续增加到时也兑现。预测偏差只用真实定 K 核对，闪 K 不单独触发离场，硬风险边界继续生效。</p>
         {task.summaryExitBatch && <p><strong>离场批次</strong>{({ EXIT_ALL: "合计盈利，全仓离场", EXIT_LOSERS: "多空持仓，先退亏损侧", WATCH_WINNERS: "亏损侧已离场，观察盈利侧", EXIT_WINNERS: "盈利侧离场中", COMPLETE: "批次已核实结束", INVALIDATED: "持仓变化，重新核对" })[task.summaryExitBatch.phase]}{task.summaryExitBatch.winnerDeadlineAt ? ` · 盈利侧最晚提交 ${formatTime(task.summaryExitBatch.winnerDeadlineAt)}` : ""}{task.summaryExitBatch.lastWinnerProfit !== undefined ? ` · 当前保留价差合计 ${task.summaryExitBatch.lastWinnerProfit}` : ""}</p>}
         {decision.tradePlan ? <p><strong>AI 入场计划</strong>区间 {decision.tradePlan.entryZone.min}～{decision.tradePlan.entryZone.max} · 目标 {decision.tradePlan.takeProfitPrice} · 止损 {decision.tradePlan.stopLossPrice} · 硬止损 {decision.tradePlan.hardStopPrice}</p> : null}
         {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · AI 离场计划</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（确认 {record.plan.stopConfirmationSec} 秒）· 硬止损 {record.plan.hardStopPrice}</p><p>{record.profitProtectionEnabled === false ? "利润保护未启用，目标与止损继续执行" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {formatTime(record.maxHoldAt)}</p><span>{record.plan.rationale}</span></div>)}

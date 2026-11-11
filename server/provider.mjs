@@ -970,7 +970,7 @@ export async function requestDecision(provider, context, options = {}) {
     }
     delete wireContext.recentRounds;
   }
-  const fastAnalysisPrompt = "Return one compact complete JSON object, no markdown or narration. analysis_summary at most 120 Chinese characters. Put action, both directional probabilities, order_type, entry_price and target_price first. Include forecast_horizon.next_k and forecast_horizon.next_3k with direction, probability, path and invalidation, also for HOLD; distinguish estimated prices from observed quotes. Preserve exact instrument IDs and uncertainty.";
+  const fastAnalysisPrompt = "Return one compact complete JSON object, no markdown or narration. analysis_summary at most 120 Chinese characters. Put action, target_symbol, order_type, entry_price and target_price first. Both directional probabilities are advisory and may be null; never delay an actionable short-term BUY/SELL for a probability threshold, fixed setup or exact anchor. Include forecast_horizon.next_k and forecast_horizon.next_3k with direction, probability, path and invalidation, also for HOLD; distinguish estimated prices from observed quotes. Preserve exact instrument IDs and uncertainty.";
   const messages = [
     { role: "system", content: `${AI_TRADING_POLICY}\n${liveBoardFreshnessPrompt}\n${orderBookPrompt}\nReturn confidence as a number from 0 to 1 for your confidence in the chosen action, including HOLD; use null only if it cannot be assessed. Confidence is separate from both directional profit probabilities and is not an entry threshold.\n单笔入场数量：${requestContext.strategy?.entryQuantity ?? 1}。${options.fastAnalysis ? fastAnalysisPrompt : ""}` },
     ...conversationMessages,

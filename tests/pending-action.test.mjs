@@ -501,11 +501,11 @@ test("switching into live cancels stale paper suggestions", () => {
 
 for (const action of ["BUY", "SELL"]) {
   for (const probability of [undefined, 0.39, 0.3999, 0.399999]) {
-    test(`live submit checks persisted ${action} probability ${probability} must meet the 40% boundary`, async () => {
+    test(`live submit preserves persisted AI ${action} with advisory probability ${probability}`, async () => {
       const task = insertTask(`task_probability_guard_${action}_${probability}_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
       task.decision = {
         ...task.decision,
-        action, marketRegime: action === "SELL" ? "DOWN" : "UP",
+        action, marketRegime: action === "SELL" ? "DOWN" : "UP", entryGuard: entryGuard(action, 1800, "DGJJ"), tradePlan: null,
         profitProbability: 0.9,
         bullishProfitProbability: action === "BUY" ? probability : 0.9,
         bearishProfitProbability: action === "SELL" ? probability : 0.9,
@@ -517,10 +517,10 @@ for (const action of ["BUY", "SELL"]) {
         submitSuggestionForm: async () => { submitted += 1; return { ok: true, submitted: true }; },
       } });
       try {
-        await assert.rejects(submit, /ENTRY_PROBABILITY_BELOW_40/);
-        assert.equal(submitted, 0);
-        assert.equal(task.pendingAction.status, "WAITING");
-        assert.equal(state.orders.filter(order => order.taskId === task.id).length, 0);
+        await submit();
+        assert.equal(submitted, 1);
+        assert.equal(task.pendingAction.status, "AWAITING_FILL");
+        assert.equal(state.orders.filter(order => order.taskId === task.id).length, 1);
       } finally {
         state.tasks = state.tasks.filter((item) => item.id !== task.id);
       }

@@ -93,7 +93,7 @@ test("entry probability display keeps values below 40% below the boundary", asyn
   const panel = page.locator(".decision-panel");
   await panel.getByRole("heading", { name: "当前建议", exact: true }).waitFor();
   assert.deepEqual(await panel.locator(".direction-probabilities b").allTextContents(), ["39.99%", "40%"]);
-  assert.match(await panel.getByLabel("判断与未来预测").innerText(), /≥40%.*40%～45%也允许.*AI 判断当前价或限价.*下单或观望/);
+  assert.match(await panel.getByLabel("判断与未来预测").innerText(), /明确买卖即执行.*概率.*不再拦截.*市价入场.*限价保留/);
 });
 
 test("HOLD displays future paths and distinguishes AI observation from an entry block", async t => {

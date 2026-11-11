@@ -44,21 +44,47 @@ for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
     assert.ok(f.task.decision.riskFlags.includes('AI_PROFIT_PROTECTION_UNAVAILABLE'));
   });
 }
-for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const probability of [0.3999, 0.4, 0.42, 0.45, 0.6]) {
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const probability of [0, 0.03, 0.3999, 0.4, 0.42, 0.45, 0.6]) {
   test(`${automatic ? 'automatic' : 'manual'} ${action} selected probability ${probability}`, async t => {
     const f = fixture(t, `entry-${automatic}-${action}-${probability}`, automatic, action, probability);
     await runAnalysis(f.task.id, '', { runtime: f.runtime });
-    assert.equal((automatic ? f.submissions : f.forms).length, probability >= 0.4 ? 1 : 0);
-    assert.equal(f.task.decision.action, probability >= 0.4 ? action : 'HOLD');
+    assert.equal((automatic ? f.submissions : f.forms).length, 1);
+    assert.equal(f.task.decision.action, action);
     assert.equal(f.analyses[0].strategy.loop.entry.emptyOnly, true);
-    assert.equal(f.analyses[0].strategy.loop.entry.minimumProbability, 0.4);
-    if (probability >= 0.4) {
-      await runAnalysis(f.task.id, '', { runtime: f.runtime });
-      assert.equal(f.analyses.length, 1, 'pending entry owns the current round');
-      assert.equal((automatic ? f.submissions : f.forms)[0].action, action, 'program never chooses the higher probability side');
-    }
+    assert.equal(f.analyses[0].strategy.loop.entry.minimumProbability, undefined);
+    assert.equal(f.analyses[0].executionPolicy.probabilityRole, 'advisory');
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.analyses.length, 1, 'pending entry owns the current round');
+    assert.equal((automatic ? f.submissions : f.forms)[0].action, action, 'program never chooses the higher probability side');
   });
 }
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
+  test(`${automatic ? 'automatic' : 'manual'} ${action} executes without probabilities, exact anchor or entry plan`, async t => {
+    const f = fixture(t, `no-entry-gates-${automatic}-${action}`, automatic, action);
+    f.runtime.requestDecision = async () => ({ action, targetSymbol: 'A', orderType: 'MARKET', directionalProbabilitiesComplete: false,
+      riskFlags: ['LOW_PROFIT_PROBABILITY', 'INCOMPLETE_DIRECTIONAL_PROBABILITIES'], evidenceIds: [] });
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.task.decision.action, action);
+    assert.equal((automatic ? f.submissions : f.forms).length, 1);
+    assert.ok(f.task.decision.riskFlags.includes('AI_ENTRY_RISK_PLAN_PENDING'));
+    assert.equal(f.task.decision.entryBlock, undefined);
+    assert.equal(f.task.pendingAction.entryGuard.plan, null);
+    assert.equal(f.task.entryForecast.action, action);
+  });
+}
+for (const action of ['BUY', 'SELL']) test(`${action} refreshed market price does not discard the AI entry`, async t => {
+  const f = fixture(t, `moving-entry-${action}`, true, action);
+  let rechecks = 0;
+  f.runtime.observeExecutionMarket = async () => {
+    const price = 100 + (action === 'BUY' ? 1 : -1) * ++rechecks;
+    return { ...f.market, observedAt: new Date().toISOString(),
+      orderBook: { bids: [{ price, volume: 100 }], asks: [{ price, volume: 100 }] } };
+  };
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+  assert.equal(f.submissions[0].price, action === 'BUY' ? 102 : 98);
+  assert.equal(f.task.decision.action, action);
+});
 for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test(`${stateName} blocks additional entry analysis`, async t => {
   const f = fixture(t, `round-${stateName}`);
   if (stateName === 'positions') f.market.account.positions = [{ positionOrderId: 'p', side: 'LONG', quantity: 1, orderPrice: 100 }];

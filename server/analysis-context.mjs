@@ -160,12 +160,12 @@ export const LIVE_KLINE_PRINT_SECOND = 50;
 export const LIVE_BOARD_STRATEGY = Object.freeze({
   id: "haohan-live-k50",
   loop: {
-    summary: "核实空仓和委托清零，AI按短线趋势预测相对低位买涨、相对高位买跌及未来盈利离场K。概率>=40%且核心价格计划、区间和深度通过即可入场，不使用费用配置或利润估算拦截。全部持仓合计可成交价差乘数量>0立即全平；多空合计未盈利先退亏损侧，确认后盈利侧最多60秒，回落提前兑现。清零后开始下一轮。",
+    summary: "核实空仓和委托清零，AI按短线趋势在相对低位买涨、相对高位买跌，有机会就明确决定并执行，预测未来盈利离场K。概率、固定形态、锚点、参考区间、计划格式及费用不能否决BUY/SELL。全部持仓合计可成交价差乘数量>0立即全平；多空合计未盈利先退亏损侧，确认后盈利侧最多60秒，回落提前兑现。清零后开始下一轮。",
     stages: ["OBSERVE", "ANALYZE", "RESULT", "ENTRY", "OBSERVE_WHILE_HOLDING", "AI_EXIT_REVIEW", "EXIT", "NEXT_ROUND"],
     aiCompletes: ["ANALYZE", "ENTRY_DIRECTION", "EXIT_DECISION"],
     hostCompletes: ["OBSERVE_PAGE", "EXECUTE_AI_ENTRY", "MONITOR_SUMMARY", "EXECUTE_AI_EXIT", "VERIFY_FLAT"],
-    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_ONLY", minimumProbability: 0.4,
-      timing: "按短线相对高低位决定，不等待绝对极值。所选方向>=40%只代表允许；AI提供trade_plan与真实定K锚点，锚点可在入场区间外。确认前核对bid/ask、全部数量深度、区间与核心止损，费用或可选保护不阻碍入场。",
+    entry: { emptyOnly: true, buyUp: "买入订立", buyDown: "卖出订立", decisionMode: "AI_ONLY", probabilityRole: "advisory", entryPlanRole: "advisory",
+      timing: "按短线相对高低位决定，不等待绝对极值或固定形态。明确BUY/SELL即执行，概率及计划字段只作参考。确认前核对真实账户、品种、数量、bid/ask与全部数量深度；MARKET刷新价格后继续确认，LIMIT保留AI限价。入场后独立请求有效止损计划。",
       whileHolding: "本轮持仓和委托清零前禁止新开仓。" },
     exit: { whileHolding: true, positionList: ["持仓汇总", "转让"], decisionMode: "USER_RULES_THEN_AI_PRICE_PLAN",
       requiresTakeProfit: true, requiresHardStop: true, requiresProfitProtection: false, profitUnit: "DIRECTIONAL_PRICE_POINTS",
@@ -174,7 +174,7 @@ export const LIVE_BOARD_STRATEGY = Object.freeze({
     noSecondEntryWhileHolding: true,
   },
   kline: {
-    summary: "正常每分钟约45至50秒出K，近端预测针对下一根及随后1～3根K。已确认K只作证据；AI给出未来路径、支撑反弹或阻力受阻入场区间与风险计划。程序使用当前可成交价执行AI价格计划，不等待定K后才执行目标或硬止损。",
+    summary: "正常每分钟约45至50秒出K，近端预测针对下一根及随后1～3根K。已确认K只作证据；AI给出未来路径、短线相对高低位和风险计划。程序使用当前可成交价执行AI入场决定，不等待定K或固定形态；目标与硬止损独立执行。",
     printSecond: LIVE_KLINE_PRINT_SECOND,
     periodMs: LIVE_KLINE_PERIOD_MS,
     printOffsetMs: LIVE_KLINE_PRINT_OFFSET_MS,

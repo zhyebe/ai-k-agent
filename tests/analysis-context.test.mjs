@@ -4,7 +4,9 @@ import { analysisLayerWindows, buildLayeredAnalysisMarket, buildMarketAnalysisSe
 
 test("single-round AI entry and structured AI price exits share one policy", () => {
   const { entry, exit } = LIVE_BOARD_STRATEGY.loop;
-  assert.equal(entry.minimumProbability, 0.4);
+  assert.equal(entry.minimumProbability, undefined);
+  assert.equal(entry.probabilityRole, "advisory");
+  assert.equal(entry.entryPlanRole, "advisory");
   assert.match(LIVE_BOARD_STRATEGY.kline.summary, /AI给出未来路径.*风险计划/);
   assert.equal(entry.emptyOnly, true);
   assert.equal(entry.decisionMode, "AI_ONLY");
