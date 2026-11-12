@@ -41,7 +41,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
 
       assert.match(prompt, /点差不是金额/);
       assert.match(prompt, /到达目标立即离场/);
-      assert.match(prompt, /定K后普通止损连续突破确认，硬止损命中直接执行/);
+      assert.match(prompt, /闪K或PROVISIONAL期间所有离场等待/);
+      assert.match(prompt, /真实可成交报价的连续止损风险，不因新K重置/);
+      assert.match(prompt, /定K仍越过普通止损就执行，硬止损命中直接执行/);
       const context = JSON.parse(messages.at(-1).content);
       assert.equal(context.account.realtimeValueChange, amount);
       assert.equal(context.account.dayPnl, 99);
