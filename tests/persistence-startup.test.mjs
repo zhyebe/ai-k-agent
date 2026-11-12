@@ -35,7 +35,7 @@ test("only exact reviewed Skills receive summary-exit policy without replacing u
   for (const version of ["v0.3.76", "v0.3.84", "v0.3.85", "v0.3.86", "v0.3.87", "v0.3.88", "v0.3.90", "v0.3.98", "v0.3.99", "v0.3.101", "v0.3.102", "v0.3.107", "v0.3.108", "v0.3.111", "v0.3.114", "v0.3.116", "v0.3.117", "v0.3.118", "v0.3.119", "v0.3.120", "v0.3.121", "v0.3.124", "v0.3.125", "v0.3.126", "v0.3.128", "v0.3.130", "v0.3.131", "v0.3.132", "v0.3.133", "v0.3.134", "v0.3.135", "v0.3.136", "v0.3.137"]) {
     const previous = await oldTradingSkill(version);
     const revision = await tradingSkillUpgrade(previous);
-    assert.equal(revision.version, "v0.3.138");
+    assert.equal(revision.version, "v0.3.139");
     assert.equal(revision.content, bundled);
     assert.match(revision.content, /下一根及随后1～3根K/);
     assert.match(revision.content, /硬止损命中则直接执行/);
@@ -53,7 +53,7 @@ test("the historical v0.3.134 reviewed content receives the same current strateg
   const content = await readFile(new URL("./fixtures/trading-skill-v1.0.2.md", import.meta.url), "utf8");
   const skill = { id: "skill_04ef36d5-3002-40fd-b51f-3914867e29f1", status: "APPROVED", version: "v0.3.134", content };
   const revision = await tradingSkillUpgrade(skill);
-  assert.equal(revision.version, "v0.3.138");
+  assert.equal(revision.version, "v0.3.139");
   assert.match(revision.content, /盈利侧最多观察60秒/);
   assert.equal(await tradingSkillUpgrade({ ...skill, content: `${content}\n用户规则` }), null);
 });
@@ -81,7 +81,7 @@ test("MySQL upgrades the reviewed Skill once and loads the persisted revision in
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
     hydrateState({ skills: snapshot.skills });
-    assert.equal(state.skills[0].version, "v0.3.138");
+    assert.equal(state.skills[0].version, "v0.3.139");
     assert.equal(state.skills[0].ownerUserId, old.owner_user_id);
     assert.deepEqual(state.skills[0].tags, ["优先参考"]);
     const prompt = buildApprovedExperiencePrompt(approvedKnowledgeForAnalysis(state.skills));
@@ -161,7 +161,7 @@ test("MongoDB upgrades the same reviewed Skill and reloads persisted content", a
   t.after(() => adapter.close());
   for (let restart = 0; restart < 2; restart++) {
     const snapshot = await adapter.loadState();
-    assert.equal(snapshot.skills[0].version, "v0.3.138");
+    assert.equal(snapshot.skills[0].version, "v0.3.139");
     assert.match(snapshot.skills[0].content, /硬止损命中则直接执行/);
     assert.equal(snapshot.skills[0].ownerUserId, "author");
   }

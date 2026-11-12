@@ -139,7 +139,7 @@ for (const side of ["LONG", "SHORT"]) test(`${side} target and trailing protecti
   assert.equal(summaryExitAllowsPrice(summary, 100 + direction * 2.4, protection.decision.exitGuard.aiAuthorization, now + 2000), true);
   assert.equal(tick(4, 3000)[0].decision.exitReason, "TAKE_PROFIT");
 });
-test("flash prices never confirm an ordinary stop and a fixed recovery cancels the breach", () => {
+test("flash candles cannot submit an ordinary stop and a fixed recovery cancels the real quote breach", () => {
   const { task, market, record, now } = fixture();
   for (let seconds = 0; seconds <= 35; seconds += 5) {
     market.observedAt = new Date(now + seconds * 1000).toISOString();
@@ -156,6 +156,22 @@ test("flash prices never confirm an ordinary stop and a fixed recovery cancels t
   observeSummaryPlans(task, market, now + 40000);
   assert.equal(record.lossObservation, null);
   assert.equal(summaryExitCandidates(task, market, now + 40000).length, 0);
+});
+test("stop observation across provisional candles ignores cached quotes and restarts after missing real samples", () => {
+  const { task, market, record, now } = fixture();
+  market.timeframe = "1m";
+  market.history[0].confirmation = { status: "PROVISIONAL", lastObservedAt: now };
+  market.orderBook.bids[0].price = market.orderBook.asks[0].price = 98;
+  observeSummaryPlans(task, market, now);
+  assert.equal(record.lossObservation.startedAt, now);
+  observeSummaryPlans(task, market, now + 4000);
+  assert.equal(record.lossObservation.lastObservedAt, now);
+  observeSummaryPlans(task, market, now + 6000);
+  assert.equal(record.lossObservation.lastObservedAt, now);
+  market.observedAt = new Date(now + 12000).toISOString();
+  observeSummaryPlans(task, market, now + 12000);
+  assert.equal(record.lossObservation.startedAt, now + 12000);
+  assert.equal(summaryExitCandidates(task, market, now + 12000).length, 0);
 });
 test("a fixed price at the hard stop bypasses soft confirmation; expiry preserves protection", () => {
   const { task, summary, record, now } = fixture();

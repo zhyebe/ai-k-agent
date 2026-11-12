@@ -250,18 +250,34 @@ for (const fault of ["missing-plan", "missing-hard-stop", "missing-exit-price"])
   assert.equal(f.task.summaryExitReviews[0].status, "FAILED");
   assert.equal(f.submitted.length, 0);
 });
-test("flash prices wait for a real fixed K before starting ordinary stop confirmation", async t => {
-  const f = fixture(t, "flash-risk");
+for (const side of ["LONG", "SHORT"]) test(`${side} continuous real quote breach waits for a fixed K before executing the confirmed stop`, async t => {
+  const f = fixture(t, `flash-risk-${side}`, { side });
+  const price = side === "LONG" ? 98 : 102;
   for (let seconds = 0; seconds <= 30; seconds += 5) {
-    f.market.flashK = { suspected: true, price: 98 - seconds / 100, observedAt: Date.now() };
-    await f.tick(98 - seconds / 100, seconds ? 5000 : 0);
+    f.market.flashK = { suspected: true, price, observedAt: Date.now() };
+    await f.tick(price, seconds ? 5000 : 0);
   }
   assert.equal(f.submitted.length, 0);
   assert.equal(f.task.exitMonitor.status, "AWAITING_CONFIRMED_PRICE");
   f.market.flashK = { suspected: false, confirmed: true };
   f.market.timeframe = "1m";
-  f.market.history = [fixedCandle(tradingPlan())];
-  for (let seconds = 0; seconds <= 30; seconds += 5) await f.tick(98, seconds ? 5000 : 2000);
+  f.market.history = [fixedCandle(tradingPlan(side))];
+  await f.tick(price, 2000);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "STOP_LOSS");
+});
+for (const side of ["LONG", "SHORT"]) test(`${side} new provisional minutes cannot repeatedly erase a continuous real stop breach`, async t => {
+  const f = fixture(t, `stop-across-minute-pricing-${side}`, { side });
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  f.market.timeframe = "1m";
+  for (let seconds = 0; seconds <= 120; seconds += 2) {
+    const elapsed = seconds ? 2000 : 0;
+    const confirmed = seconds % 60 >= 56;
+    f.market.history = [{ ...fixedCandle(tradingPlan(side)),
+      confirmation: { status: confirmed ? "CONFIRMED" : "PROVISIONAL", lastObservedAt: Date.now() + elapsed } }];
+    await f.tick(side === "LONG" ? 98 : 102, elapsed);
+    if (!confirmed && seconds < 56) assert.equal(f.submitted.length, 0);
+  }
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "STOP_LOSS");
 });

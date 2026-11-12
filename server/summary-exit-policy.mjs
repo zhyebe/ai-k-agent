@@ -220,16 +220,14 @@ export function observeSummaryPlans(task, market, now = Date.now()) {
   for (const context of summaryExitReviewContexts(market, now)) {
     const record = (task.summaryTradingPlans || []).find(item => item.signature === context.signature);
     if (!record) continue;
-    if (task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) {
-      record.lossObservation = null;
-      continue;
-    }
     if (record.lastObservedAt && context.quote.observedAt < record.lastObservedAt) continue;
     record.lastObservedAt = context.quote.observedAt;
     const long = context.summary.side === "LONG", price = context.quote.price;
-    record.bestPrice = long ? Math.max(record.bestPrice, price) : Math.min(record.bestPrice, price);
-    const protection = profitProtectionFor(context.summary, record.plan);
-    if (protection && (long ? price >= protection.activationPrice : price <= protection.activationPrice)) record.profitArmed = true;
+    if (!task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) {
+      record.bestPrice = long ? Math.max(record.bestPrice, price) : Math.min(record.bestPrice, price);
+      const protection = profitProtectionFor(context.summary, record.plan);
+      if (protection && (long ? price >= protection.activationPrice : price <= protection.activationPrice)) record.profitArmed = true;
+    }
     const breached = long ? price <= record.plan.stopLossPrice : price >= record.plan.stopLossPrice;
     const prior = record.lossObservation;
     if (!breached) { record.lossObservation = null; continue; }
