@@ -250,6 +250,46 @@ test("auto click without a verified write request keeps monitoring for reconcili
   assert.equal(state.orders.filter((order) => order.taskId === task.id).length, 0);
 });
 
+test("entry cancellation preserves the clicked button and exact control failure", async () => {
+  const task = insertTask(`task_live_cancelled_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  const message = "已点击“取消”，未提交订单：TRADE_CONFIRM_DISABLED";
+  await assert.rejects(confirmPendingAction(task.id, {
+    source: "auto_timeout",
+    runtime: {
+      submitSuggestionForm: async () => ({ ok: false, submitted: false, uncertain: false, code: "TRADE_CONFIRM_DISABLED",
+        stage: "confirm", confirmed: false, confirmationLabel: "", cancelled: true, cancellationLabel: "取消", message }),
+    },
+  }), /TRADE_CONFIRM_DISABLED/);
+  assert.equal(task.pendingAction.status, "WAITING");
+  assert.match(task.pendingAction.message, /已点击“取消”.*TRADE_CONFIRM_DISABLED/);
+  assert.equal(task.pendingAction.lastExecution.code, "TRADE_CONFIRM_DISABLED");
+  assert.equal(task.pendingAction.lastExecution.stage, "confirm");
+  assert.equal(task.pendingAction.lastExecution.confirmed, false);
+  assert.equal(task.pendingAction.lastExecution.cancelled, true);
+  assert.equal(task.pendingAction.lastExecution.cancellationLabel, "取消");
+  assert.equal(task.pendingAction.lastExecution.message, message);
+  assert.equal(state.orders.filter(order => order.taskId === task.id).length, 0);
+});
+
+test("approved AI entry submits without repeating account, quote or expiry checks", async () => {
+  const task = insertTask(`task_live_direct_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
+  task.pendingAction = buildPendingAction(task, task.decision);
+  task.pendingAction.entryGuard.expiresAt = "2000-01-01T00:00:00.000Z";
+  task.market.account = { positionsVerified: false, positionSummariesVerified: false, openOrdersVerified: false };
+  let submissions = 0;
+  await confirmPendingAction(task.id, {
+    source: "auto_timeout",
+    runtime: {
+      observeExecutionMarket: async () => { throw new Error("UNEXPECTED_ENTRY_RECHECK"); },
+      submitSuggestionForm: async () => { submissions++; return { ok: true, submitted: true, code: "TRADE_SUBMITTED" }; },
+    },
+  });
+  assert.equal(submissions, 1);
+  assert.equal(task.pendingAction.status, "AWAITING_FILL");
+  await assert.rejects(confirmPendingAction(task.id, { source: "auto_timeout" }), /PENDING_ACTION_NOT_FOUND/);
+});
+
 test("trade rejection is recorded and the next K remains eligible", async () => {
   const task = insertTask(`task_live_rejected_${Date.now()}`, { mode: "LIVE", autoDecisionEnabled: true });
   task.pendingAction = buildPendingAction(task, task.decision);

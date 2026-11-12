@@ -12,7 +12,7 @@ import { summaryExitAllowsPrice, summaryKey } from "./summary-exit-policy.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote } from "./exit-policy.mjs";
-import { entryPlanAllowsPrice, executableEntryQuote, matchesInstrument } from "./trading-plan.mjs";
+import { entryOrderPrice, matchesInstrument } from "./trading-plan.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -855,61 +855,32 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
   return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };
 }
 
-async function entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType = "MARKET", checkFields = false } = {}) {
-  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_ACTION_REQUIRED" };
-  const snapshot = await readVisiblePage(sessionId, { quick: true, inspectPositions: true });
-  if (!snapshot.ok) return { ok: false, code: snapshot.code, message: snapshot.message };
-  const market = parseHaohanPageSnapshot(snapshot, { symbol: entryGuard.symbol });
-  if (market.code === "REAUTH_REQUIRED") return { ok: false, code: market.code, message: market.message };
-  const account = market?.account;
-  const verified = account?.positionsVerified === true && account?.positionSummariesVerified === true && account?.openOrdersVerified === true;
-  const flat = Boolean(verified && !account.positions?.some(p => Number(p.quantity) > 0)
-    && !account.positionSummaries?.some(p => Number(p.quantity) > 0)
-    && !account.openOrders?.some(p => Number(p.remainingQuantity) > 0));
-  if (!flat) return { ok: false, code: verified ? "ROUND_NOT_FLAT" : "ACCOUNT_UNVERIFIED" };
-  if (!matchesInstrument(entryGuard, market)) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED" };
-  const quote = executableEntryQuote(market, action, quantity);
-  if (!quote) return { ok: false, code: "ENTRY_QUOTE_OR_DEPTH_UNVERIFIED" };
-  if (!entryPlanAllowsPrice(entryGuard, quote.price)) return { ok: false, code: "AI_ENTRY_DECISION_EXPIRED" };
-  let submittedPrice = orderType === "MARKET" ? quote.price : Number(price);
-  if (checkFields) {
+async function refreshEntryPrice(sessionId, { action, quantity, price, orderType = "MARKET", fill = false } = {}) {
+  if (orderType !== "MARKET") return Number(price);
+  const snapshot = await readVisiblePage(sessionId, { quick: true });
+  const market = snapshot.ok ? parseHaohanPageSnapshot(snapshot) : null;
+  const currentPrice = market && entryOrderPrice(market, action, quantity);
+  if (!(currentPrice > 0)) return Number(price);
+  if (fill) {
     const page = await getBrowserPage(sessionId);
-    const fields = await page.locator("input").evaluateAll((inputs, side) => {
-      const values = { price: [], quantity: [] };
-      for (const input of inputs) {
-        const rect = input.getBoundingClientRect();
-        if (!rect.width || !rect.height || input.type === "checkbox" || input.disabled) continue;
-        const label = [...(input.labels || [])].map(node => node.textContent).join("")
-          || input.closest(".inputWrap, .el-form-item, li, label, .form-item")?.textContent || input.placeholder || "";
-        if ((side === "BUY" ? /买价|买入价格/ : /卖价|卖出价格/).test(label)) values.price.push(Number(input.value));
-        if ((side === "BUY" ? /买量|买入数量/ : /卖量|卖出数量/).test(label)) values.quantity.push(Number(input.value));
-      }
-      return values;
-    }, action);
-    if (fields.price.length !== 1 || fields.quantity.length !== 1 || fields.quantity[0] !== Number(quantity)) return { ok: false, code: "ENTRY_FORM_CHANGED" };
-    submittedPrice = fields.price[0];
-    if (orderType === "MARKET" && submittedPrice !== quote.price) {
-      const labels = suggestionFormLabels(action);
-      const filled = await fillTradeFields(page, [{ labels: [labels.price, ...labels.extras.filter(item => /价/.test(item))], value: quote.price }]);
-      if (filled.length !== 1) return { ok: false, code: "ENTRY_FORM_CHANGED" };
-      submittedPrice = quote.price;
-    }
+    const labels = suggestionFormLabels(action);
+    const filled = await fillTradeFields(page, [{ labels: [labels.price, ...labels.extras.filter(item => /价/.test(item))], value: currentPrice }]);
+    if (filled.length !== 1) throw new Error("ENTRY_PRICE_FIELD_NOT_FOUND");
   }
-  const limitPrice = Number(entryGuard.targetPrice ?? price);
-  if (!(submittedPrice > 0) || (orderType === "LIMIT" && limitPrice > 0 && submittedPrice !== limitPrice)) return { ok: false, code: "ENTRY_FORM_CHANGED" };
-  return { ok: true, price: submittedPrice };
+  return currentPrice;
 }
 
-export async function continueManualEntry({ sessionId = "default", action, entryGuard, quantity, orderType = "MARKET" } = {}) {
+export async function continueManualEntry({ sessionId = "default", action, entryGuard, quantity, price, orderType = "MARKET" } = {}) {
   const page = await getBrowserPage(sessionId);
   if (!page) return { ok: false, code: "BROWSER_SESSION_NOT_FOUND" };
+  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_ACTION_REQUIRED" };
   const dialogs = await page.locator(".el-message-box:visible, .el-dialog:visible, [role='dialog']:visible").allTextContents();
   if (!dialogs.some((text) => /确认下单|确认买入|确认卖出|是否确认|合同|协议/.test(text.replace(/\s+/g, "")))) return { ok: true, continued: false };
   const baselineToken = await markTradePageHints(page);
   try {
     const result = await completeTradeDialogs(page, { baselineToken,
-      canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, orderType, checkFields: true }) });
-    return { ok: result.ok, code: result.code, continued: result.confirmed === true, submittedPrice: result.submittedPrice };
+      canConfirm: async () => ({ ok: true, price: await refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true }) }) });
+    return { ...result, continued: result.confirmed === true };
   } finally { await dismissEntryDialogs(page, baselineToken); }
 }
 
@@ -1042,16 +1013,16 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
       || !["TAKE_PROFIT", "STOP_LOSS"].includes(exitType)) return { ok: false, code: "AI_SUMMARY_EXIT_REQUIRED", submitted: false };
     return submitSummaryTransfer(page, { sessionId, action, symbol, symbolName, instrumentId, targetSummary, exitGuard, exitType });
   }
+  if (!entryGuard || entryGuard.action !== action) return { ok: false, code: "AI_ENTRY_ACTION_REQUIRED", submitted: false };
   if (!(Number(price) > 0) || !(Number(quantity) > 0)) return { ok: false, code: "ORDER_PREVIEW_INCOMPLETE", submitted: false };
   const startedAt = Date.now();
-  let clicked = false, confirmed = false, stage = "prepare";
+  let clicked = false, stage = "prepare";
+  let dialog = null;
   const aiProvider = browserProvider || provider;
   let response, baselineToken;
   try {
     if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED", submitted: false };
-    const allowed = await entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType });
-    if (!allowed.ok) return { ...allowed, submitted: false };
-    price = allowed.price;
+    price = await refreshEntryPrice(sessionId, { action, quantity, price, orderType });
     const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
     if (!filled.ok) return { ...filled, submitted: false };
     baselineToken = await markTradePageHints(page);
@@ -1061,17 +1032,22 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     if (!result.clicked) return { ok: false, code: result.code, message: "目标入场控件未就绪，未提交订单", submitted: false };
     clicked = true;
     stage = "confirm";
-    const dialog = await completeTradeDialogs(page, { orderType, price, baselineToken, finished: () => Boolean(response.peek()),
-      canConfirm: () => entryFlatGuard(sessionId, { action, entryGuard, quantity, price, orderType, checkFields: true }),
+    dialog = await completeTradeDialogs(page, { orderType, price, baselineToken, finished: () => Boolean(response.peek()),
+      canConfirm: async () => ({ ok: true, price: await refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true }) }),
       resolveConfirmation: aiProvider ? box => agentTradeConfirmation(page, box, aiProvider, { action, price, quantity }) : undefined });
-    confirmed = dialog.confirmed === true;
-    if (!dialog.ok) return { ok: false, code: dialog.code, submitted: false, uncertain: confirmed };
+    const confirmation = { confirmed: dialog.confirmed === true, confirmationLabel: dialog.confirmationLabel || "",
+      cancelled: dialog.cancelled === true, cancellationLabel: dialog.cancellationLabel || "" };
+    if (!dialog.ok) return { ...dialog, ...confirmation, ok: false, filled: true, stage, submitted: false, uncertain: confirmation.confirmed,
+      message: `${confirmation.confirmed ? "已点击确认，后续确认中断，须核实委托和持仓：" : confirmation.cancelled ? `已点击“${confirmation.cancellationLabel}”，未提交订单：` : "未完成入场确认："}${dialog.message || dialog.code}`,
+      executionDurationMs: Date.now() - startedAt };
     stage = "feedback";
     const feedback = await observeTradeFeedback(page, response, baselineToken);
     return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
-      pageHint: feedback.pageHint, clicked: result }), stage, submittedPrice: dialog.submittedPrice, submittedQuantity: quantity, executionDurationMs: Date.now() - startedAt };
+      pageHint: feedback.pageHint, clicked: result }), ...confirmation, stage, submittedPrice: dialog.submittedPrice, submittedQuantity: quantity, executionDurationMs: Date.now() - startedAt };
   } catch (error) {
-    return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, stage, submitted: false, uncertain: clicked };
+    return { ok: false, code: "TRADE_SUBMIT_FAILED", message: error.message, stage, submitted: false, uncertain: clicked,
+      confirmed: dialog?.confirmed === true, confirmationLabel: dialog?.confirmationLabel || "",
+      cancelled: dialog?.cancelled === true, cancellationLabel: dialog?.cancellationLabel || "" };
   } finally { response?.dispose(); await dismissEntryDialogs(page, baselineToken); }
 }
 

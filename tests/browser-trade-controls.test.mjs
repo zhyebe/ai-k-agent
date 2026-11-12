@@ -76,6 +76,24 @@ test("a reordered holding keeps its exact identity instead of clicking the old r
 });
 
 for (const action of ["BUY", "SELL"]) {
+  test(`${action} production entry pane submits without a second field validation`, async () => {
+    await page.reload();
+    await page.evaluate(action => {
+      const root = document.querySelector(action === "BUY" ? "#buy" : "#sell");
+      const pane = document.createElement("li");
+      pane.className = "left";
+      root.replaceWith(pane);
+      pane.append(root);
+    }, action);
+    const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 101, quantity: 2 });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.confirmed, true);
+    assert.equal(result.confirmationLabel, "确定");
+    assert.equal(result.cancelled, false);
+    assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: "101", quantity: "2" }]);
+    assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+  });
+
   test(`${action} market entry refreshes a moving price under its confirmation without a trade plan`, async () => {
     await page.reload();
     await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });
@@ -140,7 +158,7 @@ for (const action of ["BUY", "SELL"]) {
   });
 }
 
-test("a new order during entry confirmation still blocks submission under the modal", async () => {
+test("AI-approved entry confirms without collecting account tabs again", async () => {
   await page.reload();
   await page.addStyleTag({ content: ".el-message-box { position: fixed; inset: 0; z-index: 9999; background: white; }" });
   await page.evaluate(() => {
@@ -151,11 +169,34 @@ test("a new order during entry confirmation still blocks submission under the mo
     };
   });
   const result = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 1 });
-  assert.equal(result.ok, false, JSON.stringify(result));
-  assert.equal(result.code, "ROUND_NOT_FLAT");
-  assert.equal(result.uncertain, false);
-  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.confirmed, true);
+  assert.equal(result.confirmationLabel, "确定");
+  assert.equal(result.cancelled, false);
+  assert.equal(result.stage, "feedback");
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "BUY", price: "101", quantity: "1" }]);
   assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
+for (const action of ["BUY", "SELL"]) for (const missingQuote of [false, true]) test(`${action} AI-approved entry submits with missing accounts and ${missingQuote ? "missing" : "thin"} depth`, async () => {
+  await page.reload();
+  await page.evaluate(missingQuote => {
+    document.querySelector("#positions").remove();
+    document.querySelector("#orders").remove();
+    const book = document.querySelector("table");
+    if (missingQuote) book.remove();
+    else {
+      book.rows[0].cells[2].textContent = "1";
+      book.rows[1].cells[2].textContent = "1";
+    }
+  }, missingQuote);
+  const result = await submitNativeEntry({ sessionId: "trade-fixture", action, symbol: "DGKZ", price: 101, quantity: 2,
+    orderType: "MARKET", entryGuard: { action, expiresAt: "2000-01-01T00:00:00.000Z" } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.confirmed, true);
+  assert.equal(result.cancelled, false);
+  const expectedPrice = missingQuote || action === "BUY" ? "101" : "100";
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: expectedPrice, quantity: "2" }]);
 });
 
 test("missing entry confirmation fails explicitly and closes the blocking dialog", async () => {
@@ -173,8 +214,36 @@ test("missing entry confirmation fails explicitly and closes the blocking dialog
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.equal(result.code, "TRADE_CONFIRM_DISABLED");
   assert.equal(result.uncertain, false);
+  assert.equal(result.confirmed, false);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.cancellationLabel, "取消");
+  assert.match(result.message, /已点击“取消”.*TRADE_CONFIRM_DISABLED/);
   assert.deepEqual(await page.evaluate(() => window.entries), []);
   assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
+test("an AI-selected cancel button cannot act as trade confirmation", async () => {
+  await page.reload();
+  await page.evaluate(() => {
+    const box = document.createElement("div");
+    box.className = "el-message-box";
+    box.innerHTML = "确认下单，是否继续？<button>取消</button>";
+    box.querySelector("button").onclick = () => { window.cancelButtonClicks = (window.cancelButtonClicks || 0) + 1; box.remove(); };
+    document.body.append(box);
+  });
+  let checks = 0;
+  const result = await completeTradeDialogs(page, { baselineToken: "invalid-ai-confirm",
+    resolveConfirmation: box => box.locator("button"),
+    canConfirm: async () => { checks++; return { ok: true }; } });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "TRADE_CONFIRM_LABEL_INVALID");
+  assert.equal(result.confirmed, false);
+  assert.equal(result.confirmationLabel, "");
+  assert.equal(result.cancelled, true);
+  assert.equal(result.cancellationLabel, "取消");
+  assert.equal(checks, 0);
+  assert.equal(await page.evaluate(() => window.cancelButtonClicks), 1);
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
 });
 
 for (const entry of [true, false]) for (const remove of [true, false]) test(`${entry ? "entry" : "transfer"} cleanup accepts a dialog ${remove ? "removed" : "hidden"} while its cancel control is resolved`, async () => {

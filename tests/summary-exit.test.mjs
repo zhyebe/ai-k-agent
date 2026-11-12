@@ -263,7 +263,7 @@ test("fast cycle asks for due post-exit instruments without claiming an unobserv
   assert.deepEqual(targets, [summary]);
   assert.equal(f.task.exitOutcomes[0].after3Minutes, undefined);
 });
-for (const fault of ["missing", "expired", "outside", "valid"]) test(`manual ${fault} checks execution authorization without a reference-zone veto`, async t => {
+for (const fault of ["missing", "expired", "outside", "valid"]) test(`manual ${fault} preserves an approved AI entry without expiry or reference-zone checks`, async t => {
   const f = fixture(t, `manual-plan-${fault}`, { plan: false });
   f.market.account.positionSummaries = [];
   f.task.autoDecisionEnabled = false;
@@ -274,7 +274,7 @@ for (const fault of ["missing", "expired", "outside", "valid"]) test(`manual ${f
     suggestedQty: 1, suggestedPrice: fault === "outside" ? 105 : 100, entryGuard: fault === "missing" ? null : guard };
   const result = await f.tick(100);
   assert.equal(f.submitted.length, 0);
-  if (fault === "valid" || fault === "outside") {
+  if (fault !== "missing") {
     assert.equal(result.reason, "MANUAL_ENTRY_WAITING");
     assert.equal(f.task.pendingAction.status, "WAITING");
   } else {

@@ -10,11 +10,11 @@ import { credentialExists } from "./vault.mjs";
 import { addEvent, appendAgentOutput, findProviderForUser, finishAgentRun, getConnector, getTask, persistAnalysis, persistOrder, persistTask, startAgentRun, state } from "./store.mjs";
 import { accountMetricsFromMarket, HAO_HAN_TARGET_URL, uniqueBoardAssessments } from "./haohan.mjs";
 import { normalizeUnitProbability } from "./provider.mjs";
-import { entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities } from "./entry-policy.mjs";
+import { entryActionBlock, entryRoundBlock, normalizeMarketRegime, hasDirectionalProbabilities } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan } from "./summary-exit-policy.mjs";
-import { entryPlanAllowsPrice, executableEntryQuote, matchesInstrument, validateEntryPlan } from "./trading-plan.mjs";
+import { matchesInstrument, normalizeTradingPlan, profitProtectionFor } from "./trading-plan.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -905,10 +905,10 @@ function cancelInvalidEntrySuggestion(task, now = Date.now()) {
   if (isLiveTask(task) && waiting?.status === "WAITING" && !waiting.exitType
     && !waiting.entrustedOrderIds?.length && !pendingConfirmLocks.has(task.id)
     && ((waiting.entryPurpose && waiting.entryPurpose !== "NORMAL") || !meetsOrderBoundary(waiting)
-      || !entryPlanAllowsPrice(waiting.entryGuard, waiting.suggestedPrice, now))) {
+      || waiting.entryGuard?.action !== waiting.action)) {
     waiting.status = "CANCELLED";
     waiting.resolvedAt = new Date(now).toISOString();
-    waiting.message = "入场授权已过期或来自已停用的旧动作，已取消并重新请求AI决定";
+    waiting.message = "入场来自已停用的旧动作，已取消并重新请求AI决定";
     task.nextTrigger = waiting.message;
     task.lastAnalyzedFingerprint = "";
     clearPendingActionTimer(task.id);
@@ -1029,11 +1029,9 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   }
   if (isLiveTask(task) && !task.pendingAction.exitType) {
     if (task.pendingAction.entryPurpose && task.pendingAction.entryPurpose !== "NORMAL") throw new Error("RETIRED_ENTRY_PURPOSE");
-    const block = entryRoundBlock(task, task.market, { pendingId: task.pendingAction.id });
+    const block = entryActionBlock(task, { pendingId: task.pendingAction.id });
     if (block) throw new Error(block);
     if (!meetsOrderBoundary(task.pendingAction)) throw new Error("AI_ENTRY_ACTION_REQUIRED");
-    const guard = task.pendingAction.entryGuard;
-    if (!entryPlanAllowsPrice(guard, task.pendingAction.suggestedPrice)) throw new Error("AI_ENTRY_DECISION_EXPIRED");
   }
   if (isLiveTask(task) && !task.pendingAction.exitType && Number(task.pendingAction.suggestedQty) !== entryQuantityForTask(task.pendingAction.entryQuantity ? task.pendingAction : task)) throw new Error("LIVE_ENTRY_QUANTITY_LIMIT");
   if (isLiveTask(task) && !isTradingSwitchOn()) throw new Error("TRADING_DISABLED");
@@ -1061,21 +1059,6 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       return task;
     }
     if (shouldSubmitLiveOrder(task, source)) {
-      if (!task.pendingAction.exitType) {
-        const fresh = await tools.observeExecutionMarket(task, getConnector(task.target.connectorId), { accountScope: "full" });
-        assertCycleCurrent(task, generation);
-        const book = decisionTargetBook(task.pendingAction, fresh || {}) || fresh;
-        const block = entryRoundBlock(task, fresh, { pendingId });
-        const quote = fresh?.ok && book && executableEntryQuote(book, task.pendingAction.action, task.pendingAction.suggestedQty);
-        if (block) throw new Error(block);
-        if (!quote) throw new Error("ENTRY_QUOTE_OR_DEPTH_UNVERIFIED");
-        if (!matchesInstrument(task.pendingAction.entryGuard, book)) throw new Error("ENTRY_INSTRUMENT_CHANGED");
-        if (!entryPlanAllowsPrice(task.pendingAction.entryGuard, quote.price)) throw new Error("AI_ENTRY_DECISION_EXPIRED");
-        if (task.pendingAction.orderType === "MARKET") {
-          task.pendingAction.suggestedPrice = quote.price;
-          task.pendingAction.targetPrice = quote.price;
-        }
-      }
       task.pendingAction = {
         ...task.pendingAction,
         status: "SUBMITTING",
@@ -1154,7 +1137,10 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
       }
       task.pendingAction.formFilled = submitted?.filled === true;
       task.pendingAction.executionDurationMs = Date.now() - submissionStartedAt;
-      task.pendingAction.lastExecution = { code: submitted?.code || "TRADE_SUBMIT_FAILED", stage: submitted?.stage || "prepare", uncertain: submitted?.uncertain === true, durationMs: task.pendingAction.executionDurationMs, checkedAt: new Date().toISOString() };
+      task.pendingAction.lastExecution = { code: submitted?.code || "TRADE_SUBMIT_FAILED", stage: submitted?.stage || "prepare", uncertain: submitted?.uncertain === true,
+        confirmed: submitted?.confirmed === true, confirmationLabel: submitted?.confirmationLabel || "",
+        cancelled: submitted?.cancelled === true, cancellationLabel: submitted?.cancellationLabel || "", message: submitted?.message || "",
+        durationMs: task.pendingAction.executionDurationMs, checkedAt: new Date().toISOString() };
       if (Number(submitted?.submittedPrice) > 0) task.pendingAction.submittedPrice = Number(submitted.submittedPrice);
       if (task.pendingAction?.exitType && submitted?.completedPositionIds?.length) {
         const partial = { ...task.pendingAction, targetPositionIds: submitted.completedPositionIds };
@@ -1213,7 +1199,7 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
             source: "realtime_recheck",
             resolvedAt: new Date().toISOString(),
             formSubmitBlocked: false,
-            message: "确认前盘口、表单或账户条件已变化，未提交订单；读取最新数据重新判断",
+            message: `${submitted.message || `确认前复核失败（${submitted.code}），未提交订单`}；读取最新数据重新判断`,
           };
           setNextPoll(task, 0);
           task.nextTrigger = task.pendingAction.message;
@@ -2352,11 +2338,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (!loginResult.ok || !loginResult.authenticated) return stopForLoginFailure(task, run, loginResult);
 
     if (isLiveTask(task) && !task.autoDecisionEnabled && !task.pendingAction?.exitType
-      && ["WAITING", "AWAITING_FILL"].includes(task.pendingAction?.status)
-      && entryPlanAllowsPrice(task.pendingAction.entryGuard, task.pendingAction.suggestedPrice)) {
+      && ["WAITING", "AWAITING_FILL"].includes(task.pendingAction?.status)) {
       const continued = await runtime.continueManualEntry({ sessionId: task.target?.browserSessionId || `task:${task.id}`,
         action: task.pendingAction.action, entryGuard: task.pendingAction.entryGuard, quantity: task.pendingAction.suggestedQty,
-        orderType: task.pendingAction.orderType });
+        price: task.pendingAction.suggestedPrice, orderType: task.pendingAction.orderType });
       assertCurrent();
       if (continued?.continued) {
         task.pendingAction = { ...task.pendingAction, status: "AWAITING_FILL", source: "manual_browser", message: "用户已点击入场，Agent 已自动处理网页确认；继续监控成交与离场" };
@@ -2657,27 +2642,20 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       task.exitPlans = [];
     }
     let exitMarket = market;
-    // Recheck holdings and entry quotes after AI analysis. Summary exits run
-    // independently; a HOLD never needs an AI exit plan to remain valid.
     const explicitExit = !isLiveTask(task) && (decision.exitType === "TAKE_PROFIT" || decision.exitType === "STOP_LOSS");
     const liveExitGuards = new Map();
     decision = applyEntryBoundary(bindDecisionToMarket(enforceDecisionLimits(attachPositionExit(decision, exitMarket)), exitMarket), exitMarket);
     if (isLiveTask(task) && ["BUY", "SELL"].includes(decision.action) && !decision.exitType) {
-      const fresh = await runtime.observeExecutionMarket(task, connector, { accountScope: "full" });
-      assertCurrent();
-      const book = fresh?.ok === true ? decisionTargetBook(decision, fresh) || fresh : null;
-      const priorBook = decisionTargetBook(decision, market) || market;
-      const validated = book && !entryRoundBlock(task, fresh) ? validateEntryPlan(
-        { ...decision, observedAt: market.observedAt }, { ...priorBook, ...book, history: priorBook.history, timeframes: priorBook.timeframes },
-        { ...task, entryQuantity: entryQuantityForTask(task) }) : { code: fresh?.code || entryRoundBlock(task, fresh) || "ENTRY_RECHECK_FAILED" };
-      if (validated.code) decision = { ...decision, action: "HOLD", entryBlock: { requestedAction: decision.action, reason: validated.code },
-        riskFlags: [...new Set([...(decision.riskFlags || []), validated.code])] };
-      else {
-        decision = { ...decision, tradePlan: validated.plan, entryGuard: validated.guard,
-          riskFlags: [...new Set([...(decision.riskFlags || []), ...validated.warnings])] };
-        exitMarket = { ...market, ...fresh, history: market.history, timeframes: market.timeframes };
-        task.market = exitMarket;
-      }
+      const book = decisionTargetBook(decision, market) || market;
+      const plan = normalizeTradingPlan(decision.tradePlan);
+      const protection = plan && profitProtectionFor({ side: decision.action === "BUY" ? "LONG" : "SHORT",
+        averagePrice: suggestOrderPreview(task, decision).suggestedPrice }, plan);
+      decision = { ...decision, tradePlan: plan, entryGuard: {
+        action: decision.action, plan, orderType: decision.orderType || "MARKET",
+        targetPrice: decision.orderType === "LIMIT" ? Number(decision.targetPrice ?? decision.entryPrice) : null,
+        symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId,
+        expiresAt: new Date(Date.now() + (decision.decisionTtlSec || 300) * 1000).toISOString(),
+      }, riskFlags: [...new Set([...(decision.riskFlags || []), ...(!plan ? ["AI_ENTRY_RISK_PLAN_PENDING"] : !protection ? ["AI_PROFIT_PROTECTION_UNAVAILABLE"] : [])])] };
     }
     if (explicitExit && decision.exitType) {
       const expiresAt = new Date(Date.parse(market.observedAt) + (decision.decisionTtlSec || 300) * 1000).toISOString();
@@ -2796,11 +2774,12 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     task.decision = executableExitDecision(task, task.decision, exitMarket);
     const browserActionInProgress = pendingConfirmLocks.has(taskId);
     const duplicateExit = Boolean(task.decision.exitType) && task.decision.targetPositionIds.length === 0;
-    const roundEntryBlock = isLiveTask(task) && !task.decision.exitType ? entryRoundBlock(task, task.market) : null;
+    const approvedEntry = isLiveTask(task) && !task.decision.exitType && meetsOrderBoundary(task.decision);
+    const roundEntryBlock = approvedEntry ? entryActionBlock(task) : null;
     const executionBlocked = !liveExecution && (rulePaused || holdRequired);
-    const accountUnverified = isLiveTask(task) && market.account?.positionsVerified === false;
-    const staleDecision = decisionExpired(task);
-    const canPromptOrder = !browserActionInProgress && providerSucceeded && !roundEntryBlock && !duplicateExit && !task.stopLocked && !executionBlocked && !accountUnverified && !staleDecision && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
+    const accountUnverified = !approvedEntry && isLiveTask(task) && market.account?.positionsVerified === false;
+    const staleDecision = !approvedEntry && decisionExpired(task);
+    const canPromptOrder = !browserActionInProgress && providerSucceeded && !roundEntryBlock && !duplicateExit && !task.stopLocked && !executionBlocked && !accountUnverified && !staleDecision && (approvedEntry || !positionChangedDuringAnalysis) && !sessionChangedDuringAnalysis && meetsOrderBoundary(task.decision);
     const execution = canPromptOrder
       ? await runtime.executeDecision(task, task.decision, connector)
       : {
@@ -3026,8 +3005,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
 
     const waitingManualEntry = task.pendingAction?.status === "WAITING"
       && !task.pendingAction.exitType && task.autoDecisionEnabled !== true
-      && meetsOrderBoundary(task.pendingAction)
-      && entryPlanAllowsPrice(task.pendingAction.entryGuard, task.pendingAction.suggestedPrice, currentTime());
+      && meetsOrderBoundary(task.pendingAction) && task.pendingAction.entryGuard?.action === task.pendingAction.action;
     const latestAccount = task.lastPositionAudit?.positionsVerified === true
       && new Date(task.lastPositionAudit.observedAt).getTime() >= new Date(task.market?.observedAt || 0).getTime()
       ? task.lastPositionAudit : task.market?.account;

@@ -8,14 +8,14 @@ export const tradeFixture = `<!doctype html><html><head><title>Trade controls fi
 <div class="tab_btn" onclick="pane('transfer')">转让</div>
 <div style="display:none"><li><span>买价</span><input value="hidden"></li></div>
 <section id="entry">
-  <div id="buy"><li><span>买价</span><input id="buy-price" type="number"></li><li><span>买量</span><input id="buy-qty" type="number"></li>
+  <ul><li id="buy" class="left"><ul><li><span>买价</span><input id="buy-price" type="number"></li><li><span>买量</span><input id="buy-qty" type="number"></li></ul>
     <input type="button" value="买入订立" onclick="enter('BUY')">
     <div class="cotract"><label class="el-checkbox"><input type="checkbox" onchange="window.agreementChanges++"></label>我已同意签署<span>《订单商品销售协议》</span></div>
-  </div>
-  <div id="sell" style="display:none"><li><span>卖价</span><input id="sell-price" type="number"></li><li><span>卖量</span><input id="sell-qty" type="number"></li>
+  </li>
+  <li id="sell" class="left" style="display:none"><ul><li><span>卖价</span><input id="sell-price" type="number"></li><li><span>卖量</span><input id="sell-qty" type="number"></li></ul>
     <input type="button" value="卖出订立" onclick="enter('SELL')">
     <div class="cotract"><label class="el-checkbox"><input type="checkbox" onchange="window.agreementChanges++"></label>我已同意签署<span>《订单商品销售协议》</span></div>
-  </div>
+  </li></ul>
 </section>
 <section id="transfer" style="display:none"><li><span>转让价</span><input></li><li><span>转让量</span><input></li><input type="button" value="卖出转让" onclick="window.wrongGlobalExit++"></section>
 <div class="header_l_item" onclick="orderPane('positions')">持仓明细</div>

@@ -21,6 +21,10 @@ export function entryRoundBlock(task, market, { pendingId } = {}) {
   if (account?.positionsVerified !== true || account?.positionSummariesVerified !== true || account?.openOrdersVerified !== true) return "ACCOUNT_UNVERIFIED";
   if ((account.positions || []).some(p => Number(p.quantity) > 0) || (account.positionSummaries || []).some(p => Number(p.quantity) > 0)) return "ROUND_HOLDING";
   if ((account.openOrders || []).some(order => Number(order.remainingQuantity) > 0)) return "ROUND_ORDER_PENDING";
+  return entryActionBlock(task, { pendingId });
+}
+
+export function entryActionBlock(task, { pendingId } = {}) {
   if ([task.pendingAction, ...(task.unsettledActions || [])].some(p => p && p.id !== pendingId
     && ["WAITING", "SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(p.status))) return "ROUND_ACTION_PENDING";
   return null;

@@ -72,7 +72,7 @@ for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
     assert.equal(f.task.entryForecast.action, action);
   });
 }
-for (const action of ['BUY', 'SELL']) test(`${action} refreshed market price does not discard the AI entry`, async t => {
+for (const action of ['BUY', 'SELL']) test(`${action} AI entry submits without a second execution observation`, async t => {
   const f = fixture(t, `moving-entry-${action}`, true, action);
   let rechecks = 0;
   f.runtime.observeExecutionMarket = async () => {
@@ -82,7 +82,8 @@ for (const action of ['BUY', 'SELL']) test(`${action} refreshed market price doe
   };
   await runAnalysis(f.task.id, '', { runtime: f.runtime });
   assert.equal(f.submissions.length, 1);
-  assert.equal(f.submissions[0].price, action === 'BUY' ? 102 : 98);
+  assert.equal(rechecks, 0);
+  assert.equal(f.submissions[0].price, 100);
   assert.equal(f.task.decision.action, action);
 });
 for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test(`${stateName} blocks additional entry analysis`, async t => {

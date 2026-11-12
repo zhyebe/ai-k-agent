@@ -76,6 +76,17 @@ export function validateHoldingPlan(value, summary, { observedAt, now = Date.now
     maxHoldAt: new Date(timestamp + plan.maxHoldSec * 1000).toISOString() };
 }
 
+export function entryOrderPrice(market, action, quantity) {
+  const depth = summarizeOrderBook(market?.orderBook || market?.pageView?.orderBook);
+  const levels = action === "BUY" ? depth.asks : action === "SELL" ? depth.bids : [];
+  let remaining = Number(quantity);
+  for (const level of levels) {
+    remaining -= level.volume;
+    if (remaining <= 0) return level.price;
+  }
+  return levels.at(-1)?.price ?? null;
+}
+
 export function executableEntryQuote(market, action, quantity, now = Date.now()) {
   const timestamp = Date.parse(market?.observedAt || "");
   if (!Number.isFinite(timestamp) || timestamp > now || now - timestamp > 5000) return null;
