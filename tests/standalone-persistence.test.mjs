@@ -55,11 +55,11 @@ test("local reviewed built-in strategy upgrades once and never restores a delete
   await adapter.saveProvider({ id: "keep-provider", encryptedKey: "encrypted" });
   const restored = await open();
   const first = await restored.loadState();
-  assert.equal(first.skills[0].version, "v1.0.9");
+  assert.equal(first.skills[0].version, "v1.0.10");
   assert.equal(first.skills[0].content, bundled);
   assert.equal(first.skills[0].ownerUserId, "local-user");
   assert.equal(first.providers[0].id, "keep-provider");
-  assert.equal(JSON.parse(await fs.readFile(file, "utf8")).skills[0].version, "v1.0.9");
+  assert.equal(JSON.parse(await fs.readFile(file, "utf8")).skills[0].version, "v1.0.10");
   assert.equal((await restored.loadState()).skills[0].updatedAt, first.skills[0].updatedAt);
   await restored.deleteSkill("skill_local_trading");
   await restored.close();
@@ -87,7 +87,7 @@ test("local strategy migration accepts Windows line endings while preserving edi
     await adapter.close();
     const restored = (await (await open()).loadState()).skills[0];
     if (content === previous) {
-      assert.equal(restored.version, "v1.0.9");
+      assert.equal(restored.version, "v1.0.10");
       assert.equal(restored.content, bundled);
     } else {
       assert.deepEqual(restored, skill);
@@ -95,7 +95,7 @@ test("local strategy migration accepts Windows line endings while preserving edi
   }
 });
 
-for (const version of ["v1.0.2", "v1.0.3", "v1.0.4"]) test(`the shipped ${version} knowledge upgrades exactly while edits and a live exit batch survive restart`, async t => {
+for (const version of ["v1.0.2", "v1.0.3", "v1.0.4", "v1.0.9"]) test(`the shipped ${version} knowledge upgrades exactly while edits and a live exit batch survive restart`, async t => {
   const previous = (await fs.readFile(new URL(`./fixtures/trading-skill-${version === "v1.0.4" ? "v1.0.8" : version}.md`, import.meta.url), "utf8")).replace(/\r\n/g, "\n").trim();
   const bundled = (await fs.readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
   for (const edited of [false, true]) {
@@ -110,7 +110,7 @@ for (const version of ["v1.0.2", "v1.0.3", "v1.0.4"]) test(`the shipped ${versio
     const restored = await (await open()).loadState();
     assert.deepEqual(restored.tasks[0].summaryExitBatch, batch);
     assert.equal(Object.hasOwn(restored.tasks[0], "tradingCosts"), false);
-    assert.equal(restored.skills[0].version, edited ? version : "v1.0.9");
+    assert.equal(restored.skills[0].version, edited ? version : "v1.0.10");
     assert.equal(restored.skills[0].content, edited ? skill.content : bundled);
   }
 });

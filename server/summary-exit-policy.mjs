@@ -1,5 +1,6 @@
 import { executableExitQuote, heldDirection } from "./exit-policy.mjs";
 import { directionalProfitPoints, matchesInstrument, profitProtectionFor, tightenHoldingPlan, validateHoldingPlan } from "./trading-plan.mjs";
+import { entryTimingBlock } from "./entry-policy.mjs";
 
 export const SUMMARY_REVIEW_TTL_MS = 60_000;
 export const SUMMARY_LOSS_SAMPLE_GAP_MS = 10_000;
@@ -15,6 +16,33 @@ const batchTargetMatches = (target, summary) => summaryKey(target) === summaryKe
 const unsettled = task => [task.pendingAction, ...(task.unsettledActions || [])]
   .filter(action => action && ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(action.status));
 
+export function summaryExitTimingBlock(market, { requireConfirmed = false, notBefore = null } = {}) {
+  const minute = market?.timeframes?.["1m"] || (market?.timeframe === "1m" ? market : null);
+  const confirmedAt = Number(minute?.history?.at(-1)?.confirmation?.lastObservedAt);
+  return entryTimingBlock(market, { requireConfirmed }) || (notBefore !== null
+    && (!Number.isFinite(confirmedAt) || confirmedAt < Number(notBefore))) ? "EXIT_AWAITING_CONFIRMED_PRICE" : null;
+}
+
+export function deferSummaryExitUntilConfirmed(task, summary, observedAt) {
+  const key = summaryKey(summary);
+  task.summaryExitPriceWaits = [...(task.summaryExitPriceWaits || []).filter(wait => wait.key !== key),
+    { key, signature: summarySignature(summary), observedAt }];
+}
+
+function syncSummaryPriceWaits(task, market, now) {
+  if (market.account?.positionSummariesVerified === true) task.summaryExitPriceWaits = (task.summaryExitPriceWaits || [])
+    .filter(wait => (market.account.positionSummaries || []).some(row => Number(row.quantity) > 0 && summaryKey(row) === wait.key));
+  for (const context of summaryExitReviewContexts(market, now)) {
+    const waiting = (task.summaryExitPriceWaits || []).some(wait => wait.key === context.key);
+    if (context.priceUnconfirmed) {
+      if (!waiting) deferSummaryExitUntilConfirmed(task, context.summary, new Date(context.quote.observedAt).toISOString());
+    } else if (waiting && context.priceConfirmed && context.priceConfirmationAt >= Date.parse(
+      task.summaryExitPriceWaits.find(wait => wait.key === context.key).observedAt)) {
+      task.summaryExitPriceWaits = task.summaryExitPriceWaits.filter(wait => wait.key !== context.key);
+    }
+  }
+}
+
 function verifiedAccount(market, now) {
   const timestamp = Date.parse(market.accountObservedAt || market.observedAt || "");
   return market.account?.positionsVerified === true && market.account?.positionSummariesVerified === true
@@ -29,7 +57,11 @@ export function summaryExitReviewContexts(market, now = Date.now()) {
     const summary = { symbol: book?.symbol, instrumentId: book?.instrumentId, ...row, side: heldDirection(row) };
     const quote = executableExitQuote(market, summary, now);
     if (!quote) return [];
+    const minute = book?.timeframes?.["1m"] || (book?.timeframe === "1m" ? book : null);
     return [{ key: summaryKey(summary), signature: summarySignature(summary), summary, quote,
+      priceUnconfirmed: Boolean(summaryExitTimingBlock(book)),
+      priceConfirmed: !summaryExitTimingBlock(book, { requireConfirmed: true }),
+      priceConfirmationAt: Number(minute?.history?.at(-1)?.confirmation?.lastObservedAt) || null,
       pnlPoints: directionalProfitPoints(summary, quote.price) }];
   });
 }
@@ -40,7 +72,7 @@ export function executableSummaryPortfolio(market, now = Date.now()) {
   if (!rows.length || new Set(rows.map(summaryKey)).size !== rows.length
     || rows.some(row => !Number.isFinite(Number(row.quantity)) || !Number.isFinite(Number(row.averagePrice)))) return null;
   const contexts = summaryExitReviewContexts(market, now);
-  if (contexts.length !== rows.length || contexts.some(context => context.pnlPoints === null)) return null;
+  if (contexts.length !== rows.length || contexts.some(context => context.pnlPoints === null || context.priceUnconfirmed)) return null;
   const positions = (market.account.positions || []).filter(row => Number(row.quantity) > 0);
   if (positions.length && (positions.some(position => !rows.some(row => matchesInstrument(row, position)
     && heldDirection(row) === heldDirection(position))) || rows.some(row => Number(row.quantity) !== positions
@@ -51,7 +83,9 @@ export function executableSummaryPortfolio(market, now = Date.now()) {
 }
 
 export function updateSummaryExitBatch(task, market, now = Date.now()) {
+  syncSummaryPriceWaits(task, market, now);
   if (!verifiedAccount(market, now)) return;
+  if (task.summaryExitPriceWaits?.length) return;
   const rows = (market.account.positionSummaries || []).filter(row => Number(row.quantity) > 0);
   let batch = task.summaryExitBatch;
   if (batch?.phase === "EXIT_ALL" && new Set(batch.targets.map(heldDirection)).size < 2) {
@@ -134,10 +168,10 @@ export function summaryRuleAuthorizationCurrent(task, summary, authorization) {
 
 export function installSummaryPlan(task, context, source, { id, observedAt, holdingStartedAt, now = Date.now(), origin = "AI_REVIEW" } = {}) {
   const validated = validateHoldingPlan(source, context.summary, { observedAt, now,
-    allowExpired: origin === "AI_ENTRY" });
+    allowExpired: origin === "AI_ENTRY", allowIncomplete: origin === "AI_ENTRY" });
   if (validated.code) return validated;
   const holdingStart = Date.parse(holdingStartedAt || "");
-  if (origin === "AI_ENTRY" && Number.isFinite(holdingStart) && holdingStart <= now) {
+  if (origin === "AI_ENTRY" && validated.plan.maxHoldSec !== null && Number.isFinite(holdingStart) && holdingStart <= now) {
     validated.maxHoldAt = new Date(holdingStart + validated.plan.maxHoldSec * 1000).toISOString();
   }
   const prior = (task.summaryTradingPlans || []).find(record => record.key === context.key
@@ -145,7 +179,9 @@ export function installSummaryPlan(task, context, source, { id, observedAt, hold
     && Number(record.summary.quantity) >= Number(context.summary.quantity));
   const record = tightenHoldingPlan(prior, {
     id, key: context.key, signature: context.signature, summary: context.summary, origin,
-    ...validated, createdAt: new Date(now).toISOString(), bestPrice: context.quote.price, profitArmed: false,
+    ...validated, createdAt: new Date(now).toISOString(),
+    bestPrice: context.priceUnconfirmed || task.summaryExitPriceWaits?.some(wait => wait.key === context.key)
+      ? Number(context.summary.averagePrice) : context.quote.price, profitArmed: false,
   });
   task.summaryTradingPlans = [...(task.summaryTradingPlans || []).filter(item => item.key !== context.key), record];
   return { record };
@@ -165,20 +201,29 @@ export function syncSummaryPlans(task, market, now = Date.now()) {
   const forecast = task.entryForecast;
   if (!forecast?.tradePlan || !forecast.confirmedAt || forecast.closedAt) return;
   for (const context of summaryExitReviewContexts(market, now)) {
-    if ((task.summaryTradingPlans || []).some(record => record.key === context.key)
-      || !matchesInstrument(forecast, context.summary)
+    if (!matchesInstrument(forecast, context.summary)
       || heldDirection(context.summary) !== (forecast.action === "BUY" ? "LONG" : "SHORT")) continue;
-    installSummaryPlan(task, context, forecast.tradePlan,
+    if ((task.summaryTradingPlans || []).some(record => record.key === context.key)) {
+      forecast.planError = null;
+      continue;
+    }
+    const installed = installSummaryPlan(task, context, forecast.tradePlan,
       { id: `entry-plan:${forecast.pendingId}`, observedAt: forecast.observedAt,
         holdingStartedAt: forecast.confirmedAt, now, origin: "AI_ENTRY" });
+    forecast.planError = installed.code || null;
   }
 }
 
 export function observeSummaryPlans(task, market, now = Date.now()) {
   syncSummaryPlans(task, market, now);
+  syncSummaryPriceWaits(task, market, now);
   for (const context of summaryExitReviewContexts(market, now)) {
     const record = (task.summaryTradingPlans || []).find(item => item.signature === context.signature);
     if (!record) continue;
+    if (task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) {
+      record.lossObservation = null;
+      continue;
+    }
     if (record.lastObservedAt && context.quote.observedAt < record.lastObservedAt) continue;
     record.lastObservedAt = context.quote.observedAt;
     const long = context.summary.side === "LONG", price = context.quote.price;
@@ -198,6 +243,13 @@ export function observeSummaryPlans(task, market, now = Date.now()) {
     ? [{ key: record.key, signature: record.signature, confirmationSec: record.plan.stopConfirmationSec, ...record.lossObservation }] : []);
 }
 
+function stopLossConfirmed(record, now, requireFresh = true) {
+  const seconds = record?.plan?.stopConfirmationSec, observation = record?.lossObservation;
+  return Number.isSafeInteger(seconds) && seconds >= 0 && seconds <= 300 && (seconds === 0 || (observation
+    && observation.lastObservedAt <= now && (!requireFresh || now - observation.lastObservedAt <= SUMMARY_LOSS_SAMPLE_GAP_MS)
+    && observation.lastObservedAt - observation.startedAt >= seconds * 1000));
+}
+
 export function summaryReviewType(summary, price, record, now = Date.now()) {
   if (!record?.plan || record.signature !== summarySignature(summary) || !(Number(price) > 0)) return null;
   const long = heldDirection(summary) === "LONG", plan = record.plan;
@@ -211,10 +263,7 @@ export function summaryReviewType(summary, price, record, now = Date.now()) {
     if (long ? price <= floor : price >= floor) return "PROFIT_PROTECTION";
   }
   const breached = long ? price <= plan.stopLossPrice : price >= plan.stopLossPrice;
-  const observation = record.lossObservation;
-  if (breached && (plan.stopConfirmationSec === 0 || (observation
-    && now - observation.lastObservedAt <= SUMMARY_LOSS_SAMPLE_GAP_MS
-    && observation.lastObservedAt - observation.startedAt >= plan.stopConfirmationSec * 1000))) return "STOP_LOSS";
+  if (breached && stopLossConfirmed(record, now)) return "STOP_LOSS";
   return null;
 }
 
@@ -230,12 +279,19 @@ export function summaryExitAllowsPrice(summary, price, authorization, now = Date
       && (heldDirection(summary) === "LONG" ? price < authorization.targetPrice : price > authorization.targetPrice)) return false;
     return heldDirection(summary) === "LONG" ? price >= authorization.exitPrice : price <= authorization.exitPrice;
   }
-  return summaryReviewType(summary, price, authorization.record, now) === authorization.trigger;
+  if (authorization.record?.signature !== authorization.signature) return false;
+  const trigger = summaryReviewType(summary, price, authorization.record, now);
+  if (authorization.trigger === "STOP_LOSS" && stopLossConfirmed(authorization.record, now, false)
+    && (heldDirection(summary) === "LONG" ? price <= authorization.record.plan.stopLossPrice
+      : price >= authorization.record.plan.stopLossPrice)) return true;
+  return trigger === authorization.trigger || (["STOP_LOSS", "PROFIT_PROTECTION", "TAKE_PROFIT", "MAX_HOLD"].includes(authorization.trigger)
+    && ["HARD_STOP", "MAX_HOLD"].includes(trigger));
 }
 
 export function summaryExitCandidates(task, market, now = Date.now()) {
   updateSummaryExitBatch(task, market, now);
   return summaryExitReviewContexts(market, now).flatMap(context => {
+    if (task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) return [];
     const batch = task.summaryExitBatch;
     const ruleTrigger = batch?.phase === "EXIT_ALL" ? "TOTAL_PROFIT"
       : batch?.phase === "EXIT_LOSERS" ? "HEDGE_LOSS"
@@ -258,6 +314,8 @@ export function summaryExitCandidates(task, market, now = Date.now()) {
       targetSummary: context.summary, targetPositionIds: [], targetSymbol: context.summary.symbol,
       targetSymbolName: context.summary.symbolName, targetInstrumentId: context.summary.instrumentId,
       exitGuard: { summary: true, aiAuthorization: authorization, expiresAt: authorization.expiresAt,
+        requireConfirmedPrice: context.priceConfirmed,
+        priceConfirmationNotBefore: context.priceConfirmationAt,
         triggerPrice: context.quote.price, pnlPoints: context.pnlPoints } } }];
   });
 }

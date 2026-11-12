@@ -52,28 +52,33 @@ export function profitProtectionFor(summary, plan) {
   return protection;
 }
 
-export function validateHoldingPlan(value, summary, { observedAt, now = Date.now(), allowExpired = false } = {}) {
+export function validateHoldingPlan(value, summary, { observedAt, now = Date.now(), allowExpired = false, allowIncomplete = false } = {}) {
   const plan = normalizeTradingPlan(value);
   const side = heldDirection(summary), long = side === "LONG";
   const direction = long ? 1 : -1;
   const average = number(summary?.averagePrice);
   if (!plan || !["LONG", "SHORT"].includes(side) || !(average > 0)) return { code: "AI_PLAN_REQUIRED" };
   if (![plan.takeProfitPrice, plan.stopLossPrice, plan.hardStopPrice].every(price => price > 0)
-    || direction * (plan.takeProfitPrice - average) <= 0
+    || (!allowIncomplete && direction * (plan.takeProfitPrice - average) <= 0)
     || direction * (plan.takeProfitPrice - plan.stopLossPrice) <= 0
     || direction * (plan.stopLossPrice - plan.hardStopPrice) < 0
-    || direction * (average - plan.hardStopPrice) <= 0) return { code: "AI_PLAN_PRICE_INVALID" };
-  if (!Number.isSafeInteger(plan.validForSec) || plan.validForSec <= 0 || plan.validForSec > 3600
-    || !Number.isSafeInteger(plan.maxHoldSec) || plan.maxHoldSec <= 0 || plan.maxHoldSec > 86400
-    || !Number.isSafeInteger(plan.stopConfirmationSec) || plan.stopConfirmationSec < 0 || plan.stopConfirmationSec > 300
-    || !plan.rationale || !plan.invalidation) return { code: "AI_PLAN_RISK_INVALID" };
+    || (!allowIncomplete && direction * (average - plan.hardStopPrice) <= 0)) return { code: "AI_PLAN_PRICE_INVALID" };
+  const validDuration = Number.isSafeInteger(plan.validForSec) && plan.validForSec > 0 && plan.validForSec <= 3600;
+  const validHold = Number.isSafeInteger(plan.maxHoldSec) && plan.maxHoldSec > 0 && plan.maxHoldSec <= 86400;
+  const validConfirmation = Number.isSafeInteger(plan.stopConfirmationSec) && plan.stopConfirmationSec >= 0 && plan.stopConfirmationSec <= 300;
+  const riskComplete = Boolean(validDuration && validHold && validConfirmation && plan.rationale && plan.invalidation);
+  if (!riskComplete && !allowIncomplete) return { code: "AI_PLAN_RISK_INVALID" };
+  if (!validDuration) plan.validForSec = null;
+  if (!validHold) plan.maxHoldSec = null;
+  if (!validConfirmation) plan.stopConfirmationSec = null;
   const timestamp = Date.parse(observedAt || "");
   if (!Number.isFinite(timestamp) || timestamp > now || (!allowExpired && timestamp + plan.validForSec * 1000 <= now)) return { code: "AI_PLAN_EXPIRED" };
   const profitProtectionEnabled = Boolean(profitProtectionFor(summary, plan));
-  return { plan, profitProtectionEnabled, warnings: profitProtectionEnabled ? [] : ["AI_PROFIT_PROTECTION_UNAVAILABLE"],
+  return { plan, riskComplete, profitProtectionEnabled,
+    warnings: [...(profitProtectionEnabled ? [] : ["AI_PROFIT_PROTECTION_UNAVAILABLE"]), ...(riskComplete ? [] : ["AI_PLAN_RISK_INCOMPLETE"])],
     observedAt: new Date(timestamp).toISOString(),
-    expiresAt: new Date(timestamp + plan.validForSec * 1000).toISOString(),
-    maxHoldAt: new Date(timestamp + plan.maxHoldSec * 1000).toISOString() };
+    expiresAt: validDuration ? new Date(timestamp + plan.validForSec * 1000).toISOString() : null,
+    maxHoldAt: validHold ? new Date(timestamp + plan.maxHoldSec * 1000).toISOString() : null };
 }
 
 export function entryOrderPrice(market, action, quantity) {
@@ -139,10 +144,12 @@ export function tightenHoldingPlan(previous, next) {
   const nextProtection = profitProtectionFor(next.summary, next.plan);
   const plan = { ...next.plan,
     takeProfitPrice: previous.plan.takeProfitPrice,
-    maxHoldSec: previous.plan.maxHoldSec,
+    maxHoldSec: previous.plan.maxHoldSec ?? next.plan.maxHoldSec,
     stopLossPrice: tighterStop(previous.plan.stopLossPrice, next.plan.stopLossPrice),
     hardStopPrice: tighterStop(previous.plan.hardStopPrice, next.plan.hardStopPrice),
-    stopConfirmationSec: Math.min(previous.plan.stopConfirmationSec, next.plan.stopConfirmationSec),
+    stopConfirmationSec: previous.plan.stopConfirmationSec === null ? next.plan.stopConfirmationSec
+      : next.plan.stopConfirmationSec === null ? previous.plan.stopConfirmationSec
+      : Math.min(previous.plan.stopConfirmationSec, next.plan.stopConfirmationSec),
     profitProtection: priorProtection && nextProtection ? {
       activationPrice: earlierTarget(priorProtection.activationPrice, nextProtection.activationPrice),
       floorPrice: tighterStop(priorProtection.floorPrice, nextProtection.floorPrice),
@@ -151,7 +158,7 @@ export function tightenHoldingPlan(previous, next) {
   if (priorProtection && !profitProtectionFor(next.summary, plan)) plan.profitProtection = priorProtection;
   const profitProtectionEnabled = Boolean(profitProtectionFor(next.summary, plan));
   return { ...next, plan, profitProtectionEnabled, warnings: profitProtectionEnabled ? [] : ["AI_PROFIT_PROTECTION_UNAVAILABLE"],
-    maxHoldAt: previous.maxHoldAt,
+    maxHoldAt: previous.maxHoldAt || next.maxHoldAt,
     bestPrice: previous.bestPrice, profitArmed: previous.profitArmed, lossObservation: previous.lossObservation,
     createdAt: previous.createdAt };
 }

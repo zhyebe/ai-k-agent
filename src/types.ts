@@ -138,9 +138,9 @@ export interface TradingPlan {
   takeProfitPrice: number;
   stopLossPrice: number;
   hardStopPrice: number;
-  stopConfirmationSec: number;
-  validForSec: number;
-  maxHoldSec: number;
+  stopConfirmationSec: number | null;
+  validForSec: number | null;
+  maxHoldSec: number | null;
   profitProtection: { activationPrice: number | null; floorPrice: number | null; trailingDistance: number | null };
   rationale: string;
   invalidation: string;
@@ -348,13 +348,14 @@ export interface TradingSession {
 export interface Task {
   summaryExitBatch?: { id: string; phase: "EXIT_ALL" | "EXIT_LOSERS" | "WATCH_WINNERS" | "EXIT_WINNERS" | "COMPLETE" | "INVALIDATED";
     triggerPnl: number; winnerDeadlineAt?: string; lastWinnerProfit?: number; reason?: string } | null;
-  entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"] };
+  entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"]; planError?: string | null };
   summaryTradingPlans?: Array<{ id: string; key: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
-    profitProtectionEnabled?: boolean; bestPrice: number; profitArmed: boolean; expiresAt: string; maxHoldAt: string }>;
+    profitProtectionEnabled?: boolean; riskComplete?: boolean; bestPrice: number; profitArmed: boolean; expiresAt: string | null; maxHoldAt: string | null }>;
   exitOutcomes?: Array<{ pendingId: string; confirmedAt: string; exitReason?: string;
     after3Minutes?: { status: string; hypotheticalGrossPoints?: number } | null;
     after5Minutes?: { status: string; hypotheticalGrossPoints?: number } | null }>;
-  summaryLossObservations?: Array<{ key: string; signature: string; startedAt: number; lastObservedAt: number; confirmationSec: number }>;
+  summaryLossObservations?: Array<{ key: string; signature: string; startedAt: number; lastObservedAt: number; confirmationSec: number | null }>;
+  summaryExitPriceWaits?: Array<{ key: string; signature: string; observedAt: string }>;
   summaryExitReviews?: Array<{ id: string; key: string; pnlPoints: number; status: "REQUESTING" | "REVIEWED" | "FAILED"; decision?: "EXIT" | "HOLD"; rationale?: string }>;
   id: string;
   name: string;

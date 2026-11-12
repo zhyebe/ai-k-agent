@@ -9,6 +9,7 @@ const previousCurrentHashes = new Set([
   "ae188e9a3a7cfba4e5f6fd778c2ef894b17ded680363b98d623c509d8eaf5048",
 ]);
 const previousContentHashes = new Map([
+  ["v0.3.137", "b2c848444dbe164c0ceda226845cb96b45897be2ac209b6137ee00ee94e2d5bd"],
   ["v0.3.135", "59fd044ff821456ecd788aa3a3303532f638f2d0268fe7833f1638f3dfc93a12"],
   ["v0.3.134", "ae188e9a3a7cfba4e5f6fd778c2ef894b17ded680363b98d623c509d8eaf5048"],
   ["v0.3.133", "c84d0811b1e30928425360e0c9773687918f31a6dba8e6cc7b0624844961a06d"],
@@ -47,7 +48,7 @@ const previousContentHashes = new Map([
 // and reloads the database record before hydrating the runtime knowledge index.
 export async function tradingSkillUpgrade(skill) {
   const local = skill?.id === "skill_local_trading";
-  const localVersions = { "v1.0.0": "v0.3.133", "v1.0.2": "v0.3.134", "v1.0.3": "v0.3.135" };
+  const localVersions = { "v1.0.0": "v0.3.133", "v1.0.2": "v0.3.134", "v1.0.3": "v0.3.135", "v1.0.9": "v0.3.137" };
   const expectedHash = local ? previousContentHashes.get(localVersions[skill.version]) : skill?.id === previousSkillId ? previousContentHashes.get(skill.version) : null;
   const previousCurrent = (local && skill.version === "v1.0.4") || (skill?.id === previousSkillId && skill.version === "v0.3.136");
   if (skill?.status !== "APPROVED" || (!expectedHash && !previousCurrent)) return null;
@@ -57,7 +58,7 @@ export async function tradingSkillUpgrade(skill) {
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: local ? "v1.0.9" : "v0.3.137",
+    version: local ? "v1.0.10" : "v0.3.138",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),

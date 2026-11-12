@@ -139,22 +139,25 @@ for (const side of ["LONG", "SHORT"]) test(`${side} target and trailing protecti
   assert.equal(summaryExitAllowsPrice(summary, 100 + direction * 2.4, protection.decision.exitGuard.aiAuthorization, now + 2000), true);
   assert.equal(tick(4, 3000)[0].decision.exitReason, "TAKE_PROFIT");
 });
-test("repeated flash events cannot postpone confirmed AI stop, but recovered price cancels soft breach", () => {
+test("flash prices never confirm an ordinary stop and a fixed recovery cancels the breach", () => {
   const { task, market, record, now } = fixture();
   for (let seconds = 0; seconds <= 35; seconds += 5) {
     market.observedAt = new Date(now + seconds * 1000).toISOString();
     market.flashK = { suspected: true, observedAt: seconds, price: 98 - seconds / 100 };
     market.orderBook.bids[0].price = market.orderBook.asks[0].price = 98 - seconds / 100;
     observeSummaryPlans(task, market, now + seconds * 1000);
-    assert.equal(summaryExitCandidates(task, market, now + seconds * 1000).length, seconds >= 30 ? 1 : 0);
+    assert.equal(summaryExitCandidates(task, market, now + seconds * 1000).length, 0);
   }
+  market.flashK = { suspected: false, confirmed: true };
+  market.timeframe = "1m";
+  market.history = [{ ...anchorCandle(record.plan), confirmation: { status: "CONFIRMED", lastObservedAt: now + 40000 } }];
   market.observedAt = new Date(now + 40000).toISOString();
   market.orderBook.bids[0].price = market.orderBook.asks[0].price = 99;
   observeSummaryPlans(task, market, now + 40000);
   assert.equal(record.lossObservation, null);
   assert.equal(summaryExitCandidates(task, market, now + 40000).length, 0);
 });
-test("hard stop bypasses flash and soft-stop wait; expiry preserves protection", () => {
+test("a fixed price at the hard stop bypasses soft confirmation; expiry preserves protection", () => {
   const { task, summary, record, now } = fixture();
   assert.equal(summaryReviewType(summary, 94, record, now), "HARD_STOP");
   assert.equal(summaryReviewType(summary, 104, record, now + 61000), "TAKE_PROFIT");

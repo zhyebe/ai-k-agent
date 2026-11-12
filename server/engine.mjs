@@ -13,7 +13,7 @@ import { normalizeUnitProbability } from "./provider.mjs";
 import { entryActionBlock, entryRoundBlock, entryTimingBlock, normalizeMarketRegime, hasDirectionalProbabilities } from "./entry-policy.mjs";
 import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
-import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan } from "./summary-exit-policy.mjs";
+import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan, deferSummaryExitUntilConfirmed } from "./summary-exit-policy.mjs";
 import { matchesInstrument, normalizeTradingPlan, profitProtectionFor } from "./trading-plan.mjs";
 
 const activeCycles = new Set();
@@ -339,6 +339,15 @@ function pendingPositionQuantity(market, pending) {
   return pendingPositions(market, pending).reduce((sum, position) => sum + Number(position.quantity || 0), 0);
 }
 
+function pendingEntrySummaryQuantity(market, pending) {
+  if (market?.account?.positionSummariesVerified !== true) return null;
+  const side = pending.action === "BUY" ? "LONG" : "SHORT";
+  const rows = (market.account.positionSummaries || []).filter(row => heldDirection(row) === side
+    && matchesInstrument(row, { symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId }));
+  if (rows.length > 1 || rows.some(row => !Number.isSafeInteger(Number(row.quantity)) || Number(row.quantity) < 0)) return null;
+  return rows.reduce((quantity, row) => quantity + Number(row.quantity), 0);
+}
+
 function unsettledActions(task) {
   return [...(task.unsettledActions || []), task.pendingAction].filter((item) => item && ["AWAITING_FILL", "UNVERIFIED"].includes(item.status));
 }
@@ -542,6 +551,7 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
     suggestedPrice: preview.suggestedPrice,
     baselinePositionQty: pendingPositionQuantity(task.market, { ...decision, action }),
     baselinePositions: decision.exitType ? null : Object.fromEntries(pendingPositions(task.market, { ...decision, action }).filter((item) => item.positionOrderId).map((item) => [item.positionOrderId, Number(item.quantity)])),
+    baselineSummaryQty: decision.exitType ? null : pendingEntrySummaryQuantity(task.market, { ...decision, action }),
     baselinePositionsVerified: decision.targetSummary ? task.market?.account?.positionSummariesVerified === true : task.market?.account?.positionsVerified !== false,
     baselineOpenOrderIds: (task.market?.account?.openOrders || []).map((order) => order.orderId),
     entrustedOrderIds: [],
@@ -859,6 +869,19 @@ function recordConfirmedOrder(task, pending, { status, submitted, source, messag
 }
 
 function reconcilePositionAction(task, market, pending) {
+  const accountObservedAt = market.accountObservedAt || market.observedAt;
+  if (pending && !pending.exitType && task.mode === "LIVE" && ["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status)
+    && (pending.source || task.autoDecisionEnabled !== true) && Number.isSafeInteger(pending.baselineSummaryQty) && pending.baselineSummaryQty >= 0
+    && Number.isFinite(Date.parse(accountObservedAt)) && Date.parse(accountObservedAt) >= Date.parse(pending.createdAt)
+    && Date.now() >= Date.parse(accountObservedAt) && Date.now() - Date.parse(accountObservedAt) <= 5000) {
+    const observed = pendingEntrySummaryQuantity(market, pending);
+    if (observed !== null && observed > pending.baselineSummaryQty) task.entryForecast = {
+      pendingId: pending.id, action: pending.action, tradePlan: pending.tradePlan, forecastHorizon: pending.forecastHorizon,
+      observedAt: pending.forecastObservedAt,
+      confirmedAt: task.entryForecast?.pendingId === pending.id && task.entryForecast.confirmedAt || accountObservedAt,
+      symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId,
+    };
+  }
   if (pending?.targetSummary && market.account?.positionSummariesVerified !== true) return pending;
   if (!pending || !["WAITING", "AWAITING_FILL", "UNVERIFIED"].includes(pending.status) || task.mode !== "LIVE" || (pending.targetSummary ? market.account?.positionSummariesVerified !== true : market.account?.positionsVerified === false) || pending.baselinePositionsVerified === false) return pending;
   if (!pending.source && (pending.exitType || task.autoDecisionEnabled === true)) return pending;
@@ -874,7 +897,8 @@ function reconcilePositionAction(task, market, pending) {
     : addedPositions ? addedPositions.reduce((sum, item) => sum + item.added, 0) >= quantity : observed >= baseline + quantity;
   if (!pending.exitType && observed > baseline) task.entryForecast = {
     pendingId: pending.id, action: pending.action, tradePlan: pending.tradePlan, forecastHorizon: pending.forecastHorizon,
-    observedAt: pending.forecastObservedAt, confirmedAt: market.observedAt,
+    observedAt: pending.forecastObservedAt,
+    confirmedAt: task.entryForecast?.pendingId === pending.id && task.entryForecast.confirmedAt || market.observedAt,
     symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId,
   };
   if (!filled) return pending;
@@ -1221,6 +1245,14 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
         }
         if (!task.pendingAction.exitType && submitted?.code === "ENTRY_AWAITING_CONFIRMED_PRICE") {
           waitForConfirmedEntryPrice(task);
+          return task;
+        }
+        if (task.pendingAction.targetSummary && submitted?.code === "EXIT_AWAITING_CONFIRMED_PRICE") {
+          deferSummaryExitUntilConfirmed(task, task.pendingAction.targetSummary, new Date().toISOString());
+          task.pendingAction = { ...task.pendingAction, status: "CANCELLED", resolvedAt: new Date().toISOString(),
+            source: "realtime_recheck", message: "闪K或未定价，本次离场未提交；等待真实定K后按最新目标和止损重新判断" };
+          task.nextTrigger = task.pendingAction.message;
+          persistTask(task);
           return task;
         }
         if (["EXIT_CONDITION_CHANGED", "EXIT_QUOTE_UNVERIFIED", "EXIT_SUMMARY_CONDITION_CHANGED", "EXIT_SUMMARY_PRICE_CHANGED", "EXIT_SUMMARY_EXPIRED", "EXIT_SUMMARY_QUANTITY_CHANGED",
@@ -2980,11 +3012,12 @@ function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
     }
   }
   for (const context of contexts) {
+    if (task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) continue;
     const key = `${task.id}:${context.key}`;
     if (summaryReviewRuns.has(key)) continue;
     const previous = (task.summaryExitReviews || []).find(r => r.key === context.key);
     const activePlan = (task.summaryTradingPlans || []).find(record => record.signature === context.signature);
-    if (activePlan && Date.parse(activePlan.expiresAt) - now > 10000) continue;
+    if (activePlan && activePlan.riskComplete !== false && Date.parse(activePlan.expiresAt) - now > 10000) continue;
     if (previous?.status === "FAILED" && now - Date.parse(previous.requestedAt) < 5000) continue;
     const observedAt = new Date(context.quote.observedAt).toISOString();
     const record = { id: `exit-review:${task.id}:${context.key}:${now}`, key: context.key, signature: context.signature,
@@ -3170,6 +3203,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       : market.account.positionSummariesVerified !== true ? "SUMMARY_UNVERIFIED"
       : unsettledActions(task).some(action => action.exitType) ? "RECONCILING"
       : unverifiedQuotes ? "QUOTE_OR_DEPTH_UNVERIFIED"
+      : task.summaryExitPriceWaits?.length ? "AWAITING_CONFIRMED_PRICE"
       : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? "WINNER_OBSERVING"
       : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "EXIT_BATCH"
       : (task.summaryExitReviews || []).some(r => r.status === "REQUESTING") ? "AI_REVIEWING"
@@ -3178,6 +3212,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       checkedAt: market.observedAt, message: market.account.positionSummariesVerified !== true
         ? "持仓汇总未核实，继续读取，不猜测离场"
         : unverifiedQuotes ? "缺少该持仓的新鲜报价或整行可成交深度，继续读取；无法确认整行成交价格"
+        : task.summaryExitPriceWaits?.length ? "闪K或未定价，保留离场监控；等待真实定K后按最新报价重新判断目标和止损，不急于离场"
         : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? `亏损侧已核实离场；盈利侧最晚${task.summaryExitBatch.winnerDeadlineAt}提交离场，回落提前兑现`
         : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "正在执行已锁定的离场批次，逐笔核实结果；单笔失败继续处理其他持仓"
         : missingPlans.length ? `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；不按单向浮盈提前离场，禁止新增仓位`

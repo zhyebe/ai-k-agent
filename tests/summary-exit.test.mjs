@@ -4,14 +4,15 @@ import test, { afterEach, beforeEach } from "node:test";
 import { installSummaryPlan, summaryExitReviewContexts, summarySignature } from "../server/summary-exit-policy.mjs";
 import { parseHaohanAccount } from "../server/haohan.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
-import { dueExitReviewTargets, runPositionExitCycle, stopAllControllers, confirmPendingAction, stopTask, updateExitOutcomes } from "../server/engine.mjs";
+import { buildPendingAction, dueExitReviewTargets, runPositionExitCycle, stopAllControllers, confirmPendingAction, stopTask, updateExitOutcomes } from "../server/engine.mjs";
 import { state } from "../server/store.mjs";
-import { entryGuard, tradingPlan } from "./fixtures/trading-plan.mjs";
+import { anchorCandle, entryGuard, tradingPlan } from "./fixtures/trading-plan.mjs";
 
 beforeEach(t => t.mock.timers.enable({ apis: ["setTimeout"] }));
 afterEach(stopAllControllers);
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const row = (side = "LONG", extra = {}) => ({ symbol: "A", symbolName: "商品A", side, quantity: 3, frozenQuantity: 0, averagePrice: 100, ...extra });
+const fixedCandle = plan => ({ ...anchorCandle(plan), confirmation: { status: "CONFIRMED", lastObservedAt: Date.now() } });
 function fixture(t, id, { side = "LONG", plan = true } = {}) {
   let clock = Date.now();
   t.mock.method(Date, "now", () => clock);
@@ -113,6 +114,7 @@ for (const side of ["LONG", "SHORT"]) for (const evidence of ["none", "old", "pr
     await f.tick(100 + direction, 2000);
     assert.equal(f.submitted.length, evidence === "confirmed" ? 1 : 0);
     if (evidence === "confirmed") assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "AI_EXIT_NOW");
+    else if (evidence === "provisional") assert.equal(f.task.exitMonitor.status, "AWAITING_CONFIRMED_PRICE");
     else assert.equal(f.task.summaryExitReviews[0].decision, "HOLD");
   });
 }
@@ -155,6 +157,82 @@ test("expired manual suggestion reconciles an already filled entry before retiri
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
 });
+for (const side of ["LONG", "SHORT"]) test(`${side} verified summary fill activates the entry stop before detail rows load`, async t => {
+  const f = fixture(t, `summary-fill-stop-${side}`, { side, plan: false });
+  const average = 1327, direction = side === "LONG" ? 1 : -1;
+  const plan = tradingPlan(side, average, { takeProfitPrice: average + direction * 2,
+    stopLossPrice: average - direction, hardStopPrice: average - direction * 2 });
+  const held = row(side, { averagePrice: average, quantity: 1 });
+  f.market.account.positionSummaries = [];
+  const pending = buildPendingAction(f.task, { action: side === "LONG" ? "BUY" : "SELL", targetSymbol: "A",
+    tradePlan: plan, entryPrice: average, entryGuard: entryGuard(side === "LONG" ? "BUY" : "SELL", average, "A") });
+  f.task.pendingAction = { ...pending, source: "auto_takeover", status: "AWAITING_FILL" };
+  f.task.entryForecast = { pendingId: pending.id, action: pending.action, symbol: "A",
+    tradePlan: plan, observedAt: pending.forecastObservedAt, confirmedAt: null };
+  f.market.account.positionSummaries = [held];
+  f.market.account.positionsVerified = false;
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  await f.tick(average - direction * 2, 2000);
+  assert.ok(f.task.entryForecast.confirmedAt);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
+  assert.equal(f.task.unsettledActions[0].status, "AWAITING_FILL");
+});
+for (const field of ["rationale", "validForSec", "maxHoldSec", "stopConfirmationSec"]) {
+  test(`entry hard stop remains active without ${field} while model is offline`, async t => {
+    const f = fixture(t, `partial-stop-${field}`, { plan: false });
+    const plan = tradingPlan("LONG", 100, { [field]: null });
+    f.task.entryForecast = { pendingId: `entry-${field}`, action: "BUY", symbol: "A",
+      tradePlan: plan, observedAt: f.market.observedAt, confirmedAt: f.market.observedAt };
+    f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+    await f.tick(95);
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
+  });
+}
+test("missing AI confirmation time never invents an immediate ordinary stop", async t => {
+  const f = fixture(t, "partial-stop-confirmation", { plan: false });
+  f.task.entryForecast = { pendingId: "entry-no-confirmation", action: "BUY", symbol: "A",
+    tradePlan: tradingPlan("LONG", 100, { stopConfirmationSec: null, maxHoldSec: null }),
+    observedAt: f.market.observedAt, confirmedAt: f.market.observedAt };
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  await f.tick(98);
+  await f.tick(98, 5000);
+  assert.equal(f.submitted.length, 0);
+  assert.equal(f.task.summaryTradingPlans[0].maxHoldAt, null);
+  await f.tick(95, 2000);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
+});
+for (const fault of ["unchanged", "wrong-side", "wrong-instrument", "stale-account"]) {
+  test(`${fault} summary cannot falsely bind an entry stop`, async t => {
+    const f = fixture(t, `summary-bind-${fault}`, { plan: false });
+    const pending = buildPendingAction(f.task, { action: "BUY", targetSymbol: "A",
+      tradePlan: tradingPlan(), entryPrice: 100, entryGuard: entryGuard("BUY", 100, "A") });
+    f.task.pendingAction = { ...pending, source: "auto_takeover", status: "AWAITING_FILL" };
+    f.task.entryForecast = { pendingId: pending.id, action: "BUY", symbol: "A",
+      tradePlan: pending.tradePlan, observedAt: pending.forecastObservedAt, confirmedAt: null };
+    f.market.account.positionsVerified = false;
+    if (fault !== "unchanged") f.market.account.positionSummaries[0].quantity += 1;
+    if (fault === "wrong-side") f.market.account.positionSummaries[0].side = "SHORT";
+    if (fault === "wrong-instrument") f.market.account.positionSummaries[0].symbol = "B";
+    if (fault === "stale-account") f.market.accountObservedAt = new Date(Date.now() - 6000).toISOString();
+    f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+    await f.tick(95, 2000);
+    assert.equal(f.task.entryForecast.confirmedAt, null);
+    assert.equal(f.submitted.length, 0);
+  });
+}
+test("slippage beyond the original entry hard stop activates protection instead of rejecting the prices", async t => {
+  const f = fixture(t, "slipped-hard-stop", { plan: false });
+  f.market.account.positionSummaries[0].averagePrice = 94;
+  f.task.entryForecast = { pendingId: "entry-slipped", action: "BUY", symbol: "A", tradePlan: tradingPlan(),
+    observedAt: f.market.observedAt, confirmedAt: f.market.observedAt };
+  f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+  await f.tick(94);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
+});
 test("AI plan is not discarded when response also contains explicit EXIT price", async t => {
   const f = fixture(t, "ai-exit-now", { plan: false });
   f.runtime.requestSummaryExitDecision = async () => ({ ok: true, decision: "EXIT", exitPrice: 100,
@@ -172,14 +250,74 @@ for (const fault of ["missing-plan", "missing-hard-stop", "missing-exit-price"])
   assert.equal(f.task.summaryExitReviews[0].status, "FAILED");
   assert.equal(f.submitted.length, 0);
 });
-test("repeated new flash events cannot postpone soft stop forever", async t => {
+test("flash prices wait for a real fixed K before starting ordinary stop confirmation", async t => {
   const f = fixture(t, "flash-risk");
   for (let seconds = 0; seconds <= 30; seconds += 5) {
     f.market.flashK = { suspected: true, price: 98 - seconds / 100, observedAt: Date.now() };
     await f.tick(98 - seconds / 100, seconds ? 5000 : 0);
   }
+  assert.equal(f.submitted.length, 0);
+  assert.equal(f.task.exitMonitor.status, "AWAITING_CONFIRMED_PRICE");
+  f.market.flashK = { suspected: false, confirmed: true };
+  f.market.timeframe = "1m";
+  f.market.history = [fixedCandle(tradingPlan())];
+  for (let seconds = 0; seconds <= 30; seconds += 5) await f.tick(98, seconds ? 5000 : 2000);
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "STOP_LOSS");
+});
+for (const side of ["LONG", "SHORT"]) for (const trigger of ["TAKE_PROFIT", "HARD_STOP", "MAX_HOLD"]) {
+  test(`${side} ${trigger} waits across flash expiry and restart, then reevaluates the fixed price`, async t => {
+    const f = fixture(t, `fixed-exit-${side}-${trigger}`, { side });
+    f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+    const direction = side === "LONG" ? 1 : -1;
+    const price = 100 + direction * (trigger === "TAKE_PROFIT" ? 4 : trigger === "HARD_STOP" ? -5 : 0);
+    f.market.flashK = { suspected: true, confirmed: false };
+    await f.tick(price, trigger === "MAX_HOLD" ? 301000 : 0);
+    assert.equal(f.submitted.length, 0);
+    f.task.summaryExitPriceWaits = compactTaskRuntime(f.task).summaryExitPriceWaits;
+    f.market.flashK = { suspected: false };
+    await f.tick(price, 31000);
+    assert.equal(f.submitted.length, 0);
+    f.market.timeframe = "1m";
+    f.market.history = [{ ...fixedCandle(tradingPlan(side)), confirmation: { status: "CONFIRMED", lastObservedAt: Date.now() - 60000 } }];
+    await f.tick(price, 2000);
+    assert.equal(f.submitted.length, 0);
+    f.market.history = [fixedCandle(tradingPlan(side))];
+    f.market.flashK = { suspected: false, confirmed: true };
+    await f.tick(price, 2000);
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, trigger);
+    assert.equal(f.task.summaryExitPriceWaits.length, 0);
+  });
+}
+test("flash profit cannot arm protection or cause an exit after the fixed price recovers below target", async t => {
+  const f = fixture(t, "flash-profit-recovery");
+  f.market.flashK = { suspected: true, confirmed: false };
+  await f.tick(106);
+  assert.equal(f.task.summaryTradingPlans[0].bestPrice, 100);
+  assert.equal(f.task.summaryTradingPlans[0].profitArmed, false);
+  f.market.flashK = { suspected: false, confirmed: true };
+  f.market.timeframe = "1m";
+  f.market.history = [fixedCandle(tradingPlan())];
+  await f.tick(101, 2000);
+  assert.equal(f.submitted.length, 0);
+});
+test("a new flash in the exit dialog persists waiting and never retries blindly without a fixed K", async t => {
+  const f = fixture(t, "flash-dialog-wait");
+  f.runtime.submitSuggestionForm = async input => {
+    f.submitted.push(input);
+    return { ok: false, code: "EXIT_AWAITING_CONFIRMED_PRICE", submitted: false, uncertain: false };
+  };
+  await f.tick(104);
+  assert.equal(f.task.pendingAction.status, "CANCELLED");
+  assert.equal(f.task.summaryExitPriceWaits.length, 1);
+  await f.tick(104, 31000);
+  assert.equal(f.submitted.length, 1);
+  f.market.timeframe = "1m";
+  f.market.history = [fixedCandle(tradingPlan())];
+  f.runtime.submitSuggestionForm = async input => { f.submitted.push(input); return { ok: true, submitted: true }; };
+  await f.tick(104, 2000);
+  assert.equal(f.submitted.length, 2);
 });
 test("brief pullback recovery avoids soft exit; hard invalidation exits immediately without model", async t => {
   const f = fixture(t, "brief-rebound");

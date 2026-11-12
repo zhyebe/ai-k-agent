@@ -8,7 +8,7 @@ import { getBrowserPage, openBrowserPage, readVisiblePage, recoverBrowserSession
 import { requestBrowserActions } from "./provider.mjs";
 import { getCredential, initVault } from "./vault.mjs";
 import { clickPositionSummaryTransfer, preparePositionSummaryRow, clickTradeEntry, completeTradeDialogs, dismissEntryDialogs, dismissOrderCancellationDialogs, dismissTransferDialogs, fillTradeFields, prepareEntryAgreement, preparePositionRows, prepareTradeEntry } from "./trade-controls.mjs";
-import { summaryExitAllowsPrice, summaryKey } from "./summary-exit-policy.mjs";
+import { summaryExitAllowsPrice, summaryExitTimingBlock, summaryKey } from "./summary-exit-policy.mjs";
 import { activateCurrentOrders, clickOrderCancellation, readCurrentOrderStatus } from "./order-controls.mjs";
 import { haohanLoginRequired, parseHaohanPageSnapshot } from "./haohan.mjs";
 import { executableExitQuote } from "./exit-policy.mjs";
@@ -976,10 +976,14 @@ async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolNa
   if (!await preparePositionSummaryRow(page, targetSummary)) return { ok: false, code: "EXIT_SUMMARY_NOT_FOUND", submitted: false };
   const verify = async (dialogPrice = null) => {
     if (Date.now() >= Date.parse(exitGuard.expiresAt) || !Number.isFinite(Date.parse(exitGuard.expiresAt))) return { ok: false, code: "EXIT_SUMMARY_EXPIRED" };
-    const snapshot = await readVisiblePage(sessionId, { quick: true });
+    const snapshot = await readVisiblePage(sessionId, { quick: true, inspectCandles: true });
     if (!snapshot.ok) return { ok: false, code: snapshot.code, message: snapshot.message };
-    const market = parseHaohanPageSnapshot(snapshot, { symbol });
+    const market = markObservedMarketCandles({ ...parseHaohanPageSnapshot(snapshot, { symbol, timeframe: "1m" }),
+      observedAt: new Date(snapshot.capturedAt).toISOString() }, sessionId);
     if (market.code === "REAUTH_REQUIRED") return { ok: false, code: market.code, message: market.message };
+    const timingBlock = summaryExitTimingBlock(market, { requireConfirmed: exitGuard.requireConfirmedPrice === true,
+      notBefore: exitGuard.priceConfirmationNotBefore ?? null });
+    if (timingBlock) return { ok: false, code: timingBlock, message: "闪K或未定价，等待真实定K后重新判断离场" };
     const rows = market?.account?.positionSummaries?.filter(row => summaryKey(row) === summaryKey(targetSummary)) || [];
     const current = rows[0];
     const quote = current && executableExitQuote(market, { ...current, symbol, instrumentId });
@@ -1002,7 +1006,7 @@ async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolNa
     const dialog = await completeTradeDialogs(page, { exitType, orderType: "MARKET", expectedQuantity: targetSummary.quantity, refreshTransferPrice: true,
       baselineToken, finished: () => Boolean(response.peek()), canConfirm: verify, resolveTransferPrice: verify });
     confirmed = dialog.confirmed === true;
-    if (!dialog.ok) return { ok: false, code: dialog.code, submitted: false, uncertain: confirmed };
+    if (!dialog.ok) return { ...dialog, ok: false, submitted: false, uncertain: confirmed };
     const feedback = await observeTradeFeedback(page, response, baselineToken);
     return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
       pageHint: feedback.pageHint, clicked: result }), submittedQuantity: targetSummary.quantity, submittedPrice: dialog.submittedPrice,

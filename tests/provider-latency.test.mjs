@@ -26,7 +26,7 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.equal(system.split("唯一当前交易流程").length - 1, 1);
     assert.match(system, /方向盈利概率仅作参考，不设概率门槛/);
     assert.match(system, /到达目标立即离场/);
-    assert.match(system, /硬止损立即执行/);
+    assert.match(system, /定K后普通止损连续突破确认，硬止损命中直接执行/);
     assert.match(system, /下一根及随后1～3根K/);
     const rounds = messages.filter(m => m.content.includes('"type":"prior_monitoring_round"')).map(m => JSON.parse(m.content));
     const decisions = messages.filter(m => ["assistant", "model"].includes(m.role)).map(m => JSON.parse(m.content));

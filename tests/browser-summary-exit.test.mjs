@@ -10,6 +10,7 @@ import { runPositionExitCycle, startController, stopAllControllers } from '../se
 import { state } from '../server/store.mjs';
 import { tradeFixture } from './fixtures/trade-page.mjs';
 import { tradingPlan } from './fixtures/trading-plan.mjs';
+import { observeExecutionMarket } from '../server/market.mjs';
 let browser, page;
 const fixture = tradeFixture.replace('<body>', '<body><div>DGKZ | 测试商品</div>')
   .replace("['positions','orders','history']", "['positions','orders','history','summary']")
@@ -183,4 +184,142 @@ test('engine AI target reaches a real isolated summary transfer while model is u
  assert.equal(result.submitted.length,1,JSON.stringify(task.exitMonitor));
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[{side:'LONG',quantity:3,price:100}]);
  assert.deepEqual(await page.evaluate(()=>window.exits),[]);
+});
+for (const side of ['LONG', 'SHORT']) test(`${side} confirmed stop still transfers when price reaches the hard stop inside the dialog`, async () => {
+ const long = side === 'LONG', average = 1327, direction = long ? 1 : -1;
+ await page.evaluate(({ side, average }) => {
+  document.querySelector(`#summary [data-side="${side}"]`).cells[2].textContent = String(average);
+ }, { side, average });
+ const value = input(side, { exitType: 'STOP_LOSS', targetSummary: {
+  symbol: 'DGKZ', symbolName: '测试商品', side, quantity: long ? 3 : 1, averagePrice: average } });
+ const record = value.exitGuard.aiAuthorization.record;
+ record.plan = tradingPlan(side, average, { takeProfitPrice: average + direction * 2,
+  stopLossPrice: average - direction, hardStopPrice: average - direction * 2 });
+ record.lossObservation = { startedAt: Date.now() - 31000, lastObservedAt: Date.now(), price: average - direction };
+ value.exitGuard.aiAuthorization.trigger = 'STOP_LOSS';
+ await page.evaluate(({ side, average, direction }) => {
+  const setPrice = price => {
+   document.querySelector('body > table tr:first-child td:nth-child(2)').textContent = String(price + 0.1);
+   document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = String(price);
+  };
+  setPrice(average - direction - (side === 'SHORT' ? 0.1 : 0));
+  const transfer = window.summaryTransfer;
+  window.summaryTransfer = (...args) => {
+   transfer(...args);
+   setPrice(average - direction * 2 - (side === 'SHORT' ? 0.1 : 0));
+  };
+ }, { side, average, direction });
+ const result = await submitSuggestionForm(value);
+ assert.equal(result.ok, true, JSON.stringify(result));
+ assert.deepEqual(await page.evaluate(() => window.summaryExits),
+  [{ side, quantity: long ? 3 : 1, price: average - direction * 2 }]);
+});
+for (const side of ['LONG', 'SHORT']) for (const trigger of ['STOP_LOSS', 'HARD_STOP']) {
+ test(`${side} summary fill executes ${trigger} through the actual dialog without detail rows or model`, async t => {
+  const average = 1327, direction = side === 'LONG' ? 1 : -1, quantity = side === 'LONG' ? 3 : 1;
+  const price = average - direction * (trigger === 'HARD_STOP' ? 2 : 1);
+  await page.evaluate(({ side, average, price }) => {
+   document.querySelector(`#summary [data-side="${side}"]`).cells[2].textContent = String(average);
+   document.querySelector(`#summary [data-side="${side === 'LONG' ? 'SHORT' : 'LONG'}"]`).remove();
+   document.querySelector('#orders tbody').innerHTML = '<tr><td colspan="11">暂无数据</td></tr>';
+   document.querySelector('body > table tr:first-child td:nth-child(2)').textContent = String(side === 'LONG' ? price + 0.1 : price);
+   document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = String(side === 'LONG' ? price : price - 0.1);
+  }, { side, average, price });
+  const id = `browser-stop-${side}-${trigger}`, observedAt = new Date().toISOString();
+  const plan = tradingPlan(side, average, { takeProfitPrice: average + direction * 2,
+   stopLossPrice: average - direction, hardStopPrice: average - direction * 2, stopConfirmationSec: 1 });
+  const pending = { id: 'entry-risk', action: side === 'LONG' ? 'BUY' : 'SELL', targetSymbol: 'DGKZ', targetSymbolName: '测试商品',
+   tradePlan: plan, forecastObservedAt: observedAt, createdAt: observedAt, source: 'auto_takeover',
+   status: 'AWAITING_FILL', baselineSummaryQty: 0, suggestedQty: quantity };
+  const task = { id, mode: 'LIVE', autoDecisionEnabled: true, status: 'MONITORING', monitoringEnabled: true,
+   rules: [], workflow: [], metrics: {}, decision: { action: 'HOLD' }, pendingAction: pending,
+   entryForecast: { pendingId: pending.id, action: pending.action, symbol: 'DGKZ', tradePlan: plan, observedAt, confirmedAt: null },
+   target: { browserSessionId: 'summary-browser', connectorId: 'connector_haohan_readonly' } };
+  state.tasks.unshift(task);
+  t.after(() => { stopAllControllers(); state.tasks = state.tasks.filter(item => item !== task); });
+  const runtime = { observeExecutionMarket: async () => {
+   const snapshot = await readVisiblePage('summary-browser', { quick: true, inspectPositions: true });
+   const market = parseHaohanPageSnapshot(snapshot, { symbol: 'DGKZ' });
+   return { ...market, ok: true, observedAt: new Date().toISOString(), account: { ...market.account, positionsVerified: false } };
+  }, submitSuggestionForm, requestSummaryExitDecision: async () => { throw Error('MODEL_OFFLINE'); } };
+  await runPositionExitCycle(id, { runtime });
+  if (trigger === 'STOP_LOSS') {
+   assert.deepEqual(await page.evaluate(() => window.summaryExits), []);
+   await page.waitForTimeout(1100);
+   await runPositionExitCycle(id, { runtime });
+  }
+  assert.equal(task.pendingAction.exitGuard?.aiAuthorization?.trigger, trigger, JSON.stringify(task.exitMonitor));
+  assert.deepEqual(await page.evaluate(() => window.summaryExits), [{ side, quantity, price }]);
+  assert.deepEqual(await page.evaluate(() => window.exits), []);
+ });
+}
+test('confirmed ordinary stop survives dialog delay but still cancels on an actual recovery', async () => {
+ const value = input('LONG', { exitType: 'STOP_LOSS' });
+ const record = value.exitGuard.aiAuthorization.record;
+ record.plan = tradingPlan('LONG', 99, { stopLossPrice: 100, hardStopPrice: 95 });
+ record.lossObservation = { startedAt: Date.now() - 42000, lastObservedAt: Date.now() - 11000, price: 100 };
+ value.exitGuard.aiAuthorization.trigger = 'STOP_LOSS';
+ const result = await submitSuggestionForm(value);
+ assert.equal(result.ok, true, JSON.stringify(result));
+ assert.deepEqual(await page.evaluate(() => window.summaryExits), [{ side: 'LONG', quantity: 3, price: 100 }]);
+ await page.reload();
+ await page.evaluate(() => {
+  document.querySelector('body > table tr:first-child td:nth-child(2)').textContent = '101.1';
+  document.querySelector('body > table tr:nth-child(2) td:nth-child(2)').textContent = '101';
+ });
+ const recovered = await submitSuggestionForm(value);
+ assert.equal(recovered.ok, false);
+ assert.deepEqual(await page.evaluate(() => window.summaryExits), []);
+});
+for (const side of ['LONG', 'SHORT']) for (const insideDialog of [false, true]) {
+ test(`${side} flash ${insideDialog ? 'inside the exit dialog cancels before confirmation' : 'waits for real chart confirmation before transfer'}`, async t => {
+  const sessionId = `flash-exit-${side}-${insideDialog}`;
+  await openBrowserPage({ sessionId, url: 'https://smyw.haohandahan.cn/client/#/transcc', waitMs: 0 });
+  const minute = Math.floor(Date.now() / 60000) * 60000 + 120000;
+  let now = minute + 50000;
+  t.mock.method(Date, 'now', () => now);
+  await page.evaluate(({ minute, insideDialog }) => {
+   const chart = document.createElement('div'); chart.id = 'hqchart_kline';
+   const row = timestamp => ({ timestamp, Date: 20261112, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+   chart.JSChart = { JSChartContainer: { Symbol: 'DGKZ', Period: 4, SourceData: { Data: [row(minute - 60000), row(minute)] } } };
+   document.body.append(chart);
+   if (insideDialog) {
+    const transfer = window.summaryTransfer;
+    window.summaryTransfer = (...args) => {
+     chart.JSChart.JSChartContainer.SourceData.Data.at(-1).High = 110;
+     chart.JSChart.JSChartContainer.SourceData.Data.at(-1).Close = 110;
+     transfer(...args);
+    };
+   }
+  }, { minute, insideDialog });
+  const value = { ...input(side), sessionId };
+  const task = { timeframe: '1m', target: { browserSessionId: sessionId } };
+  const connector = { adapterId: 'haohan-readonly', reviewStatus: 'APPROVED', capabilities: ['read_visible_market'] };
+  const sample = async seconds => {
+   now = minute + seconds * 1000;
+   await observeExecutionMarket(task, connector, { target: { symbol: 'DGKZ', symbolName: '测试商品' } });
+  };
+  if (insideDialog) for (const second of [50, 52, 54, 56]) await sample(second);
+  const first = await submitSuggestionForm(value);
+  assert.equal(first.code, 'EXIT_AWAITING_CONFIRMED_PRICE', JSON.stringify(first));
+  assert.equal(first.submitted, false);
+  assert.notEqual(first.uncertain, true);
+  assert.deepEqual(await page.evaluate(() => window.summaryExits), []);
+  assert.equal(await page.locator('.el-dialog:visible').count(), 0);
+  if (!insideDialog) {
+   value.exitGuard.requireConfirmedPrice = true;
+   for (const second of [52, 54, 56]) await sample(second);
+   const fixed = await submitSuggestionForm(value);
+   assert.equal(fixed.ok, true, JSON.stringify(fixed));
+   assert.equal((await page.evaluate(() => window.summaryExits)).length, 1);
+  }
+ });
+}
+test('a deferred exit cannot submit when its chart has disappeared', async () => {
+ const value = input();
+ value.exitGuard.requireConfirmedPrice = true;
+ const result = await submitSuggestionForm(value);
+ assert.equal(result.code, 'EXIT_AWAITING_CONFIRMED_PRICE');
+ assert.equal(result.submitted, false);
+ assert.deepEqual(await page.evaluate(() => window.summaryExits), []);
 });
