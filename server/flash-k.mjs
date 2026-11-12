@@ -18,7 +18,7 @@ export function detectFlashK({ scope = "", observe = true, symbol = "", symbolNa
   const identity = flashIdentity({ scope, symbol, symbolName, instrumentId, timeframe });
   const state = flashKObservationHistory.get(identity) || { samples: [], event: null };
   const samples = state.samples;
-  const result = () => state.event ? { ...state.event, suspected: now - state.event.observedAt <= 30000 }
+  const result = () => state.event ? { ...state.event, suspected: !state.event.confirmed && now - state.event.observedAt <= 30000 }
     : { suspected: false, reason: "NO_UNCONFIRMED_SPIKE" };
   if (!Number.isFinite(now) || !Number.isFinite(currentPrice) || currentPrice <= 0) return state.event ? result() : { suspected: false, reason: "LATEST_PRICE_MISSING" };
   if (!observe || (samples.length && now <= samples.at(-1).at)) return result();
@@ -27,6 +27,10 @@ export function detectFlashK({ scope = "", observe = true, symbol = "", symbolNa
   samples.push(current);
   while (samples.length > 8) samples.shift();
   flashKObservationHistory.set(identity, state);
+  const candleTimestamp = value => Number.isFinite(Number(value)) ? Number(value) : Date.parse(value || "");
+  if (state.event && currentCandle?.confirmation?.status === "CONFIRMED"
+    && candleTimestamp(currentCandle.timestamp) >= candleTimestamp(state.event.timestamp)
+    && Number(currentCandle.confirmation.lastObservedAt) >= state.event.observedAt) state.event.confirmed = true;
 
   let transientPrice = null;
   let reason = "";

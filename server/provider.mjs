@@ -930,7 +930,9 @@ export async function requestSummaryExitDecision(provider, context, options = {}
   const value = response?.parsed;
   if (!["EXIT", "HOLD"].includes(value?.decision) || !String(value?.rationale || "").trim()) return { ok: false, code: "INVALID_SUMMARY_EXIT_DECISION" };
   return { ok: true, decision: value.decision, rationale: String(value.rationale),
-    plan: normalizeTradingPlan(value.plan), exitPrice: value.exit_price ?? value.exitPrice ?? null };
+    plan: normalizeTradingPlan(value.plan), exitPrice: value.exit_price ?? value.exitPrice ?? null,
+    forecastInvalidated: (value.forecast_invalidated ?? value.forecastInvalidated) === true,
+    invalidationCandleTimestamp: value.invalidation_candle_timestamp ?? value.invalidationCandleTimestamp ?? null };
 }
 
 export async function requestDecision(provider, context, options = {}) {

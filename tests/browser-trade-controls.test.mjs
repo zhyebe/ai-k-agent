@@ -816,6 +816,81 @@ test("fast observations rotate held instruments without collecting stale quotes 
   assert.equal(flatReview.books[0].symbol, "DGJJ");
 });
 
+for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"]) {
+  test(`${action} ${orderType} waits for real chart confirmation before clicking entry`, async t => {
+    await page.reload();
+    const sessionId = `fixed-entry-${action}-${orderType}`;
+    await openBrowserPage({ sessionId, url: "https://smyw.haohandahan.cn/client/#/transcc", waitMs: 0 });
+    const minute = Math.floor(Date.now() / 60000) * 60000 + 120000;
+    let now = minute + 50000;
+    t.mock.method(Date, "now", () => now);
+    await page.evaluate(timestamp => {
+      const chart = document.createElement("div"); chart.id = "hqchart_kline";
+      const row = at => ({ Date: 20261112, timestamp: at, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+      chart.JSChart = { JSChartContainer: { Symbol: "DGKZ", Period: 4, SourceData: { Data: [row(timestamp - 60000), row(timestamp)] } } };
+      document.body.append(chart);
+    }, minute);
+    const input = { sessionId, action, price: 100, quantity: 1, orderType };
+    const first = await submitSuggestionForm(input);
+    assert.equal(first.code, "ENTRY_AWAITING_CONFIRMED_PRICE");
+    assert.equal(first.submitted, false);
+    assert.deepEqual(await page.evaluate(() => window.entries), []);
+    assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+    const task = { timeframe: "1m", target: { browserSessionId: sessionId } };
+    const connector = { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] };
+    for (const second of [52, 54, 56]) {
+      now = minute + second * 1000;
+      await observeExecutionMarket(task, connector);
+    }
+    const confirmed = await submitSuggestionForm(input);
+    assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+    assert.equal((await page.evaluate(() => window.entries)).length, 1);
+  });
+}
+
+for (const action of ["BUY", "SELL"]) test(`${action} a deferred flash entry cannot resume when the chart is missing`, async () => {
+  await page.reload();
+  const result = await submitSuggestionForm({ sessionId: "trade-fixture", action, price: 100, quantity: 1,
+    entryGuard: { ...entryGuard(action, 100), requireConfirmedPrice: true } });
+  assert.equal(result.code, "ENTRY_AWAITING_CONFIRMED_PRICE");
+  assert.equal(result.submitted, false);
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+});
+
+for (const action of ["BUY", "SELL"]) test(`${action} a new flash inside the confirmation cancels only the unsubmitted action`, async t => {
+  await page.reload();
+  const sessionId = `flash-dialog-${action}`;
+  await openBrowserPage({ sessionId, url: "https://smyw.haohandahan.cn/client/#/transcc", waitMs: 0 });
+  const minute = Math.floor(Date.now() / 60000) * 60000 + 180000;
+  let now = minute + 50000;
+  t.mock.method(Date, "now", () => now);
+  await page.evaluate(timestamp => {
+    const chart = document.createElement("div"); chart.id = "hqchart_kline";
+    const row = at => ({ Date: 20261112, timestamp: at, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+    chart.JSChart = { JSChartContainer: { Symbol: "DGKZ", Period: 4, SourceData: { Data: [row(timestamp - 60000), row(timestamp)] } } };
+    document.body.append(chart);
+    const original = window.enter;
+    window.enter = side => {
+      const candle = chart.JSChart.JSChartContainer.SourceData.Data.at(-1);
+      candle.High = candle.Close = 110;
+      original(side);
+    };
+  }, minute);
+  const task = { timeframe: "1m", target: { browserSessionId: sessionId } };
+  const connector = { adapterId: "haohan-readonly", reviewStatus: "APPROVED", capabilities: ["read_visible_market"] };
+  for (const second of [50, 52, 54, 56]) {
+    now = minute + second * 1000;
+    await observeExecutionMarket(task, connector);
+  }
+  const result = await submitSuggestionForm({ sessionId, action, price: 100, quantity: 1 });
+  assert.equal(result.code, "ENTRY_AWAITING_CONFIRMED_PRICE", JSON.stringify(result));
+  assert.equal(result.cancelled, true);
+  assert.equal(result.confirmed, false);
+  assert.equal(result.uncertain, false);
+  assert.deepEqual(await page.evaluate(() => window.entries), []);
+  assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+});
+
 test("fast observations collect chart evidence and confirm a stable K without a page reload", async t => {
   await page.goto("https://smyw.haohandahan.cn/client/#/transcc");
   await page.reload();

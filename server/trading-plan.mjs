@@ -138,7 +138,8 @@ export function tightenHoldingPlan(previous, next) {
   const priorProtection = profitProtectionFor(previous.summary, previous.plan);
   const nextProtection = profitProtectionFor(next.summary, next.plan);
   const plan = { ...next.plan,
-    takeProfitPrice: earlierTarget(previous.plan.takeProfitPrice, next.plan.takeProfitPrice),
+    takeProfitPrice: previous.plan.takeProfitPrice,
+    maxHoldSec: previous.plan.maxHoldSec,
     stopLossPrice: tighterStop(previous.plan.stopLossPrice, next.plan.stopLossPrice),
     hardStopPrice: tighterStop(previous.plan.hardStopPrice, next.plan.hardStopPrice),
     stopConfirmationSec: Math.min(previous.plan.stopConfirmationSec, next.plan.stopConfirmationSec),
@@ -150,7 +151,7 @@ export function tightenHoldingPlan(previous, next) {
   if (priorProtection && !profitProtectionFor(next.summary, plan)) plan.profitProtection = priorProtection;
   const profitProtectionEnabled = Boolean(profitProtectionFor(next.summary, plan));
   return { ...next, plan, profitProtectionEnabled, warnings: profitProtectionEnabled ? [] : ["AI_PROFIT_PROTECTION_UNAVAILABLE"],
-    maxHoldAt: new Date(Math.min(Date.parse(previous.maxHoldAt), Date.parse(next.maxHoldAt))).toISOString(),
+    maxHoldAt: previous.maxHoldAt,
     bestPrice: previous.bestPrice, profitArmed: previous.profitArmed, lossObservation: previous.lossObservation,
     createdAt: previous.createdAt };
 }

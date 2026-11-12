@@ -161,7 +161,7 @@ test("hard stop bypasses flash and soft-stop wait; expiry preserves protection",
   assert.equal(summaryReviewType(summary, 100, record, now + 301000), "MAX_HOLD");
   assert.equal(summaryReviewType(summary, 101, null, now), null);
 });
-test("new AI plan cannot widen stops, move target away, extend hold, or erase protected peak", () => {
+test("new AI plan preserves the original target and deadline without widening stops or erasing protected peak", () => {
   const { task, market, plan, record, now } = fixture();
   record.bestPrice = 103;
   record.profitArmed = true;
@@ -174,6 +174,10 @@ test("new AI plan cannot widen stops, move target away, extend hold, or erase pr
   assert.equal(result.record.maxHoldAt, record.maxHoldAt);
   assert.equal(result.record.bestPrice, 103);
   assert.equal(result.record.profitArmed, true);
+  const earlier = installSummaryPlan(task, context, { ...plan, takeProfitPrice: 101, maxHoldSec: 1 },
+    { id: "early-ai", observedAt: market.observedAt, now });
+  assert.equal(earlier.record.plan.takeProfitPrice, 104);
+  assert.equal(earlier.record.maxHoldAt, record.maxHoldAt);
 });
 for (const side of ["LONG", "SHORT"]) test(`${side} tighter targets or incompatible refresh fields cannot erase existing profit protection`, () => {
   const { task, market, plan, record, summary, now } = fixture(side);

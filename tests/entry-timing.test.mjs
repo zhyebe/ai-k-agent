@@ -86,6 +86,74 @@ for (const action of ['BUY', 'SELL']) test(`${action} AI entry submits without a
   assert.equal(f.submissions[0].price, 100);
   assert.equal(f.task.decision.action, action);
 });
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
+  test(`${automatic ? 'automatic' : 'manual'} ${action} preserves AI direction during flash K and enters only after real confirmation`, async t => {
+    const f = fixture(t, `flash-entry-${automatic}-${action}`, automatic, action);
+    f.market.history[0].confirmation = { status: 'PROVISIONAL' };
+    f.market.flashK = { suspected: true, confirmed: false, price: 110, observedAt: Date.now() };
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.submissions.length, 0);
+    assert.equal(f.forms.length, 0);
+    assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true);
+    assert.equal(f.task.decision.action, action);
+    f.market.flashK.suspected = false;
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.analyses.length, 1, 'waiting must not lose or repeatedly regenerate the AI action');
+    assert.equal(f.submissions.length, 0, 'event expiry does not establish a real fixed price');
+    const candle = f.market.history[0];
+    f.market.history = [];
+    f.market.flashK = null;
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true, 'missing chart data must not release a deferred entry');
+    assert.equal(f.submissions.length, 0);
+    f.market.history = [candle];
+    f.market.flashK = { suspected: false, confirmed: true };
+    f.market.history[0].confirmation = { status: 'CONFIRMED' };
+    f.market.flashK.confirmed = true;
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal((automatic ? f.submissions : f.forms).length, 1);
+    assert.equal(f.analyses.length, 1);
+    assert.equal((automatic ? f.submissions : f.forms)[0].action, action);
+  });
+}
+for (const action of ['BUY', 'SELL']) test(`${action} flash appearing in final confirmation stays waiting and resumes without a duplicate`, async t => {
+  const f = fixture(t, `confirm-flash-${action}`, true, action);
+  let attempts = 0;
+  f.runtime.submitSuggestionForm = async input => {
+    attempts++;
+    if (attempts === 1) return { ok: false, submitted: false, uncertain: false,
+      code: 'ENTRY_AWAITING_CONFIRMED_PRICE', cancelled: true, cancellationLabel: '取消' };
+    f.submissions.push(input);
+    return { ok: true, submitted: true };
+  };
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.task.pendingAction.status, 'WAITING');
+  assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true);
+  assert.equal(f.submissions.length, 0);
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+  assert.equal(f.analyses.length, 1);
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.submissions.length, 1);
+});
+test('manual flash confirmation preserves the original BUY and prepares the form again after real pricing', async t => {
+  const f = fixture(t, 'manual-dialog-flash', false, 'BUY');
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.forms.length, 1);
+  f.market.history[0].confirmation = { status: 'PROVISIONAL' };
+  f.runtime.continueManualEntry = async () => ({ continued: false, confirmed: false, cancelled: true,
+    code: 'ENTRY_AWAITING_CONFIRMED_PRICE' });
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true);
+  assert.equal(f.task.decision.action, 'BUY');
+  f.market.history[0].confirmation = { status: 'CONFIRMED' };
+  f.runtime.continueManualEntry = async () => ({ continued: false });
+  await runAnalysis(f.task.id, '', { runtime: f.runtime });
+  assert.equal(f.forms.length, 2);
+  assert.equal(f.forms[1].action, 'BUY');
+  assert.equal(f.analyses.length, 1);
+  assert.equal(f.submissions.length, 0);
+});
 for (const stateName of ['positions', 'summaries', 'orders', 'unverified']) test(`${stateName} blocks additional entry analysis`, async t => {
   const f = fixture(t, `round-${stateName}`);
   if (stateName === 'positions') f.market.account.positions = [{ positionOrderId: 'p', side: 'LONG', quantity: 1, orderPrice: 100 }];

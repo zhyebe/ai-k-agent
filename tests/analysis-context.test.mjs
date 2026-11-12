@@ -10,11 +10,14 @@ test("single-round AI entry and structured AI price exits share one policy", () 
   assert.match(LIVE_BOARD_STRATEGY.kline.summary, /AI给出未来路径.*风险计划/);
   assert.equal(entry.emptyOnly, true);
   assert.equal(entry.decisionMode, "AI_ONLY");
-  assert.equal(exit.decisionMode, "USER_RULES_THEN_AI_PRICE_PLAN");
+  assert.equal(exit.decisionMode, "AI_TARGET_WITH_RISK_AND_HEDGE_RULES");
   assert.equal(exit.requiresTakeProfit, true);
   assert.equal(exit.requiresHardStop, true);
   assert.equal(exit.requiresProfitProtection, false);
-  assert.equal(exit.totalPositiveExitAll, true);
+  assert.equal(exit.totalPositiveExitAll, false);
+  assert.equal(exit.mixedPositiveExitAll, true);
+  assert.equal(exit.preserveOriginalTarget, true);
+  assert.equal(exit.earlyAiExitRequiresConfirmedInvalidation, true);
   assert.equal(exit.mixedNonPositiveExitLosers, true);
   assert.equal(exit.retainedWinnerMaxHoldSec, 60);
   assert.equal(exit.automaticInBothEntryModes, true);

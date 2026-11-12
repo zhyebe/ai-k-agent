@@ -77,7 +77,7 @@ test("fast position monitor recovers login and executes a qualified summary exit
   assert.equal(f.task.lastPositionAudit.positions[0].positionId, "P1");
 });
 
-for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects positive total and confirmed stop: entry ${entryPrice}`, async t => {
+for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects the original AI target and confirmed stop: entry ${entryPrice}`, async t => {
   const f = setup(t);
   f.market.account.positions[0].orderPrice = entryPrice;
   armCurrentPlan(f.task, f.market);
@@ -85,11 +85,11 @@ for (const entryPrice of [102, 102.01, 105, 106]) test(`login recovery respects 
   f.runtime.observeExecutionMarket = async () => { f.calls.push("read"); return ++reads === 1 ? expired : f.market; };
   f.runtime.submitSuggestionForm = async input => { f.calls.push("submit"); submitted = input; return { ok: true, submitted: true }; };
   await runPositionExitCycle(f.task.id, { runtime: f.runtime }); await new Promise(resolve => setImmediate(resolve));
-  if (entryPrice < 103) {
+  if (entryPrice <= 102) {
     assert.equal(submitted.exitType, "TAKE_PROFIT");
     assert.deepEqual(submitted.targetPositionIds, []);
     assert.equal(submitted.targetSummary.averagePrice, entryPrice);
-    assert.equal(submitted.exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
+    assert.equal(submitted.exitGuard.aiAuthorization.trigger, "TAKE_PROFIT");
     assert.equal(f.calls.includes("loss-review"), false);
   } else {
     assert.equal(submitted, undefined);

@@ -54,6 +54,10 @@ export function updateSummaryExitBatch(task, market, now = Date.now()) {
   if (!verifiedAccount(market, now)) return;
   const rows = (market.account.positionSummaries || []).filter(row => Number(row.quantity) > 0);
   let batch = task.summaryExitBatch;
+  if (batch?.phase === "EXIT_ALL" && new Set(batch.targets.map(heldDirection)).size < 2) {
+    batch.phase = "INVALIDATED";
+    batch.reason = "单向持仓按AI目标离场，停用旧浮盈全平批次";
+  }
   const pendingFor = target => unsettled(task).some(action => action.targetSummary
     && summaryKey(action.targetSummary) === summaryKey(target))
     || (market.account.openOrders || []).some(order => Number(order.remainingQuantity) > 0 && matchesInstrument(order, target));
@@ -109,7 +113,7 @@ export function updateSummaryExitBatch(task, market, now = Date.now()) {
   if (!portfolio) return;
   const negative = portfolio.contexts.filter(context => context.pnlPoints < 0);
   const mixed = new Set(portfolio.contexts.map(context => heldDirection(context.summary))).size === 2;
-  const all = portfolio.totalPnl > 0;
+  const all = mixed && portfolio.totalPnl > 0;
   if (!all && !(mixed && negative.length)) return;
   batch = { id: `summary-batch:${now}:${summarySignature(rows[0])}`, phase: all ? "EXIT_ALL" : "EXIT_LOSERS",
     startedAt: new Date(now).toISOString(), triggerPnl: portfolio.totalPnl,
@@ -121,16 +125,21 @@ export function updateSummaryExitBatch(task, market, now = Date.now()) {
 export function summaryRuleAuthorizationCurrent(task, summary, authorization) {
   const batch = task.summaryExitBatch;
   if (!activeBatch(batch) || authorization?.source !== "USER_RULE" || authorization.batchId !== batch.id) return false;
+  if (batch.phase === "EXIT_ALL" && new Set(batch.targets.map(heldDirection)).size < 2) return false;
   return batch.targets.some(target => batchTargetMatches(target, summary)
     && (batch.phase === "EXIT_ALL" ? authorization.trigger === "TOTAL_PROFIT"
       : batch.phase === "EXIT_LOSERS" ? target.role === "LOSER" && authorization.trigger === "HEDGE_LOSS"
       : batch.phase === "EXIT_WINNERS" && target.role === "WINNER" && authorization.trigger === batch.winnerExitReason));
 }
 
-export function installSummaryPlan(task, context, source, { id, observedAt, now = Date.now(), origin = "AI_REVIEW" } = {}) {
+export function installSummaryPlan(task, context, source, { id, observedAt, holdingStartedAt, now = Date.now(), origin = "AI_REVIEW" } = {}) {
   const validated = validateHoldingPlan(source, context.summary, { observedAt, now,
     allowExpired: origin === "AI_ENTRY" });
   if (validated.code) return validated;
+  const holdingStart = Date.parse(holdingStartedAt || "");
+  if (origin === "AI_ENTRY" && Number.isFinite(holdingStart) && holdingStart <= now) {
+    validated.maxHoldAt = new Date(holdingStart + validated.plan.maxHoldSec * 1000).toISOString();
+  }
   const prior = (task.summaryTradingPlans || []).find(record => record.key === context.key
     && Number(record.summary.averagePrice) === Number(context.summary.averagePrice)
     && Number(record.summary.quantity) >= Number(context.summary.quantity));
@@ -159,10 +168,9 @@ export function syncSummaryPlans(task, market, now = Date.now()) {
     if ((task.summaryTradingPlans || []).some(record => record.key === context.key)
       || !matchesInstrument(forecast, context.summary)
       || heldDirection(context.summary) !== (forecast.action === "BUY" ? "LONG" : "SHORT")) continue;
-    const zone = forecast.tradePlan.entryZone;
-    if (context.summary.averagePrice < zone.min || context.summary.averagePrice > zone.max) continue;
     installSummaryPlan(task, context, forecast.tradePlan,
-      { id: `entry-plan:${forecast.pendingId}`, observedAt: forecast.observedAt, now, origin: "AI_ENTRY" });
+      { id: `entry-plan:${forecast.pendingId}`, observedAt: forecast.observedAt,
+        holdingStartedAt: forecast.confirmedAt, now, origin: "AI_ENTRY" });
   }
 }
 
@@ -218,6 +226,8 @@ export function summaryExitAllowsPrice(summary, price, authorization, now = Date
     && ["TOTAL_PROFIT", "HEDGE_LOSS", "HEDGE_WINNER_DEADLINE", "HEDGE_WINNER_PULLBACK"].includes(authorization.trigger);
   if (authorization.trigger === "AI_EXIT_NOW") {
     if (!(Number(authorization.exitPrice) > 0)) return false;
+    if (Number(authorization.targetPrice) > 0 && authorization.forecastInvalidated !== true
+      && (heldDirection(summary) === "LONG" ? price < authorization.targetPrice : price > authorization.targetPrice)) return false;
     return heldDirection(summary) === "LONG" ? price >= authorization.exitPrice : price <= authorization.exitPrice;
   }
   return summaryReviewType(summary, price, authorization.record, now) === authorization.trigger;
@@ -238,10 +248,6 @@ export function summaryExitCandidates(task, market, now = Date.now()) {
     const trigger = summaryReviewType(context.summary, context.quote.price, record, now);
     const review = (task.summaryExitReviews || []).find(item => item.signature === context.signature && item.decision === "EXIT");
     const immediate = review && summaryExitAllowsPrice(context.summary, context.quote.price, review, now);
-    const retainedWinner = activeBatch(batch) && ["EXIT_LOSERS", "WATCH_WINNERS"].includes(batch.phase)
-      && batch.targets.some(target => target.role === "WINNER" && batchTargetMatches(target, context.summary));
-    const mandatoryRisk = ["HARD_STOP", "STOP_LOSS", "MAX_HOLD"].includes(trigger);
-    if (retainedWinner && !mandatoryRisk && !userAuthorized) return [];
     if (!userAuthorized && !trigger && !immediate) return [];
     const selectedTrigger = userAuthorized ? ruleTrigger : trigger || "AI_EXIT_NOW";
     const exitType = context.pnlPoints > 0 ? "TAKE_PROFIT" : "STOP_LOSS";

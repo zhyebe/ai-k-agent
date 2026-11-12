@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { chunkDocument } from "./rag.mjs";
 
 const previousSkillId = "skill_04ef36d5-3002-40fd-b51f-3914867e29f1";
+const previousCurrentHashes = new Set([
+  "5b67d4c6ee16d9f39f76f20b37c207d00a11b048a84578852d3c414c392f9de8",
+  "59fd044ff821456ecd788aa3a3303532f638f2d0268fe7833f1638f3dfc93a12",
+  "ae188e9a3a7cfba4e5f6fd778c2ef894b17ded680363b98d623c509d8eaf5048",
+]);
 const previousContentHashes = new Map([
   ["v0.3.135", "59fd044ff821456ecd788aa3a3303532f638f2d0268fe7833f1638f3dfc93a12"],
   ["v0.3.134", "ae188e9a3a7cfba4e5f6fd778c2ef894b17ded680363b98d623c509d8eaf5048"],
@@ -44,14 +49,15 @@ export async function tradingSkillUpgrade(skill) {
   const local = skill?.id === "skill_local_trading";
   const localVersions = { "v1.0.0": "v0.3.133", "v1.0.2": "v0.3.134", "v1.0.3": "v0.3.135" };
   const expectedHash = local ? previousContentHashes.get(localVersions[skill.version]) : skill?.id === previousSkillId ? previousContentHashes.get(skill.version) : null;
-  if (skill?.status !== "APPROVED" || !expectedHash) return null;
+  const previousCurrent = (local && skill.version === "v1.0.4") || (skill?.id === previousSkillId && skill.version === "v0.3.136");
+  if (skill?.status !== "APPROVED" || (!expectedHash && !previousCurrent)) return null;
   const hash = createHash("sha256").update(String(skill.content || "").replace(/\r\n/g, "\n").trim()).digest("hex");
-  if (hash !== expectedHash) return null;
+  if (previousCurrent ? !previousCurrentHashes.has(hash) : hash !== expectedHash) return null;
   const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
   if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
   return {
     content,
-    version: local ? "v1.0.4" : "v0.3.136",
+    version: local ? "v1.0.9" : "v0.3.137",
     summary: content.slice(0, 120),
     chunks: process.env.AXIOM_REQUIRE_DESKTOP_BROWSER === "1" ? 0 : chunkDocument(content).length,
     updatedAt: new Date().toISOString(),

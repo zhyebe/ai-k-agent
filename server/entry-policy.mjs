@@ -15,6 +15,16 @@ export function hasDirectionalProbabilities(decision) {
   });
 }
 
+export function entryTimingBlock(market, { requireConfirmed = false } = {}) {
+  const minute = market?.timeframes?.["1m"] || (market?.timeframe === "1m" ? market : null);
+  const candle = minute?.history?.at(-1);
+  const status = candle?.confirmation?.status || candle?.confirmation;
+  if ((requireConfirmed && status !== "CONFIRMED") || candle?.partial === true || status === "PROVISIONAL"
+    || market?.flashK?.confirmed === false
+    || (market?.flashK?.suspected === true && market.flashK.confirmed !== true)) return "ENTRY_AWAITING_CONFIRMED_PRICE";
+  return null;
+}
+
 // One round owns the account until its holdings and current orders are clear.
 export function entryRoundBlock(task, market, { pendingId } = {}) {
   const account = market?.account;

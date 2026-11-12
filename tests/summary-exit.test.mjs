@@ -48,14 +48,14 @@ function fixture(t, id, { side = "LONG", plan = true } = {}) {
 }
 
 for (const side of ["LONG", "SHORT"]) for (const automatic of [false, true]) {
-  test(`${side} ${automatic ? "automatic" : "manual"} entry exits on positive total and deduplicates unsettled transfer`, async t => {
+  test(`${side} ${automatic ? "automatic" : "manual"} entry follows the AI target and deduplicates unsettled transfer`, async t => {
     const f = fixture(t, `target-${side}-${automatic}`, { side });
     f.task.autoDecisionEnabled = automatic;
     await f.tick(side === "LONG" ? 104 : 96);
     assert.equal(f.submitted.length, 1);
     assert.equal(f.submitted[0].quantity, 3);
     assert.equal(f.submitted[0].action, side === "LONG" ? "SELL" : "BUY");
-    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
+    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TAKE_PROFIT");
     await f.tick(side === "LONG" ? 105 : 95, 2000);
     assert.equal(f.submitted.length, 1);
     assert.equal(f.task.exitMonitor.status, "RECONCILING");
@@ -76,6 +76,56 @@ test("holdings missing a plan immediately request structured AI with original fo
   assert.equal(f.task.summaryTradingPlans.length, 1);
   await f.tick(104, 2000);
   assert.equal(f.submitted.length, 1);
+});
+test("entry at 16-19 keeps the original 21 target across one K and AI refresh", async t => {
+  const f = fixture(t, "hold-original-21", { plan: false });
+  f.market.account.positionSummaries[0].averagePrice = 17;
+  const plan = tradingPlan("LONG", 17, { entryZone: { min: 16, max: 19 }, takeProfitPrice: 21,
+    maxHoldSec: 600, profitProtection: null });
+  f.task.entryForecast = { pendingId: "entry-17", symbol: "A", action: "BUY", tradePlan: plan,
+    observedAt: new Date(Date.now()).toISOString(), confirmedAt: new Date(Date.now()).toISOString() };
+  f.runtime.requestSummaryExitDecision = async () => ({ ok: true, decision: "EXIT", exitPrice: 18,
+    plan: { ...plan, takeProfitPrice: 18, maxHoldSec: 1 }, rationale: "已有一根K浮盈" });
+  await f.tick(18);
+  const deadline = f.task.summaryTradingPlans[0].maxHoldAt;
+  await f.tick(19, 56000);
+  assert.equal(f.task.summaryExitReviews[0].decision, "HOLD");
+  assert.equal(f.task.summaryTradingPlans[0].plan.takeProfitPrice, 21);
+  assert.equal(f.task.summaryTradingPlans[0].maxHoldAt, deadline);
+  await f.tick(20, 2000);
+  assert.equal(f.submitted.length, 0);
+  await f.tick(21, 2000);
+  assert.equal(f.submitted.length, 1);
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TAKE_PROFIT");
+});
+for (const side of ["LONG", "SHORT"]) for (const evidence of ["none", "old", "provisional", "confirmed"]) {
+  test(`${side} early AI EXIT requires new confirmed invalidation evidence: ${evidence}`, async t => {
+    const f = fixture(t, `early-exit-${side}-${evidence}`, { side });
+    const start = Date.now(), direction = side === "LONG" ? 1 : -1;
+    const timestamp = Math.floor(start / 60000) * 60000 - (evidence === "old" ? 60000 : 0);
+    f.market.timeframe = "1m";
+    f.market.history = evidence === "none" ? [] : [{ timestamp, open: 100, high: 102, low: 98, close: 100 + direction,
+      volume: 10, partial: false, confirmation: { status: evidence === "provisional" ? "PROVISIONAL" : "CONFIRMED" } }];
+    f.runtime.requestSummaryExitDecision = async () => ({ ok: true, decision: "EXIT", exitPrice: 100 + direction,
+      plan: tradingPlan(side), forecastInvalidated: true, invalidationCandleTimestamp: timestamp,
+      rationale: "新定K出现与原预测相反的结构失效" });
+    await f.tick(100 + direction, 56000);
+    await f.tick(100 + direction, 2000);
+    assert.equal(f.submitted.length, evidence === "confirmed" ? 1 : 0);
+    if (evidence === "confirmed") assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "AI_EXIT_NOW");
+    else assert.equal(f.task.summaryExitReviews[0].decision, "HOLD");
+  });
+}
+test("a fill outside the advisory zone binds the original target and starts holding time at the real fill", async t => {
+  const f = fixture(t, "fill-outside-advisory", { plan: false });
+  const now = Date.now();
+  f.market.account.positionSummaries[0].averagePrice = 101;
+  f.task.entryForecast = { pendingId: "filled-later", symbol: "A", action: "BUY", tradePlan: tradingPlan(),
+    observedAt: new Date(now - 120000).toISOString(), confirmedAt: new Date(now).toISOString() };
+  await f.tick(101);
+  assert.equal(f.task.summaryTradingPlans[0].plan.takeProfitPrice, 104);
+  assert.equal(f.task.summaryTradingPlans[0].maxHoldAt, new Date(now + 300000).toISOString());
+  assert.equal(f.submitted.length, 0);
 });
 test("a late observed fill keeps the original AI hard stop when entry validity elapsed and model is offline", async t => {
   const f = fixture(t, "late-fill-risk", { plan: false });
@@ -142,7 +192,7 @@ test("brief pullback recovery avoids soft exit; hard invalidation exits immediat
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "HARD_STOP");
 });
-test("positive total batch, profit peak and original deadline survive AI refresh and persistence", async t => {
+test("AI target, protected peak and original deadline survive refresh and persistence", async t => {
   const f = fixture(t, "persist-plan");
   await f.tick(103);
   const deadline = f.task.summaryTradingPlans[0].maxHoldAt;
@@ -153,10 +203,10 @@ test("positive total batch, profit peak and original deadline survive AI refresh
   assert.equal(saved.summaryTradingPlans[0].bestPrice, 103);
   assert.equal(saved.summaryTradingPlans[0].profitArmed, true);
   assert.equal(Object.hasOwn(saved, "tradingCosts"), false);
-  assert.equal(saved.summaryExitBatch.phase, "EXIT_ALL");
+  assert.equal(saved.summaryExitBatch, null);
   await f.tick(102.4, 2000);
   assert.equal(f.submitted.length, 1);
-  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "TOTAL_PROFIT");
+  assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "PROFIT_PROTECTION");
 });
 for (const change of ["stop", "average", "quantity"]) test(`late AI result cannot bind after ${change}`, async t => {
   const f = fixture(t, `late-${change}`, { plan: false });
@@ -296,7 +346,7 @@ test("summary parser rejects duplicate and loading rows without inventing fees",
 
 test("a failed leg does not block all other holdings and only that leg retries", async t => {
   const f = fixture(t, "portfolio-failure", { plan: false });
-  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("LONG", { symbol: "B", symbolName: "商品B", quantity: 1 })];
+  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("SHORT", { symbol: "B", symbolName: "商品B", quantity: 1, averagePrice: 96 })];
   f.market.books = [{ symbol: "B", symbolName: "商品B", observedAt: new Date(Date.now()).toISOString(),
     orderBook: { bids: [{ price: 98, volume: 100 }], asks: [{ price: 98, volume: 100 }] } }];
   f.runtime.observeExecutionMarket = async () => ({ ...f.market, observedAt: new Date(Date.now()).toISOString(),
@@ -317,7 +367,7 @@ test("a failed leg does not block all other holdings and only that leg retries",
 
 for (const gap of [2000, 6000]) test(`rotating quote collection combines all holdings only within freshness, gap ${gap}`, async t => {
   const f = fixture(t, `portfolio-quote-${gap}`, { plan: false });
-  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("LONG", { symbol: "B", symbolName: "商品B", quantity: 1 })];
+  f.market.account.positionSummaries = [row("LONG", { quantity: 1 }), row("SHORT", { symbol: "B", symbolName: "商品B", quantity: 1, averagePrice: 96 })];
   f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
   await f.tick(103);
   assert.equal(f.submitted.length, 0);

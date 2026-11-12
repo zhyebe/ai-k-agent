@@ -29,20 +29,20 @@ function fixture() {
   return { now, market, task, row, book, tick, hedge };
 }
 
-test("aggregate uses every actual quantity and does not mistake one winning leg for total profit", () => {
+test("single-direction floating profit does not replace the AI target", () => {
   const f = fixture();
   assert.equal(executableSummaryPortfolio(f.market, f.now).totalPnl, -1);
   assert.equal(f.tick(f.now).length, 0);
   f.market.account.positionSummaries[1].quantity = 1;
   const candidates = f.tick(f.now);
-  assert.equal(candidates.length, 2);
-  assert.ok(candidates.every(candidate => candidate.decision.exitReason === "TOTAL_PROFIT"));
-  assert.equal(candidates[1].decision.exitType, "STOP_LOSS");
+  assert.equal(candidates.length, 0);
+  assert.equal(f.task.summaryExitBatch, undefined);
   assert.equal(f.task.summaryTradingPlans, undefined);
 });
 
 test("positive total latches all exits even after the winner disappears and the remaining total turns negative", () => {
   const f = fixture();
+  f.hedge();
   f.market.account.positionSummaries[1].quantity = 1;
   f.tick(f.now);
   f.market.account.positionSummaries.shift();
@@ -56,11 +56,12 @@ test("positive total latches all exits even after the winner disappears and the 
 for (const fault of ["missing-book", "stale-book", "future-book", "depth", "unverified-account", "stale-account", "frozen", "duplicate", "unrepresented-position", "quantity-mismatch", "open-order"]) {
   test(`${fault} cannot establish an aggregate-profit exit`, () => {
     const f = fixture();
+    f.hedge();
     f.market.account.positionSummaries[1].quantity = 1;
     if (fault === "missing-book") f.market.books.pop();
     if (fault === "stale-book") f.market.books[1].observedAt = new Date(f.now - 5001).toISOString();
     if (fault === "future-book") f.market.books[1].observedAt = new Date(f.now + 1).toISOString();
-    if (fault === "depth") f.market.books[1].orderBook.bids[0].volume = 0;
+    if (fault === "depth") f.market.books[1].orderBook.asks[0].volume = 0;
     if (fault === "unverified-account") f.market.account.positionsVerified = false;
     if (fault === "stale-account") f.market.accountObservedAt = new Date(f.now - 5001).toISOString();
     if (fault === "frozen") f.market.account.positionSummaries[1].frozenQuantity = 1;
@@ -73,13 +74,23 @@ for (const fault of ["missing-book", "stale-book", "future-book", "depth", "unve
   });
 }
 
-test("all depth levels participate and a tiny positive value still triggers without a profit threshold", () => {
+test("executable profit alone cannot close a single-direction holding without its AI target", () => {
   const f = fixture();
   f.market.account.positionSummaries = [f.row("A", "LONG", 3, 100)];
   f.market.books[0].orderBook.bids = [{ price: 103, volume: 1 }, { price: 99, volume: 2 }];
   assert.equal(f.tick(f.now).length, 0);
   f.market.books[0].orderBook.bids[1].price = 100.00001;
-  assert.equal(f.tick(f.now).length, 1);
+  assert.equal(executableSummaryPortfolio(f.market, f.now).totalPnl, 0.00003);
+  assert.equal(f.tick(f.now).length, 0);
+});
+
+test("a persisted single-direction profit batch cannot override the original AI target after upgrade", () => {
+  const f = fixture();
+  f.task.summaryExitBatch = { id: "old-profit", phase: "EXIT_ALL", targets: f.market.account.positionSummaries.map(summary => ({ ...summary, role: "ALL" })) };
+  assert.equal(summaryRuleAuthorizationCurrent(f.task, f.market.account.positionSummaries[0],
+    { source: "USER_RULE", batchId: "old-profit", trigger: "TOTAL_PROFIT" }), false);
+  assert.equal(f.tick(f.now).length, 0);
+  assert.equal(f.task.summaryExitBatch.phase, "INVALIDATED");
 });
 
 test("display-only flash price cannot authorize a positive exit", () => {
@@ -181,6 +192,7 @@ test("one winner's profit decline is not hidden by a different winner's increase
 
 test("user rule authorization is bound to the current cohort and rejects changed holdings or retired batches", () => {
   const f = fixture();
+  f.hedge();
   f.market.account.positionSummaries[1].quantity = 1;
   const candidate = f.tick(f.now)[0];
   const authorization = candidate.decision.exitGuard.aiAuthorization;
