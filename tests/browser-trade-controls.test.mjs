@@ -817,7 +817,7 @@ test("fast observations rotate held instruments without collecting stale quotes 
 });
 
 for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"]) {
-  test(`${action} ${orderType} waits for real chart confirmation before clicking entry`, async t => {
+  test(`${action} ${orderType} waits through a stable wickless candle and enters as soon as a wick appears`, async t => {
     await page.reload();
     const sessionId = `fixed-entry-${action}-${orderType}`;
     await openBrowserPage({ sessionId, url: "https://smyw.haohandahan.cn/client/#/transcc", waitMs: 0 });
@@ -842,7 +842,12 @@ for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"
       now = minute + second * 1000;
       await observeExecutionMarket(task, connector);
     }
-    const confirmed = await submitSuggestionForm(input);
+    const stillFlashing = await submitSuggestionForm(input);
+    assert.equal(stillFlashing.code, "ENTRY_AWAITING_CONFIRMED_PRICE");
+    assert.deepEqual(await page.evaluate(() => window.entries), []);
+    now = minute + 57000;
+    await page.evaluate(() => { document.querySelector("#hqchart_kline").JSChart.JSChartContainer.SourceData.Data.at(-1).High = 101; });
+    const confirmed = await submitSuggestionForm({ ...input, entryGuard: { ...entryGuard(action, 100), requireConfirmedPrice: true } });
     assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
     assert.equal((await page.evaluate(() => window.entries)).length, 1);
   });
@@ -866,13 +871,14 @@ for (const action of ["BUY", "SELL"]) test(`${action} a new flash inside the con
   t.mock.method(Date, "now", () => now);
   await page.evaluate(timestamp => {
     const chart = document.createElement("div"); chart.id = "hqchart_kline";
-    const row = at => ({ Date: 20261112, timestamp: at, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+    const row = at => ({ Date: 20261112, timestamp: at, Open: 100, High: 101, Low: 99, Close: 100, Vol: 10 });
     chart.JSChart = { JSChartContainer: { Symbol: "DGKZ", Period: 4, SourceData: { Data: [row(timestamp - 60000), row(timestamp)] } } };
     document.body.append(chart);
     const original = window.enter;
     window.enter = side => {
       const candle = chart.JSChart.JSChartContainer.SourceData.Data.at(-1);
       candle.High = candle.Close = 110;
+      candle.Low = 100;
       original(side);
     };
   }, minute);
@@ -899,7 +905,7 @@ test("fast observations collect chart evidence and confirm a stable K without a 
   t.mock.method(Date, "now", () => now);
   await page.evaluate(timestamp => {
     const chart = document.createElement("div"); chart.id = "hqchart_kline";
-    const row = at => ({ Date: 20261019, timestamp: at, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+    const row = at => ({ Date: 20261019, timestamp: at, Open: 100, High: 101, Low: 99, Close: 100, Vol: 10 });
     chart.JSChart = { JSChartContainer: { Symbol: "DGKZ", Period: 4, SourceData: { Data: [row(timestamp - 60000), row(timestamp)] } } };
     document.body.append(chart);
   }, minute);

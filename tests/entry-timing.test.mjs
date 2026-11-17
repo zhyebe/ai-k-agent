@@ -87,9 +87,19 @@ for (const action of ['BUY', 'SELL']) test(`${action} AI entry submits without a
   assert.equal(f.task.decision.action, action);
 });
 for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
+  for (const wick of ['upper', 'lower']) test(`${automatic ? 'automatic' : 'manual'} ${action} enters on a normal ${wick} wick despite PROVISIONAL history`, async t => {
+    const f = fixture(t, `normal-wick-${automatic}-${action}-${wick}`, automatic, action);
+    f.market.history[0] = { ...f.market.history[0], high: wick === 'upper' ? 101 : 100,
+      low: wick === 'lower' ? 99 : 100, confirmation: { status: 'PROVISIONAL' } };
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal((automatic ? f.submissions : f.forms).length, 1);
+    assert.equal(f.task.decision.action, action);
+    assert.notEqual(f.task.pendingAction.awaitingConfirmedPrice, true);
+  });
   test(`${automatic ? 'automatic' : 'manual'} ${action} preserves AI direction during flash K and enters only after real confirmation`, async t => {
     const f = fixture(t, `flash-entry-${automatic}-${action}`, automatic, action);
-    f.market.history[0].confirmation = { status: 'PROVISIONAL' };
+    const normalCandle = f.market.history[0];
+    f.market.history = [{ ...normalCandle, high: 100, low: 100, confirmation: { status: 'PROVISIONAL' } }];
     f.market.flashK = { suspected: true, confirmed: false, price: 110, observedAt: Date.now() };
     await runAnalysis(f.task.id, '', { runtime: f.runtime });
     assert.equal(f.submissions.length, 0);
@@ -100,20 +110,44 @@ for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) {
     await runAnalysis(f.task.id, '', { runtime: f.runtime });
     assert.equal(f.analyses.length, 1, 'waiting must not lose or repeatedly regenerate the AI action');
     assert.equal(f.submissions.length, 0, 'event expiry does not establish a real fixed price');
-    const candle = f.market.history[0];
     f.market.history = [];
     f.market.flashK = null;
     await runAnalysis(f.task.id, '', { runtime: f.runtime });
     assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true, 'missing chart data must not release a deferred entry');
     assert.equal(f.submissions.length, 0);
-    f.market.history = [candle];
+    f.market.history = [{ ...normalCandle, confirmation: { status: 'PROVISIONAL', observed: true } }];
     f.market.flashK = { suspected: false, confirmed: true };
-    f.market.history[0].confirmation = { status: 'CONFIRMED' };
-    f.market.flashK.confirmed = true;
     await runAnalysis(f.task.id, '', { runtime: f.runtime });
     assert.equal((automatic ? f.submissions : f.forms).length, 1);
     assert.equal(f.analyses.length, 1);
     assert.equal((automatic ? f.submissions : f.forms)[0].action, action);
+  });
+}
+for (const automatic of [false, true]) for (const action of ['BUY', 'SELL']) for (const interruption of ['account-unverified', 'collection-failed']) {
+  test(`${automatic ? 'automatic' : 'manual'} ${action} deferred entry survives ${interruption} changing the displayed decision to HOLD`, async t => {
+    const f = fixture(t, `deferred-interruption-${automatic}-${action}-${interruption}`, automatic, action);
+    const normalCandle = f.market.history[0];
+    f.market.history = [{ ...normalCandle, high: 100, low: 100, confirmation: { status: 'PROVISIONAL' } }];
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.task.pendingAction.awaitingConfirmedPrice, true);
+    const originalPlan = f.task.pendingAction.tradePlan;
+    const originalObserve = f.runtime.observeMarket;
+    if (interruption === 'account-unverified') f.market.account.openOrdersVerified = false;
+    else f.runtime.observeMarket = async () => ({ ok: false, code: 'PAGE_NOT_READY', message: '页面暂未就绪' });
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(f.task.decision.action, 'HOLD');
+    f.market.account.openOrdersVerified = true;
+    f.runtime.observeMarket = originalObserve;
+    f.market.history = [{ ...normalCandle, confirmation: { status: 'PROVISIONAL', observed: true } }];
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    const orders = automatic ? f.submissions : f.forms;
+    assert.equal(orders.length, 1);
+    assert.equal(orders[0].action, action);
+    assert.equal(f.task.pendingAction.action, action);
+    assert.deepEqual(f.task.entryForecast.tradePlan, originalPlan);
+    assert.equal(f.analyses.length, 1);
+    await runAnalysis(f.task.id, '', { runtime: f.runtime });
+    assert.equal(orders.length, 1);
   });
 }
 for (const action of ['BUY', 'SELL']) test(`${action} flash appearing in final confirmation stays waiting and resumes without a duplicate`, async t => {

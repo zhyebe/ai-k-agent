@@ -612,14 +612,14 @@ function waitForConfirmedEntryPrice(task) {
   persistTask(task);
 }
 
-async function openPendingAction(task, { runtime, run, market = task.market, requireConfirmedPrice = false } = {}) {
-  if (!task || (task.decision?.action !== "BUY" && task.decision?.action !== "SELL")) {
+async function openPendingAction(task, { runtime, run, market = task.market, requireConfirmedPrice = false, decision = task.decision } = {}) {
+  if (!task || (decision?.action !== "BUY" && decision?.action !== "SELL")) {
     if (task) clearPendingAction(task);
     return null;
   }
   clearPendingActionTimer(task.id);
   archivePendingSubmission(task);
-  task.pendingAction = buildPendingAction({ ...task, market }, task.decision);
+  task.pendingAction = buildPendingAction({ ...task, market }, decision);
   if (requireConfirmedPrice && !task.pendingAction.exitType) {
     task.pendingAction.entryGuard = { ...task.pendingAction.entryGuard, requireConfirmedPrice: true };
   }
@@ -2485,7 +2485,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         && !entryRoundBlock(task, market, { pendingId: pendingEntry.id })) {
         const waiting = entryTimingBlock(decisionTargetBook(pendingEntry, market) || market, { requireConfirmed: true });
         if (waiting) waitForConfirmedEntryPrice(task);
-        else await openPendingAction(task, { runtime, run, market, requireConfirmedPrice: true });
+        else await openPendingAction(task, { runtime, run, market, requireConfirmedPrice: true,
+          decision: { ...pendingEntry, observedAt: pendingEntry.forecastObservedAt, runId: pendingEntry.decisionRunId } });
         assertCurrent();
         const message = task.pendingAction.message;
         task.status = "MONITORING";

@@ -443,7 +443,7 @@ if (stateLoadFailed) {
     if (!restoredState) {
       const content = (await readFile(new URL("../skills/dgkz-dgjj-entry-exit-analysis/SKILL.md", import.meta.url), "utf8")).trim();
       if (!content) throw new Error("BUNDLED_TRADING_SKILL_EMPTY");
-      const skill = { id: "skill_local_trading", ownerUserId: "local-user", title: "AI 趋势交易：入场、持仓与离场", kind: "expert", status: "APPROVED", version: "v1.0.11", tags: ["优先参考"], source: "应用内置", content, summary: "AI预测入场与目标，算法执行；闪K进出场均等待真实定价，持续观察真实报价风险，定K后重判", chunks: 0, createdAt: new Date().toISOString() };
+      const skill = { id: "skill_local_trading", ownerUserId: "local-user", title: "AI 趋势交易：入场、持仓与离场", kind: "expert", status: "APPROVED", version: "v1.0.13", tags: ["优先参考"], source: "应用内置", content, summary: "AI预测入场与目标，算法按双无影线识别闪K；真实观察到影线后重判进出场，正常K不因PROVISIONAL等待", chunks: 0, createdAt: new Date().toISOString() };
       await persistSkill(skill);
       state.skills.push(skill);
       indexSkill(skill);

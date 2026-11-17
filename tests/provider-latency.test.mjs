@@ -26,7 +26,9 @@ for (const apiFormat of ["chat", "responses", "anthropic", "gemini"]) {
     assert.equal(system.split("唯一当前交易流程").length - 1, 1);
     assert.match(system, /方向盈利概率仅作参考，不设概率门槛/);
     assert.match(system, /到达目标立即离场/);
-    assert.match(system, /闪K或PROVISIONAL期间所有离场等待/);
+    assert.match(system, /上下都没有影线/);
+    assert.match(system, /闪K期间所有离场等待/);
+    assert.match(system, /正常有影线K不因PROVISIONAL历史标签等待/);
     assert.match(system, /真实可成交报价的连续止损风险，不因新K重置/);
     assert.match(system, /定K仍越过普通止损就执行，硬止损命中直接执行/);
     assert.match(system, /下一根及随后1～3根K/);

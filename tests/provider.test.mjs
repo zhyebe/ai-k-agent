@@ -699,7 +699,9 @@ test("Anthropic and Gemini adapters send their native authentication and payload
     const prompt = seen[0].body.system;
     assert.match(prompt, /方向盈利概率仅作参考，不设概率门槛/);
     assert.match(prompt, /到达目标立即离场/);
-    assert.match(prompt, /闪K或PROVISIONAL期间所有离场等待/);
+    assert.match(prompt, /上下都没有影线/);
+    assert.match(prompt, /闪K期间所有离场等待/);
+    assert.match(prompt, /正常有影线K不因PROVISIONAL历史标签等待/);
     assert.match(prompt, /真实可成交报价的连续止损风险，不因新K重置/);
     assert.match(prompt, /定K仍越过普通止损就执行，硬止损命中直接执行/);
     assert.match(prompt, /Price response outranks static displayed depth/);

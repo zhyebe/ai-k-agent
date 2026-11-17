@@ -1,3 +1,5 @@
+import { candleWickState } from "./flash-k.mjs";
+
 export function normalizeMarketRegime(value) {
   const regime = String(value || "").trim().toUpperCase();
   return ["UP", "DOWN", "RANGE"].includes(regime) ? regime : "UNKNOWN";
@@ -18,8 +20,10 @@ export function hasDirectionalProbabilities(decision) {
 export function entryTimingBlock(market, { requireConfirmed = false } = {}) {
   const minute = market?.timeframes?.["1m"] || (market?.timeframe === "1m" ? market : null);
   const candle = minute?.history?.at(-1);
+  const shape = candleWickState(candle);
   const status = candle?.confirmation?.status || candle?.confirmation;
-  if ((requireConfirmed && status !== "CONFIRMED") || candle?.partial === true || status === "PROVISIONAL"
+  const observed = candle?.confirmation?.observed === true || status === "CONFIRMED";
+  if ((requireConfirmed && (shape !== "HAS_WICK" || !observed)) || candle?.partial === true || shape === "NO_WICKS"
     || market?.flashK?.confirmed === false
     || (market?.flashK?.suspected === true && market.flashK.confirmed !== true)) return "ENTRY_AWAITING_CONFIRMED_PRICE";
   return null;

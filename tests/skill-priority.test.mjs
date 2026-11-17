@@ -39,7 +39,9 @@ test("DGKZ/DGJJ priority skill reaches the model in full before other experience
   assert.match(content, /盈利侧最多观察60秒/);
   assert.match(content, /到达AI目标立即整行离场/);
   assert.match(content, /硬止损命中则直接执行/);
-  assert.match(content, /闪K或PROVISIONAL期间所有离场均等待/);
+  assert.match(content, /上下都没有影线/);
+  assert.match(content, /闪K期间所有离场均等待/);
+  assert.match(content, /有影线的正常K不因PROVISIONAL历史标签等待/);
   assert.match(content, /持仓汇总对应商品方向整行“转让”，一次提交整行数量/);
   assert.match(content, /持仓及当前委托全部核实清零才结束本轮/);
   assert.match(content, /未定 K 和闪 K 的瞬时 OHLC 以未确认盘中证据交给 AI/);

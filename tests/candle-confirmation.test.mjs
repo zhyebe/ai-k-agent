@@ -6,7 +6,7 @@ import { marketDataFingerprint } from "../server/market.mjs";
 import { entryTimingBlock } from "../server/entry-policy.mjs";
 
 const minute = Date.parse("2026-10-19T02:01:00Z");
-const candle = (close = 100) => ({ timestamp: minute, open: 100, high: Math.max(100, close), low: Math.min(100, close), close, volume: 10, partial: false });
+const candle = (close = 100) => ({ timestamp: minute, open: 100, high: Math.max(100, close) + 1, low: Math.min(100, close) - 1, close, volume: 10, partial: false });
 function observe(scope, second, rows = [candle()], instrument = "A") {
   return confirmObservedCandles(rows, { scope, instrument, timeframe: "1m", observedAt: new Date(minute + second * 1000).toISOString() });
 }
@@ -21,16 +21,25 @@ test("a display K needs continuous unchanged observations over five seconds afte
   assert.equal(market.history.length, 1);
 });
 
-test("flashing, disappearance, OHLCV edits and observation gaps restart confirmation", () => {
-  for (const scenario of ["price", "disappeared", "gap", "volume"]) {
+test("flashing, disappearance, price edits and observation gaps restart confirmation", () => {
+  for (const scenario of ["price", "disappeared", "gap"]) {
     observe(scenario, 50);
     observe(scenario, 52);
     if (scenario === "disappeared") observe(scenario, 54, []);
     else if (scenario === "price") observe(scenario, 54, [candle(105)]);
-    else if (scenario === "volume") observe(scenario, 54, [{ ...candle(), volume: 11 }]);
     assert.equal(observe(scenario, 58)[0].confirmation.status, "PROVISIONAL");
     assert.equal(observe(scenario, 120)[0].confirmation.status, "PROVISIONAL", "wall-clock age never confirms a tracked candidate");
   }
+});
+
+test("growing volume preserves continuous fixed-price confirmation and permits entry", () => {
+  let history;
+  for (const second of [50, 52, 54, 56, 58]) {
+    history = observe("price-stable-volume-growing", second, [{ ...candle(), volume: 10 + second }]);
+    assert.equal(history[0].confirmation.status, second >= 56 ? "CONFIRMED" : "PROVISIONAL");
+  }
+  assert.equal(history[0].volume, 68);
+  assert.equal(entryTimingBlock({ timeframe: "1m", history }, { requireConfirmed: true }), null);
 });
 
 test("cached observations and different sessions/instruments cannot supply stability evidence", () => {
@@ -41,12 +50,39 @@ test("cached observations and different sessions/instruments cannot supply stabi
   const cached = confirmObservedCandles([candle()], { scope: "cached", instrument: "A", timeframe: "1m",
     observedAt: new Date(minute + 56000).toISOString(), observe: false });
   assert.equal(cached[0].confirmation.status, "PROVISIONAL", "a fresh quote timestamp cannot refresh cached chart evidence");
+  assert.equal(cached[0].confirmation.observed, true, "the original unchanged observation is retained");
+});
+
+test("cached or unobserved wick data cannot release a deferred entry", () => {
+  const rows = [{ ...candle(105), high: 105, low: 100 }];
+  observe("cached-wick-recovery", 40, rows);
+  const cached = confirmObservedCandles([candle(105)], { scope: "cached-wick-recovery", instrument: "A", timeframe: "1m",
+    observedAt: new Date(minute + 42000).toISOString(), observe: false });
+  assert.equal(cached[0].confirmation.observed, false);
+  assert.equal(entryTimingBlock({ timeframe: "1m", history: cached }, { requireConfirmed: true }), "ENTRY_AWAITING_CONFIRMED_PRICE");
+  const current = observe("cached-wick-recovery", 42, [candle(105)]);
+  assert.equal(current[0].confirmation.observed, true);
+  assert.equal(current[0].confirmation.status, "PROVISIONAL");
+  assert.equal(entryTimingBlock({ timeframe: "1m", history: current }, { requireConfirmed: true }), null);
+  const unseen = confirmObservedCandles([candle(105)], { scope: "never-observed-wick", instrument: "A", timeframe: "1m",
+    observedAt: new Date(minute + 42000).toISOString(), observe: false });
+  assert.equal(unseen[0].confirmation.observed, false);
+  assert.equal(entryTimingBlock({ timeframe: "1m", history: unseen }, { requireConfirmed: true }), "ENTRY_AWAITING_CONFIRMED_PRICE");
 });
 
 test("a large genuine move can confirm; size alone does not classify flash K", () => {
   let result;
   for (const second of [50, 52, 54, 56]) result = observe("large-real", second, [candle(120)]);
   assert.equal(result[0].confirmation.status, "CONFIRMED");
+});
+
+test("a candle without both wicks cannot become fixed just because it stays unchanged", () => {
+  const rows = [{ ...candle(105), high: 105, low: 100 }];
+  for (const second of [50, 52, 54, 56, 58, 60, 62]) {
+    const history = observe("wickless-stable", second, rows);
+    assert.equal(history[0].confirmation.status, "PROVISIONAL");
+    assert.equal(entryTimingBlock({ timeframe: "1m", history }), "ENTRY_AWAITING_CONFIRMED_PRICE");
+  }
 });
 
 test("a newly seen last K remains provisional across the minute boundary", () => {
@@ -106,10 +142,11 @@ test("a transient price matching live quotes and ticks remains actionable intrab
   assert.equal(result.orderBook.bids[0].price, 105);
 });
 
-for (const price of [90, 110]) test(`unconfirmed sudden ${price < 100 ? 'down' : 'up'} move reaches AI without waiting for rebound`, () => {
+for (const price of [90, 110]) test(`wickless ${price < 100 ? 'down' : 'up'} candle waits until a fresh wick appears`, () => {
   const scope = `flash-${price}`;
-  const observeMarket = (second, close) => markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m',
-    observedAt: new Date(minute + second * 1000).toISOString(), history: [candle(close)] }, scope);
+  const observeMarket = (second, close, withWick = false) => markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m',
+    observedAt: new Date(minute + second * 1000).toISOString(),
+    history: [{ ...candle(close), ...(!withWick ? { high: Math.max(100, close), low: Math.min(100, close) } : {}) }] }, scope);
   observeMarket(40, 100);
   const market = observeMarket(42, price);
   assert.equal(market.history[0].confirmation.status, 'PROVISIONAL');
@@ -120,17 +157,16 @@ for (const price of [90, 110]) test(`unconfirmed sudden ${price < 100 ? 'down' :
   assert.equal(result.historyCount, 0);
   assert.equal(result.intrabarEvidence.transientEvent.price, price);
   assert.equal(result.flashK.excludeFromAnalysis, false);
-  const otherSession = markObservedMarketCandles({ ...market }, `${scope}-other`);
+  const otherSession = markObservedMarketCandles({ ...market, history: [candle(price)] }, `${scope}-other`);
   assert.equal(otherSession.flashK.suspected, false, 'sessions must not borrow another session flash evidence');
   const withoutChart = markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m', observedAt: new Date(minute + 44000).toISOString() }, scope);
   assert.equal(withoutChart.flashK.price, price, 'temporary chart absence retains the observed flash event');
   const expiredWithoutChart = markObservedMarketCandles({ symbol: 'FLASH', timeframe: '1m',
     observedAt: new Date(minute + 74000).toISOString() }, scope);
-  assert.equal(expiredWithoutChart.flashK.suspected, false);
+  assert.equal(expiredWithoutChart.flashK.suspected, true);
   assert.equal(entryTimingBlock(expiredWithoutChart), "ENTRY_AWAITING_CONFIRMED_PRICE", "event expiry cannot supply confirmation");
-  let stable;
-  for (const second of [76, 78, 80, 82]) stable = observeMarket(second, price);
-  assert.equal(stable.history[0].confirmation.status, 'CONFIRMED', 'sustained genuine move can become confirmed');
-  assert.equal(stable.flashK.confirmed, true);
-  assert.equal(entryTimingBlock(stable), null);
+  const normal = observeMarket(76, price, true);
+  assert.equal(normal.history[0].confirmation.status, 'PROVISIONAL', 'history confirmation remains separate from execution timing');
+  assert.equal(normal.flashK.confirmed, true);
+  assert.equal(entryTimingBlock(normal, { requireConfirmed: true }), null, 'a fresh visible wick releases the saved entry without another timer');
 });

@@ -1,4 +1,4 @@
-import { detectFlashK } from "./flash-k.mjs";
+import { candleWickState, detectFlashK } from "./flash-k.mjs";
 
 // Observation evidence belongs to a browser session and instrument, never to
 // the model or the wall clock alone. Re-reading a cached snapshot adds no time.
@@ -23,8 +23,9 @@ export function confirmObservedCandles(history, { scope, instrument, timeframe =
     const printAt = Math.floor(timestamp / MINUTE) * MINUTE + 50000;
     const prior = records.get(timestamp);
     // Backfilled, completed history is distinct from a newly observed display K.
-    if (!prior && index < history.length - 1 && printAt < Math.floor(now / MINUTE) * MINUTE) return candle;
-    const signature = JSON.stringify([candle.open, candle.high, candle.low, candle.close, candle.volume, candle.partial]);
+    if (!prior && index < history.length - 1 && printAt < Math.floor(now / MINUTE) * MINUTE
+      && candleWickState(candle) === "HAS_WICK") return candle;
+    const signature = JSON.stringify([candle.open, candle.high, candle.low, candle.close, candle.partial]);
     let record = prior;
     if (observe && now > (previous?.at ?? -Infinity)) {
       const continuous = prior?.present && prior.signature === signature && (prior.confirmed || now - prior.lastAt <= STABILITY_MS);
@@ -37,10 +38,12 @@ export function confirmObservedCandles(history, { scope, instrument, timeframe =
     const stableSince = Math.max(record?.firstAt ?? now, printAt);
     const validOhlc = [candle.open, candle.high, candle.low, candle.close].every(value => Number.isFinite(value) && value > 0)
       && candle.high >= Math.max(candle.open, candle.close) && candle.low <= Math.min(candle.open, candle.close) && candle.high >= candle.low;
-    const confirmed = validOhlc && timestamp <= now && record?.present && record.signature === signature && candle.partial !== true
+    const confirmed = validOhlc && candleWickState(candle) === "HAS_WICK" && timestamp <= now && record?.present && record.signature === signature && candle.partial !== true
       && now >= record.lastAt && (record.confirmed || (now - record.lastAt <= STABILITY_MS && record.lastAt - stableSince > STABILITY_MS));
     if (observe && record && now >= record.lastAt) record.confirmed = Boolean(confirmed);
-    return { ...candle, confirmation: { status: confirmed ? "CONFIRMED" : "PROVISIONAL", firstObservedAt: record?.firstAt ?? now, lastObservedAt: record?.lastAt ?? now } };
+    return { ...candle, confirmation: { status: confirmed ? "CONFIRMED" : "PROVISIONAL",
+      observed: Boolean(record?.present && record.signature === signature),
+      firstObservedAt: record?.firstAt ?? now, lastObservedAt: record?.lastAt ?? now } };
   });
   observations.set(key, { at: observe ? Math.max(previous?.at ?? -Infinity, now) : previous?.at ?? -Infinity,
     touchedAt: Math.max(previous?.touchedAt ?? -Infinity, now), records });

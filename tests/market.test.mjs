@@ -85,16 +85,56 @@ test("浩瀚分时行单独解析为逐笔数据", () => {
   assert.deepEqual(tick, { timestamp: 1700000000000, price: 103, volume: 25, referencePrice: 100, averagePrice: 102, flag: "1" });
 });
 
-test("未定K突然上拉即识别闪K，回弹证据继续保留", () => {
-  const base = (price, timestamp) => ({ timestamp, open: price, high: price, low: price, close: price, volume: 1, confirmation: { status: "PROVISIONAL" } });
-  const symbol = `FLASH-${Date.now()}`;
+for (const [name, prices, flash] of [
+  ["阳线双无影线", [100, 105, 100, 105], true],
+  ["阴线双无影线", [105, 105, 100, 100], true],
+  ["平价双无影线", [100, 100, 100, 100], true],
+  ["只有上影线", [100, 106, 100, 105], false],
+  ["只有下影线", [100, 105, 99, 105], false],
+  ["上下都有影线", [100, 106, 99, 105], false],
+  ["小数短影线", [100, 105.01, 100, 105], false],
+]) test(`${name}按真实OHLC识别闪K，不依赖跳价或PROVISIONAL标签`, () => {
   const t0 = 1_700_000_000_000;
-  assert.equal(detectFlashK({ symbol, timeframe: "1m", history: [base(100, t0)], latest: { price: 100 }, now: t0 }).suspected, false);
-  assert.equal(detectFlashK({ symbol, timeframe: "1m", history: [base(105, t0 + 5000)], latest: { price: 105 }, now: t0 + 5000 }).suspected, true);
-  const reverted = detectFlashK({ symbol, timeframe: "1m", history: [base(100, t0 + 9000)], latest: { price: 100 }, now: t0 + 9000 });
-  assert.equal(reverted.suspected, true);
-  assert.equal(reverted.price, 105);
-  assert.equal(reverted.excludeFromAnalysis, false);
+  const [open, high, low, close] = prices;
+  for (const status of ["PROVISIONAL", "CONFIRMED"]) {
+    const result = detectFlashK({ scope: `wick-shape-${name}-${status}`, timeframe: "1m", now: t0,
+      history: [{ timestamp: t0, open, high, low, close, confirmation: { status } }] });
+    assert.equal(result.suspected, flash);
+    if (flash) {
+      assert.equal(result.reason, "NO_UPPER_OR_LOWER_WICK");
+      assert.equal(result.price, close);
+      assert.equal(result.excludeFromAnalysis, false);
+    }
+  }
+});
+
+test("带影线的大幅跳价、回归及逐笔极值不误判闪K", () => {
+  const t0 = 1_700_000_000_000;
+  const scope = "genuine-wick-price-change";
+  for (const [index, close] of [100, 110, 100].entries()) {
+    const now = t0 + index * 2000;
+    const result = detectFlashK({ scope, timeframe: "1m", now,
+      history: [{ timestamp: t0, open: 100, high: Math.max(100, close) + 1, low: 99, close, confirmation: { status: "PROVISIONAL" } }],
+      ticks: [{ timestamp: now - 2000, price: 100 }, { timestamp: now - 1000, price: 110 }, { timestamp: now, price: 100 }] });
+    assert.equal(result.suspected, false);
+  }
+});
+
+test("闪K不因超时、旧K、缓存复读或缺少OHLC解除，真实新影线才解除", () => {
+  const t0 = 1_700_000_000_000;
+  const input = { scope: "wickless-wait-evidence", timeframe: "1m",
+    history: [{ timestamp: t0, open: 100, high: 105, low: 100, close: 105 }] };
+  assert.equal(detectFlashK({ ...input, now: t0 }).suspected, true);
+  assert.equal(detectFlashK({ ...input, now: t0 + 60000 }).suspected, true);
+  const normal = [{ ...input.history[0], high: 106 }];
+  assert.equal(detectFlashK({ ...input, history: normal, observe: false, now: t0 + 61000 }).confirmed, false);
+  assert.equal(detectFlashK({ ...input, history: normal, now: t0 + 59000 }).confirmed, false);
+  assert.equal(detectFlashK({ ...input, history: [{ ...normal[0], timestamp: t0 - 60000 }], now: t0 + 62000 }).confirmed, false);
+  assert.equal(detectFlashK({ ...input, history: [], now: t0 + 64000 }).confirmed, false);
+  assert.equal(detectFlashK({ ...input, history: [{ ...normal[0], low: null }], now: t0 + 66000 }).confirmed, false);
+  const fixed = detectFlashK({ ...input, history: normal, now: t0 + 68000 });
+  assert.equal(fixed.confirmed, true);
+  assert.equal(fixed.suspected, false);
 });
 
 test("单次 ATR 大波动没有连续消失证据，不判定为闪K", () => {

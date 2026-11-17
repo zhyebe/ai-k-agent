@@ -280,7 +280,7 @@ for (const side of ['LONG', 'SHORT']) for (const insideDialog of [false, true]) 
   t.mock.method(Date, 'now', () => now);
   await page.evaluate(({ minute, insideDialog }) => {
    const chart = document.createElement('div'); chart.id = 'hqchart_kline';
-   const row = timestamp => ({ timestamp, Date: 20261112, Open: 100, High: 100, Low: 100, Close: 100, Vol: 10 });
+   const row = timestamp => ({ timestamp, Date: 20261112, Open: 100, High: insideDialog ? 101 : 100, Low: insideDialog ? 99 : 100, Close: 100, Vol: 10 });
    chart.JSChart = { JSChartContainer: { Symbol: 'DGKZ', Period: 4, SourceData: { Data: [row(minute - 60000), row(minute)] } } };
    document.body.append(chart);
    if (insideDialog) {
@@ -288,6 +288,7 @@ for (const side of ['LONG', 'SHORT']) for (const insideDialog of [false, true]) 
     window.summaryTransfer = (...args) => {
      chart.JSChart.JSChartContainer.SourceData.Data.at(-1).High = 110;
      chart.JSChart.JSChartContainer.SourceData.Data.at(-1).Close = 110;
+     chart.JSChart.JSChartContainer.SourceData.Data.at(-1).Low = 100;
      transfer(...args);
     };
    }
@@ -309,6 +310,11 @@ for (const side of ['LONG', 'SHORT']) for (const insideDialog of [false, true]) 
   if (!insideDialog) {
    value.exitGuard.requireConfirmedPrice = true;
    for (const second of [52, 54, 56]) await sample(second);
+   const stillFlashing = await submitSuggestionForm(value);
+   assert.equal(stillFlashing.code, 'EXIT_AWAITING_CONFIRMED_PRICE');
+   assert.deepEqual(await page.evaluate(() => window.summaryExits), []);
+   now = minute + 57000;
+   await page.evaluate(() => { document.querySelector('#hqchart_kline').JSChart.JSChartContainer.SourceData.Data.at(-1).High = 101; });
    const fixed = await submitSuggestionForm(value);
    assert.equal(fixed.ok, true, JSON.stringify(fixed));
    assert.equal((await page.evaluate(() => window.summaryExits)).length, 1);

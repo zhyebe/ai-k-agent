@@ -114,7 +114,7 @@ for (const side of ["LONG", "SHORT"]) for (const evidence of ["none", "old", "pr
     await f.tick(100 + direction, 2000);
     assert.equal(f.submitted.length, evidence === "confirmed" ? 1 : 0);
     if (evidence === "confirmed") assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "AI_EXIT_NOW");
-    else if (evidence === "provisional") assert.equal(f.task.exitMonitor.status, "AWAITING_CONFIRMED_PRICE");
+    else if (evidence === "provisional") assert.equal(f.task.exitMonitor.status, "WATCHING");
     else assert.equal(f.task.summaryExitReviews[0].decision, "HOLD");
   });
 }
@@ -266,14 +266,14 @@ for (const side of ["LONG", "SHORT"]) test(`${side} continuous real quote breach
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "STOP_LOSS");
 });
-for (const side of ["LONG", "SHORT"]) test(`${side} new provisional minutes cannot repeatedly erase a continuous real stop breach`, async t => {
+for (const side of ["LONG", "SHORT"]) test(`${side} new wickless minutes cannot repeatedly erase a continuous real stop breach`, async t => {
   const f = fixture(t, `stop-across-minute-pricing-${side}`, { side });
   f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
   f.market.timeframe = "1m";
   for (let seconds = 0; seconds <= 120; seconds += 2) {
     const elapsed = seconds ? 2000 : 0;
     const confirmed = seconds % 60 >= 56;
-    f.market.history = [{ ...fixedCandle(tradingPlan(side)),
+    f.market.history = [{ ...fixedCandle(tradingPlan(side)), ...(!confirmed ? { high: 100, low: 100 } : {}),
       confirmation: { status: confirmed ? "CONFIRMED" : "PROVISIONAL", lastObservedAt: Date.now() + elapsed } }];
     await f.tick(side === "LONG" ? 98 : 102, elapsed);
     if (!confirmed && seconds < 56) assert.equal(f.submitted.length, 0);
@@ -281,6 +281,19 @@ for (const side of ["LONG", "SHORT"]) test(`${side} new provisional minutes cann
   assert.equal(f.submitted.length, 1);
   assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, "STOP_LOSS");
 });
+for (const side of ["LONG", "SHORT"]) for (const trigger of ["TAKE_PROFIT", "HARD_STOP", "MAX_HOLD"]) {
+  test(`${side} ${trigger} on a candle with a wick does not wait for PROVISIONAL history confirmation`, async t => {
+    const f = fixture(t, `normal-wick-exit-${side}-${trigger}`, { side });
+    f.runtime.requestSummaryExitDecision = async () => { throw Error("MODEL_OFFLINE"); };
+    f.market.timeframe = "1m";
+    f.market.history = [{ ...fixedCandle(tradingPlan(side)), confirmation: { status: "PROVISIONAL", lastObservedAt: Date.now() } }];
+    const direction = side === "LONG" ? 1 : -1;
+    await f.tick(100 + direction * (trigger === "TAKE_PROFIT" ? 4 : trigger === "HARD_STOP" ? -5 : 0),
+      trigger === "MAX_HOLD" ? 301000 : 0);
+    assert.equal(f.submitted.length, 1);
+    assert.equal(f.submitted[0].exitGuard.aiAuthorization.trigger, trigger);
+  });
+}
 for (const side of ["LONG", "SHORT"]) for (const trigger of ["TAKE_PROFIT", "HARD_STOP", "MAX_HOLD"]) {
   test(`${side} ${trigger} waits across flash expiry and restart, then reevaluates the fixed price`, async t => {
     const f = fixture(t, `fixed-exit-${side}-${trigger}`, { side });
