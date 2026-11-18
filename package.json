@@ -1,6 +1,6 @@
 {
   "name": "axiom-agent",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "private": true,
   "description": "Axiom Agent standalone desktop workspace",
   "homepage": "https://github.com/zhyebe/ai-k-agent",
