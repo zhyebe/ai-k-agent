@@ -15,6 +15,7 @@ import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan, deferSummaryExitUntilConfirmed } from "./summary-exit-policy.mjs";
 import { matchesInstrument, normalizeTradingPlan, profitProtectionFor } from "./trading-plan.mjs";
+import { algorithmEntryDecision, algorithmHoldingPlan } from "./algorithm-strategy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -180,7 +181,7 @@ function isAutoTakeover(task, decision = task?.decision) {
 function pendingWaitMessage(task, { auto = false } = {}) {
   if (auto && isLiveTask(task)) return "全自动接管：分析通过后直接下单或离场，持续核实持仓";
   if (auto) return "全自动接管：分析通过后直接记录，观察模式不会下单";
-  if (isLiveTask(task)) return "手动入场：AI 只填表，请在目标页点击入场按钮；成交后程序监控持仓汇总离场";
+  if (isLiveTask(task)) return "手动入场：请在目标页点击入场按钮；成交后程序监控持仓汇总离场";
   return "请确认建议；观察模式不会下单";
 }
 
@@ -450,6 +451,7 @@ export function profitSignalTier(value) {
 }
 
 export function profitSignalLabel(tier) {
+  if (tier === "ALGORITHM") return "短线价格计划";
   return ({ AI_RECOGNITION: "AI 趋势决策", EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示" })[tier] || "观望";
 }
 
@@ -475,7 +477,7 @@ function chosenSideProbability(decision) {
 }
 
 function signalTierForDecision(decision) {
-  return ["BUY", "SELL"].includes(decision?.action) ? "AI_RECOGNITION" : "HOLD";
+  return ["BUY", "SELL"].includes(decision?.action) ? (decision.decisionSource === "ALGORITHM" ? "ALGORITHM" : "AI_RECOGNITION") : "HOLD";
 }
 
 export function meetsOrderBoundary(decision) {
@@ -492,6 +494,7 @@ export function applyEntryBoundary(decision, market = {}) {
 }
 
 export function enforceProfitProbability(decision) {
+  if (decision?.decisionSource === "ALGORITHM") return { ...decision, signalTier: signalTierForDecision(decision) };
   const next = {
     ...decision,
     directionalProbabilitiesComplete: decision?.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision),
@@ -512,11 +515,12 @@ export function buildPendingAction(task, decision, { now = Date.now(), replacePe
   const decisionProbability = chosenSideProbability(decision);
   const signalTier = decision.signalTier || signalTierForDecision(decision);
   const signalLabel = profitSignalLabel(signalTier);
-  const probabilityLabel = decision.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision)
+  const probabilityLabel = decision.decisionSource === "ALGORITHM" ? "本机算法预测" : decision.directionalProbabilitiesComplete !== false && hasDirectionalProbabilities(decision)
     ? `获利概率 ${profitProbabilityLabel(decisionProbability)}%，仅供参考` : "概率未完整提供，不影响AI决定";
   return {
     id: `pending_${now}_${Math.random().toString(36).slice(2, 8)}`,
     decisionRunId: decision.runId || null,
+    decisionSource: decision.decisionSource,
     entryPurpose: "NORMAL",
     action,
     orderType: decision.orderType || "MARKET",
@@ -606,7 +610,8 @@ function waitForConfirmedEntryPrice(task) {
   task.pendingAction = { ...task.pendingAction, status: "WAITING", source: null,
     awaitingConfirmedPrice: true, formFilled: false, formSubmitBlocked: true,
     entryGuard: { ...task.pendingAction.entryGuard, requireConfirmedPrice: true },
-    message: "AI入场方向已保留；当前闪K或未定价，等待真实定K后执行，不提交订单" };
+    message: task.pendingAction.decisionSource === "ALGORITHM" ? "闪K或未定价，恢复后用新报价重算入场计划"
+      : "AI入场方向已保留；当前闪K或未定价，等待真实定K后执行，不提交订单" };
   setNextPoll(task, 2000);
   task.nextTrigger = task.pendingAction.message;
   persistTask(task);
@@ -625,6 +630,7 @@ async function openPendingAction(task, { runtime, run, market = task.market, req
   }
   if (!task.pendingAction.exitType) task.entryForecast = {
     pendingId: task.pendingAction.id, action: task.pendingAction.action, tradePlan: task.pendingAction.tradePlan,
+    decisionSource: task.pendingAction.decisionSource,
     forecastHorizon: task.pendingAction.forecastHorizon, observedAt: task.pendingAction.forecastObservedAt,
     symbol: task.pendingAction.targetSymbol, symbolName: task.pendingAction.targetSymbolName, instrumentId: task.pendingAction.targetInstrumentId,
     confirmedAt: null,
@@ -638,7 +644,7 @@ async function openPendingAction(task, { runtime, run, market = task.market, req
   }
   const sessionId = task.target?.browserSessionId || `task:${task.id}`;
   const automatic = isAutoTakeover(task, task.pendingAction);
-  if (!automatic) try {
+  if (!automatic && (isLiveTask(task) || decision.decisionSource !== "ALGORITHM")) try {
     const filled = await runtime.fillSuggestionForm({
       sessionId,
       action: task.pendingAction.action,
@@ -655,6 +661,11 @@ async function openPendingAction(task, { runtime, run, market = task.market, req
     });
     if (filled?.code === "ENTRY_AWAITING_CONFIRMED_PRICE" && filled.submitted !== true) {
       waitForConfirmedEntryPrice(task);
+      return task.pendingAction;
+    }
+    if (decision.decisionSource === "ALGORITHM" && !filled?.filled && filled?.submitted !== true) {
+      clearPendingAction(task, { persist: false });
+      task.pendingAction.message = filled?.message || filled?.code || "入场表单未填写";
       return task.pendingAction;
     }
     task.pendingAction.formFilled = filled?.filled === true && filled?.submitted !== true;
@@ -877,6 +888,7 @@ function reconcilePositionAction(task, market, pending) {
     const observed = pendingEntrySummaryQuantity(market, pending);
     if (observed !== null && observed > pending.baselineSummaryQty) task.entryForecast = {
       pendingId: pending.id, action: pending.action, tradePlan: pending.tradePlan, forecastHorizon: pending.forecastHorizon,
+      decisionSource: pending.decisionSource,
       observedAt: pending.forecastObservedAt,
       confirmedAt: task.entryForecast?.pendingId === pending.id && task.entryForecast.confirmedAt || accountObservedAt,
       symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId,
@@ -897,6 +909,7 @@ function reconcilePositionAction(task, market, pending) {
     : addedPositions ? addedPositions.reduce((sum, item) => sum + item.added, 0) >= quantity : observed >= baseline + quantity;
   if (!pending.exitType && observed > baseline) task.entryForecast = {
     pendingId: pending.id, action: pending.action, tradePlan: pending.tradePlan, forecastHorizon: pending.forecastHorizon,
+    decisionSource: pending.decisionSource,
     observedAt: pending.forecastObservedAt,
     confirmedAt: task.entryForecast?.pendingId === pending.id && task.entryForecast.confirmedAt || market.observedAt,
     symbol: pending.targetSymbol, symbolName: pending.targetSymbolName, instrumentId: pending.targetInstrumentId,
@@ -1052,6 +1065,10 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   const task = getTask(taskId);
   if (!task) throw new Error("TASK_NOT_FOUND");
   if (task.pendingAction?.status !== "WAITING") throw new Error("PENDING_ACTION_NOT_FOUND");
+  if (!task.pendingAction.exitType && (task.pendingAction.decisionSource || "AI") !== (task.decisionSource || "AI")) {
+    clearPendingAction(task);
+    throw new Error("DECISION_SOURCE_CHANGED");
+  }
   const exitGuard = task.pendingAction.exitGuard;
   if (isLiveTask(task) && task.pendingAction.exitType && (!task.pendingAction.targetSummary || !exitGuard?.summary)) {
     task.pendingAction.status = "CANCELLED";
@@ -1098,13 +1115,13 @@ export async function confirmPendingAction(taskId, { source = "manual_confirm", 
   try {
     clearPendingActionTimer(task.id);
     const actionLabel = pendingActionLabel(task.pendingAction);
-    const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "", providerId: task.providerId || "" });
+    const tools = resolveRuntime(runtime, { userId: task.ownerUserId || "", providerId: task.decisionSource === "ALGORITHM" ? "" : task.providerId || "" });
     if (isLiveTask(task) && !isAutomaticAction(task)) {
       task.pendingAction = {
         ...task.pendingAction,
         status: "AWAITING_FILL",
         source: "manual_browser",
-        message: "手动入场由用户在目标页提交；AI 继续监控持仓，成交后自动判断离场",
+        message: "手动入场由用户在目标页提交，程序核实成交并监控离场",
       };
       task.nextTrigger = task.pendingAction.message;
       persistTask(task);
@@ -1416,7 +1433,7 @@ function monitoringIntent(task) {
 export function monitoringPollIntervalMs(task) {
   const configured = Number(process.env.MONITOR_POLL_INTERVAL_MS || 0);
   if (Number.isFinite(configured) && configured > 0) return Math.min(MAX_MONITOR_POLL_MS, Math.max(1000, configured));
-  return DEFAULT_MONITOR_POLL_MS;
+  return task?.decisionSource === "ALGORITHM" ? 2000 : DEFAULT_MONITOR_POLL_MS;
 }
 
 function latestPrice(market) {
@@ -2363,11 +2380,39 @@ async function cancelCurrentOrders(task, market, connector, run, runtime, assert
   return cancellation;
 }
 
+async function analyzeAlgorithmMarket(task, market, connector, run, runtime, assertCurrent) {
+  const books = monitoredBooks(market);
+  const quantity = entryQuantityForTask(task);
+  const now = Date.now();
+  const results = books.map(book => algorithmEntryDecision(book, { quantity, now }));
+  const selectedIndex = results.findIndex(result => result.action !== "HOLD");
+  if (selectedIndex >= 0) return { decision: results[selectedIndex], market };
+  const staleIndex = results.findIndex((result, index) => result.riskFlags.includes("ENTRY_QUOTE_OR_DEPTH_UNVERIFIED")
+    || (result.riskFlags.includes("ENTRY_AWAITING_CONFIRMED_PRICE") && now - Date.parse(books[index].observedAt) > 5000));
+  if (staleIndex < 0) return { decision: results.find(result => result.tradePlan) || results[0], market };
+  const book = books[staleIndex];
+  const snapshot = await observeWithLoginRecovery(task, connector, run, runtime,
+    () => runtime.observeExecutionMarket(task, connector, { accountScope: "full", target: {
+      symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId,
+    } }), assertCurrent);
+  assertCurrent();
+  const executionBook = snapshot?.ok && positionMarketSnapshot(snapshot, book);
+  if (!executionBook) return { decision: results[staleIndex], market };
+  const refreshedMarket = { ...market, account: snapshot.account, accountObservedAt: snapshot.accountObservedAt,
+    books: books.map((item, index) => index === staleIndex ? executionBook : item) };
+  if (isLiveTask(task)) {
+    const reason = entryRoundBlock(task, snapshot);
+    if (reason) return { decision: { ...results[staleIndex], riskFlags: [reason],
+      analysisSummary: "最新账户状态未允许开启新一轮入场" }, market: refreshedMarket };
+  }
+  return { decision: algorithmEntryDecision(book, { executionBook, quantity }), market: refreshedMarket };
+}
+
 export async function runAnalysis(taskId, providerId = "", { trigger = "manual", userId = "", skipIfUnchanged = false, monitorRecentOnly = false, runtime: runtimeOverrides = {} } = {}) {
   const existing = getTask(taskId);
   if (!existing) throw new Error("TASK_NOT_FOUND");
   const resolvedUserId = userId || existing.ownerUserId || "";
-  if (desktopAiRequired() && !hasDesktopAi(resolvedUserId) && typeof runtimeOverrides.requestDecision !== "function") {
+  if (existing.decisionSource !== "ALGORITHM" && desktopAiRequired() && !hasDesktopAi(resolvedUserId) && typeof runtimeOverrides.requestDecision !== "function") {
     throw new Error("DESKTOP_AI_OFFLINE");
   }
   if (pauseForPendingAction(existing) && trigger !== "manual") {
@@ -2381,7 +2426,9 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     notifyCycleIdle(taskId);
     throw new Error("TASK_NOT_FOUND");
   }
-  const runtime = resolveRuntime(runtimeOverrides, { userId: resolvedUserId, providerId: providerId || existing.providerId || "" });
+  const algorithm = task.decisionSource === "ALGORITHM";
+  const decisionLabel = algorithm ? "算法" : "AI";
+  const runtime = resolveRuntime(runtimeOverrides, { userId: resolvedUserId, providerId: algorithm ? "" : providerId || existing.providerId || "" });
   const run = startAgentRun(taskId, { trigger });
   const generation = taskGeneration(task);
   const assertCurrent = () => assertCycleCurrent(task, generation);
@@ -2414,6 +2461,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         if (Number(continued.submittedPrice) > 0) task.pendingAction.submittedPrice = Number(continued.submittedPrice);
       } else if (continued?.code === "ENTRY_AWAITING_CONFIRMED_PRICE" && continued.confirmed !== true) {
         waitForConfirmedEntryPrice(task);
+      } else if (algorithm && continued?.confirmed !== true && ["ALGORITHM_ENTRY_PRICE_MOVED", "ALGORITHM_ENTRY_EXPIRED"].includes(continued?.code)) {
+        clearPendingAction(task);
       }
     }
 
@@ -2443,7 +2492,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       && !task.pendingAction.entrustedOrderIds?.length
       && Date.parse(market.observedAt) > Date.parse(task.decision?.observedAt || task.pendingAction.createdAt) + Number(task.decision?.ttlSec || 300) * 1000) {
       task.pendingAction.status = "CANCELLED";
-      task.pendingAction.message = "未提交入场建议已过期，重新请求AI判断";
+      task.pendingAction.message = `未提交入场建议已过期，重新由${decisionLabel}判断`;
       task.lastAnalyzedFingerprint = "";
     }
     syncTaskMetricsFromMarket(task, market);
@@ -2485,24 +2534,27 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         && !entryRoundBlock(task, market, { pendingId: pendingEntry.id })) {
         const waiting = entryTimingBlock(decisionTargetBook(pendingEntry, market) || market, { requireConfirmed: true });
         if (waiting) waitForConfirmedEntryPrice(task);
+        else if (algorithm) clearPendingAction(task, { persist: false });
         else await openPendingAction(task, { runtime, run, market, requireConfirmedPrice: true,
           decision: { ...pendingEntry, observedAt: pendingEntry.forecastObservedAt, runId: pendingEntry.decisionRunId } });
         assertCurrent();
-        const message = task.pendingAction.message;
-        task.status = "MONITORING";
-        completeWorkflow(task, "analyze", "沿用已明确的AI入场方向");
-        completeWorkflow(task, "action", message);
-        finishAgentRun(run.id, { status: "skipped", action: pendingEntry.action,
-          route: waiting ? "ENTRY_AWAITING_CONFIRMED_PRICE" : "CONFIRMED_PRICE_ENTRY", code: waiting || "CONFIRMED_PRICE_ENTRY" });
-        setNextPoll(task, 2000);
-        task.nextTrigger = message;
-        persistTask(task);
-        return { task, market, run, skipped: true, reason: waiting || "CONFIRMED_PRICE_ENTRY", analysisTriggered: false };
+        if (waiting || !algorithm) {
+          const message = task.pendingAction.message;
+          task.status = "MONITORING";
+          completeWorkflow(task, "analyze", algorithm ? "等待正常定价后重算入场" : "沿用已明确的AI入场方向");
+          completeWorkflow(task, "action", message);
+          finishAgentRun(run.id, { status: "skipped", action: pendingEntry.action,
+            route: waiting ? "ENTRY_AWAITING_CONFIRMED_PRICE" : "CONFIRMED_PRICE_ENTRY", code: waiting || "CONFIRMED_PRICE_ENTRY" });
+          setNextPoll(task, 2000);
+          task.nextTrigger = message;
+          persistTask(task);
+          return { task, market, run, skipped: true, reason: waiting || "CONFIRMED_PRICE_ENTRY", analysisTriggered: false };
+        }
       }
       const roundBlock = entryRoundBlock(task, market);
       if (roundBlock) {
         task.status = "MONITORING";
-        const message = ({ ROUND_HOLDING: "本轮持仓中；独立监控AI目标、利润保护与止损，清零后开始下一轮",
+        const message = ({ ROUND_HOLDING: `本轮持仓中，独立监控${decisionLabel}目标、利润保护与止损，清零后开始下一轮`,
           ROUND_ORDER_PENDING: "本轮委托尚未完成，继续核实成交；不重复入场",
           ROUND_ACTION_PENDING: "本轮入场等待提交或核实，不生成第二笔入场",
           ACCOUNT_UNVERIFIED: "账户表格未全部核实，继续读取持仓汇总与当前委托" })[roundBlock];
@@ -2521,7 +2573,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     }
     const currentKWindow = nextCandleTarget({}, Date.now()).closeTime;
     const lastAnalyzedKWindow = task.lastAnalysisAt ? nextCandleTarget({}, new Date(task.lastAnalysisAt).getTime()).closeTime : null;
-    const marketUnchanged = Boolean(skipIfUnchanged && openPositionCount(market) === 0 && !market.account?.openOrders?.length && market.account?.openOrdersVerified !== false && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task) && lastAnalyzedKWindow === currentKWindow);
+    const marketUnchanged = Boolean(!algorithm && skipIfUnchanged && openPositionCount(market) === 0 && !market.account?.openOrders?.length && market.account?.openOrdersVerified !== false && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && task.lastAnalysisSucceeded !== false && !decisionExpired(task) && lastAnalyzedKWindow === currentKWindow);
     if (marketUnchanged) {
       const pendingRule = task.rules.some((rule) => rule.status === "pending");
       task.status = monitoringIntent(task)
@@ -2537,18 +2589,18 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       persistTask(task);
       return { task, market, run, skipped: true, reason: "MARKET_UNCHANGED", route: "WAITING_FOR_CHANGE", analysisTriggered: false };
     }
-    if (skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && decisionExpired(task)) {
+    if (!algorithm && skipIfUnchanged && market.fingerprint && task.lastAnalyzedFingerprint === market.fingerprint && decisionExpired(task)) {
       appendAgentOutput({ taskId, runId: run.id, stage: "system", kind: "poll", message: "上一轮建议已过期，重新请求模型确认" });
     }
     applyFreshnessRules(task, market);
     let qualityIssues = marketQualityIssues(market);
     const automaticRuleFailures = failedAutomaticRules(task);
 
-    logStage(task, run, "analyze", "读取本轮实盘数据并请求模型自主判断");
-    const clientAnalysis = desktopBrowserRequired();
+    logStage(task, run, "analyze", algorithm ? "本机用短线趋势与相似路径计算价格计划" : "读取本轮实盘数据并请求模型自主判断");
+    const clientAnalysis = !algorithm && desktopBrowserRequired();
     const recentOnly = shouldUseRecentMonitoring(monitorRecentOnly, market);
     const analysisNowMs = Date.now();
-    let analysisMarket = clientAnalysis ? null : (recentOnly
+    let analysisMarket = algorithm || clientAnalysis ? null : (recentOnly
       ? buildRecentMonitoringMarket(compactCollectedMarket(task.market), analysisNowMs)
       : buildLayeredAnalysisMarket(compactCollectedMarket(task.market), analysisNowMs));
     if (analysisMarket) appendAgentOutput({
@@ -2562,13 +2614,13 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       data: { analysisLayers: analysisMarket.analysisLayers, nextCandle: analysisMarket.nextCandle || null },
     });
     const knowledgeLimit = Number(process.env.ANALYSIS_KNOWLEDGE_MAX_BYTES || DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
-    const knowledge = approvedKnowledgeForAnalysis(state.skills, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
-    const experiencePrompt = buildApprovedExperiencePrompt(knowledge, (Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES) + 4096);
+    const knowledge = algorithm ? [] : approvedKnowledgeForAnalysis(state.skills, Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES);
+    const experiencePrompt = algorithm ? "" : buildApprovedExperiencePrompt(knowledge, (Number.isFinite(knowledgeLimit) && knowledgeLimit > 0 ? knowledgeLimit : DEFAULT_ANALYSIS_KNOWLEDGE_BYTES) + 4096);
     const evidence = [
       { evidenceId: market.evidenceId, type: "market_snapshot", excerpt: `${market.symbol} ${market.timeframe} ${market.trend} · ${market.historyCount} 根主周期 K 线 · ${market.availableTimeframes?.length || 0} 个周期 · EMA20 ${market.indicators?.ema20} · RSI ${market.indicators?.rsi14}` },
       ...knowledge,
     ];
-    appendAgentOutput({
+    if (!algorithm) appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
@@ -2576,10 +2628,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         ? `本轮喂入共享知识库已审核的 ${knowledge.length} 条 Skill，与出K策略、K 线、各盘买卖档位一起分析`
         : "共享知识库没有已发布 Skill，本轮仅基于实时实盘数据和出K策略分析",
     });
-    const resolvedProviderId = String(providerId || task.providerId || "");
+    const resolvedProviderId = algorithm ? "" : String(providerId || task.providerId || "");
     const provider = resolvedProviderId ? findProviderForUser(resolvedProviderId, resolvedUserId) : null;
     if (provider?.id) task.providerId = provider.id;
-    appendAgentOutput({
+    if (!algorithm) appendAgentOutput({
       taskId,
       runId: run.id,
       stage: "analyze",
@@ -2590,13 +2642,14 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     let decision;
     let providerSucceeded = true;
     let orderAssessmentSucceeded = false;
-    let analysisCoverage = clientAnalysis ? { mode: "direct_client", complete: false, totalSegments: 1, reviewedSegments: 0, failedSegments: [] } : directAnalysisCoverage(analysisMarket);
+    let analysisCoverage = algorithm ? { mode: "algorithm", complete: true }
+      : clientAnalysis ? { mode: "direct_client", complete: false, totalSegments: 1, reviewedSegments: 0, failedSegments: [] } : directAnalysisCoverage(analysisMarket);
     let segmentReviews = [];
     const analysisDeadlineMs = analysisTimeoutMs();
     modelStartedAt = Date.now();
     const analysisAbort = new AbortController();
-    liveAnalyses.set(taskId, { market: structuredClone(market), generation, abort: analysisAbort });
-    const analysisTimer = analysisDeadlineMs > 0
+    if (!algorithm) liveAnalyses.set(taskId, { market: structuredClone(market), generation, abort: analysisAbort });
+    const analysisTimer = !algorithm && analysisDeadlineMs > 0
       ? setTimeout(() => analysisAbort.abort(analysisTimeoutError()), analysisDeadlineMs)
       : null;
     analysisTimer?.unref?.();
@@ -2605,7 +2658,11 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       : { signal: analysisAbort.signal, fastAnalysis: true };
     try {
       assertCurrent();
-      if (clientAnalysis) {
+      if (algorithm) {
+        ({ decision, market } = await analyzeAlgorithmMarket(task, market, connector, run, runtime, assertCurrent));
+        task.market = toTaskMarket(market);
+        decision.evidenceIds = [market.evidenceId].filter(Boolean);
+      } else if (clientAnalysis) {
         const positionContext = updatePositionTracking(task, market, Date.now());
         appendAgentOutput({ taskId, runId: run.id, stage: "analyze", message: "客户端直接将各盘 K 线、买卖档位、出K策略和已审核 Skill 交给 AI 分析" });
         const result = await runtime.requestMarketAnalysis(provider, {
@@ -2692,7 +2749,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       orderAssessmentSucceeded = providerSucceeded && !["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON"].some((code) => (decision.riskFlags || []).includes(code));
       providerSucceeded = orderAssessmentSucceeded && !(decision.riskFlags || []).includes("ANALYSIS_INCOMPLETE");
     } catch (error) {
-      if (error instanceof CycleAbortError) throw error;
+      if (algorithm || error instanceof CycleAbortError) throw error;
       assertCurrent();
       const changedCode = analysisAbort.signal.reason?.message;
       if (["MARKET_CHANGED_DURING_ANALYSIS", "CANDLE_CHANGED_DURING_ANALYSIS", "POSITION_CHANGED_DURING_ANALYSIS", "LIVE_OBSERVATION_UNVERIFIED"].includes(changedCode)) {
@@ -2739,9 +2796,10 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
         averagePrice: suggestOrderPreview(task, decision).suggestedPrice }, plan);
       decision = { ...decision, tradePlan: plan, entryGuard: {
         action: decision.action, plan, orderType: decision.orderType || "MARKET",
+        ...(algorithm ? { decisionSource: "ALGORITHM", requireConfirmedPrice: true } : {}),
         targetPrice: decision.orderType === "LIMIT" ? Number(decision.targetPrice ?? decision.entryPrice) : null,
         symbol: book.symbol, symbolName: book.symbolName, instrumentId: book.instrumentId,
-        expiresAt: new Date(Date.now() + (decision.decisionTtlSec || 300) * 1000).toISOString(),
+        expiresAt: new Date((algorithm ? Date.parse(decision.observedAt) : Date.now()) + (decision.decisionTtlSec || 300) * 1000).toISOString(),
       }, riskFlags: [...new Set([...(decision.riskFlags || []), ...(!plan ? ["AI_ENTRY_RISK_PLAN_PENDING"] : !protection ? ["AI_PROFIT_PROTECTION_UNAVAILABLE"] : [])])] };
     }
     if (explicitExit && decision.exitType) {
@@ -2765,7 +2823,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
     if (providerSucceeded && market.fingerprint) task.lastAnalyzedFingerprint = market.fingerprint;
     task.lastAnalysisAt = new Date().toISOString();
     task.monitoringRound = Number(task.monitoringRound || 0) + 1;
-    task.decision = { ...decision, ...(cycleCancellation ? { orderCancellation: cycleCancellation } : {}), runId: run.id, observedAt: market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
+    task.decision = { ...decision, ...(cycleCancellation ? { orderCancellation: cycleCancellation } : {}), runId: run.id, observedAt: algorithm && decision.observedAt || market.observedAt, analysisDurationMs: Date.now() - modelStartedAt, collectionDurationMs: modelStartedAt - cycleStartedAt, createdAt: new Date().toISOString(), ttlSec: decision.decisionTtlSec || 300 };
     const positionChangedDuringAnalysis = Number(task.exitExecutionRevision || 0) !== exitRevisionAtStart;
     const sessionChangedDuringAnalysis = Number(task.target.sessionRevision || 0) !== sessionRevision;
     if (!isLiveTask(task) && providerSucceeded && !positionChangedDuringAnalysis && !sessionChangedDuringAnalysis && !decisionExpired(task)) {
@@ -2787,7 +2845,8 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       recovered: providerSucceeded, modelDiagnostics: decision.modelDiagnostics,
     };
     const decisionBoardLabel = decision.targetSymbolName || decision.targetSymbol || decision.targetInstrumentId || "";
-    const confidenceLabel = Number.isFinite(decision.confidence) ? `置信度 ${Math.round(decision.confidence * 100)}%` : "置信度未提供";
+    const confidenceLabel = algorithm ? decision.analysisSummary
+      : Number.isFinite(decision.confidence) ? `置信度 ${Math.round(decision.confidence * 100)}%` : "置信度未提供";
     completeWorkflow(task, "analyze", providerSucceeded ? `${decisionBoardLabel ? `${decisionBoardLabel} · ` : ""}${decision.action} · ${confidenceLabel}` : `模型分析未完成：${decision.invalidation}`);
     appendAgentOutput({
       taskId,
@@ -2795,7 +2854,7 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       stage: "analyze",
       kind: "decision",
       level: providerSucceeded ? "info" : "error",
-      message: providerSucceeded ? `模型输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.entryBlock?.requestedAction || decision.action}${decision.entryBlock ? `；入场拦截 ${decision.entryBlock.reason}，执行 HOLD` : ""}，${confidenceLabel}` : `模型分析未完成：${decision.invalidation}`,
+      message: providerSucceeded ? `${algorithm ? "算法" : "模型"}输出${decisionBoardLabel ? ` ${decisionBoardLabel}` : ""} ${decision.entryBlock?.requestedAction || decision.action}${decision.entryBlock ? `；入场拦截 ${decision.entryBlock.reason}，执行 HOLD` : ""}，${confidenceLabel}` : `模型分析未完成：${decision.invalidation}`,
       data: { action: decision.action, marketRegime: decision.marketRegime, entryBlock: decision.entryBlock, analysisSummary: decision.analysisSummary, forecastHorizon: decision.forecastHorizon, targetSymbol: decision.targetSymbol, targetSymbolName: decision.targetSymbolName, targetInstrumentId: decision.targetInstrumentId, reasonCodes: decision.reasonCodes, riskFlags: decision.riskFlags, boardAssessments: decision.boardAssessments || [], modelDiagnostics: decision.modelDiagnostics, observedAt: task.decision.observedAt, analysisDurationMs: task.decision.analysisDurationMs, collectionDurationMs: task.decision.collectionDurationMs },
     });
 
@@ -2831,31 +2890,31 @@ export async function runAnalysis(taskId, providerId = "", { trigger = "manual",
       const actionLabel = task.decision.action === "BUY" ? "买入" : task.decision.action === "SELL" ? pendingActionLabel(task.decision) : "观望";
       const targetedActionLabel = decisionBoardLabel ? `${decisionBoardLabel} ${actionLabel}` : actionLabel;
       const ruleMessage = blocked
-        ? `${targetedActionLabel}建议已保留；规则标记已记录，继续按 AI 决策执行`
+        ? `${targetedActionLabel}建议已保留，已记录规则标记，继续按${decisionLabel}决策执行`
         : reviewRequired
-          ? `${targetedActionLabel}建议已保留；复核标记已记录，继续按 AI 决策执行`
+          ? `${targetedActionLabel}建议已保留，已记录复核标记，继续按${decisionLabel}决策执行`
           : automaticRuleFailures.length
-            ? `${targetedActionLabel}建议已保留；自动规则标记已记录，继续按 AI 决策执行`
+            ? `${targetedActionLabel}建议已保留，已记录自动规则标记，继续按${decisionLabel}决策执行`
             : task.decision.action === "HOLD"
               ? decisionFlags.has("RANGE_MARKET_NO_ENTRY") ? "旧版横盘限制已取消，重新评估短线机会"
                 : decisionFlags.has("ENTRY_MARKET_REGIME_UNKNOWN") ? "目标盘口主情景未明确，不新开仓；继续监控并重新分析"
-                  : "模型建议观望，当前轮次无需动作"
+                  : (algorithm ? decision.analysisSummary : "模型建议观望，当前轮次无需动作")
               : riskLimitExceeded
                 ? `${targetedActionLabel}建议已保留；单笔入场数量使用配置值 ${entryQuantityForTask(task)}`
-                : `${targetedActionLabel}建议已保留；数据标记已记录，继续按 AI 决策执行`;
+                : `${targetedActionLabel}建议已保留，已记录数据标记，继续按${decisionLabel}决策执行`;
       completeWorkflow(task, "rules", ruleMessage);
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: ruleMessage });
     } else {
       completeWorkflow(task, "rules", isAutoTakeover(task)
         ? (isLiveTask(task) ? "规则通过，全自动接管将直接下单或离场" : "规则通过，全自动记录建议")
-        : (isLiveTask(task) ? "规则通过，AI 填表后由用户点击入场；后续自动监控离场" : "规则通过，买卖意图转为建议"));
+        : (isLiveTask(task) ? "规则通过，填表后由用户点击入场，成交后自动监控离场" : "规则通过，买卖意图转为建议"));
       appendAgentOutput({ taskId, runId: run.id, stage: "rules", message: isAutoTakeover(task)
         ? (isLiveTask(task) ? "规则通过；全自动接管，不再弹窗" : "规则通过；观察模式不会下单")
         : (isLiveTask(task) ? "规则通过；手动入场后程序自动确认、监控汇总离场" : "规则通过；观察模式不会自动下单") });
     }
 
     logStage(task, run, "action", isAutoTakeover(task)
-      ? (isLiveTask(task) ? "路由 AI 入场决定，程序独立监控离场" : "路由 AI 动作，自动记录建议")
+        ? (isLiveTask(task) ? `路由${decisionLabel}入场决定，程序独立监控离场` : `路由${decisionLabel}动作，自动记录建议`)
       : (isLiveTask(task) ? "准备入场表单，等待用户点击入场按钮" : "路由最终建议，等待确认后决定是否下单"));
     assertCurrent();
     task.decision = executableExitDecision(task, task.decision, exitMarket);
@@ -3004,6 +3063,23 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
 function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
   observeSummaryPlans(task, market, now);
   const contexts = summaryExitReviewContexts(market, now);
+  if (task.decisionSource === "ALGORITHM") {
+    let installedAny = false;
+    for (const context of contexts) {
+      if ((task.summaryTradingPlans || []).some(record => record.signature === context.signature)) continue;
+      const snapshot = positionMarketSnapshot(market, context.summary);
+      const history = positionMarketSnapshot(task.market, context.summary);
+      const plan = algorithmHoldingPlan(snapshot, context.summary, now)
+        || (history !== snapshot ? algorithmHoldingPlan(history, context.summary, now) : null);
+      if (!plan) continue;
+      const observedAt = new Date(context.quote.observedAt).toISOString();
+      const { record } = installSummaryPlan(task, context, plan, { id: `algorithm:${task.id}:${context.key}:${now}`,
+        observedAt, now, origin: "ALGORITHM_REVIEW" });
+      if (record) installedAny = true;
+    }
+    if (installedAny) observeSummaryPlans(task, market, now);
+    return;
+  }
   const sameHolding = record => (market.account?.positionSummaries || []).some(summary => summarySignature(summary) === record.signature);
   if (market.account?.positionSummariesVerified === true) task.summaryExitReviews = (task.summaryExitReviews || []).filter(sameHolding);
   for (const [key, run] of summaryReviewRuns) {
@@ -3098,7 +3174,8 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
     if (!task || !isLiveTask(task) || !monitoringIntent(task) || !task.target?.browserSessionId) return { skipped: true };
     const generation = taskGeneration(task);
     const assertCurrent = () => { exitAbort.signal.throwIfAborted(); assertCycleCurrent(task, generation); };
-    const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "", providerId: task.providerId || "" });
+    const algorithm = task.decisionSource === "ALGORITHM";
+    const runtime = resolveRuntime(runtimeOverrides, { userId: task.ownerUserId || "", providerId: algorithm ? "" : task.providerId || "" });
     const connector = getConnector(task.target.connectorId);
     const observationStartedAt = Date.now();
     const clockBase = now ?? observationStartedAt;
@@ -3180,7 +3257,10 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       const key = summaryKey(candidate.summary);
       archivePendingSubmission(task);
       task.pendingAction = buildPendingAction({ ...task, market }, decision);
-      try { await confirmPendingAction(taskId, { source: decision.exitGuard?.aiAuthorization?.source === "USER_RULE" ? "user_summary_rule" : "ai_summary_plan", runtime }); }
+      const authorization = decision.exitGuard?.aiAuthorization;
+      const source = authorization?.source === "USER_RULE" ? "user_summary_rule"
+        : authorization?.record?.origin?.startsWith("ALGORITHM_") ? "algorithm_summary_plan" : "ai_summary_plan";
+      try { await confirmPendingAction(taskId, { source, runtime }); }
       catch (error) {
         assertCurrent();
         failures.push({ positionId: key, code: error.message });
@@ -3208,7 +3288,7 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
       : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? "WINNER_OBSERVING"
       : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "EXIT_BATCH"
       : (task.summaryExitReviews || []).some(r => r.status === "REQUESTING") ? "AI_REVIEWING"
-      : missingPlans.length ? "AI_PLAN_MISSING"
+      : missingPlans.length ? (algorithm ? "ALGORITHM_PLAN_MISSING" : "AI_PLAN_MISSING")
       : task.summaryLossObservations?.length ? "LOSS_OBSERVING" : "WATCHING",
       checkedAt: market.observedAt, message: market.account.positionSummariesVerified !== true
         ? "持仓汇总未核实，继续读取，不猜测离场"
@@ -3216,8 +3296,9 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
         : task.summaryExitPriceWaits?.length ? "闪K或未定价，保留离场监控；等待真实定K后按最新报价重新判断目标和止损，不急于离场"
         : task.summaryExitBatch?.phase === "WATCH_WINNERS" ? `亏损侧已核实离场；盈利侧最晚${task.summaryExitBatch.winnerDeadlineAt}提交离场，回落提前兑现`
         : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "正在执行已锁定的离场批次，逐笔核实结果；单笔失败继续处理其他持仓"
-        : missingPlans.length ? `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；不按单向浮盈提前离场，禁止新增仓位`
-        : "监控全部持仓，未到AI原目标继续持有；真实定K失效、有效保护或原风险期限触发才提前离场。多空同时持仓按对冲退出规则处理" };
+        : missingPlans.length ? (algorithm ? `${missingPlans.length} 笔持仓等待有效定 K 数据生成价格计划`
+          : `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；不按单向浮盈提前离场，禁止新增仓位`)
+        : `监控全部持仓，按原目标、止损、回撤保护和最长持仓执行。多空同时持仓按对冲退出规则处理` };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: "ERROR", failures, message: `${failures.length}笔离场未完成；${task.exitMonitor.message}` };
     persistTask(task);
     return { submitted };

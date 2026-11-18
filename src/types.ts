@@ -85,7 +85,10 @@ export interface Rule {
   detail: string;
 }
 
+export type DecisionSource = "AI" | "ALGORITHM";
+
 export interface PendingAction {
+  decisionSource?: DecisionSource;
   entryPurpose?: "NORMAL" | "RESCUE";
   rescuePositionIds?: string[];
   marketRegime?: "UP" | "DOWN" | "RANGE" | "UNKNOWN";
@@ -106,7 +109,7 @@ export interface PendingAction {
   directionalProbabilitiesComplete?: boolean;
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
-  signalTier?: "AI_RECOGNITION" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
+  signalTier?: "AI_RECOGNITION" | "ALGORITHM" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   status: "WAITING" | "SUBMITTING" | "AWAITING_FILL" | "UNVERIFIED" | "REJECTED" | "CONFIRMED" | "TAKEN_OVER" | "CANCELLED" | "RECONCILED";
   baselinePositionQty?: number;
   source?: "manual_confirm" | "auto_timeout" | "manual_takeover" | "manual_cancel" | null;
@@ -147,6 +150,9 @@ export interface TradingPlan {
 }
 
 export interface Decision {
+  decisionSource?: DecisionSource;
+  algorithmForecast?: { entryZone: { min: number; max: number }; expectedEntryBars?: number | null; expectedExitBars?: number | null;
+    matchedPaths?: number; targetHits?: number; historicalExpectedPoints?: number | null } | null;
   tradePlan?: TradingPlan | null;
   entryPurpose?: "NORMAL" | "RESCUE";
   rescuePositionIds?: string[];
@@ -170,7 +176,7 @@ export interface Decision {
   directionalProbabilitiesComplete?: boolean;
   bullishProfitProbability?: number;
   bearishProfitProbability?: number;
-  signalTier?: "AI_RECOGNITION" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
+  signalTier?: "AI_RECOGNITION" | "ALGORITHM" | "EXPLORATORY" | "CAUTIOUS" | "STANDARD" | "STRONG" | "VERY_STRONG" | "HOLD";
   targetPositionPct: number;
   maxOrderValuePct: number;
   reasonCodes: string[];
@@ -349,7 +355,7 @@ export interface Task {
   summaryExitBatch?: { id: string; phase: "EXIT_ALL" | "EXIT_LOSERS" | "WATCH_WINNERS" | "EXIT_WINNERS" | "COMPLETE" | "INVALIDATED";
     triggerPnl: number; winnerDeadlineAt?: string; lastWinnerProfit?: number; reason?: string } | null;
   entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"]; planError?: string | null };
-  summaryTradingPlans?: Array<{ id: string; key: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
+  summaryTradingPlans?: Array<{ id: string; key: string; origin?: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
     profitProtectionEnabled?: boolean; riskComplete?: boolean; bestPrice: number; profitArmed: boolean; expiresAt: string | null; maxHoldAt: string | null }>;
   exitOutcomes?: Array<{ pendingId: string; confirmedAt: string; exitReason?: string;
     after3Minutes?: { status: string; hypotheticalGrossPoints?: number } | null;
@@ -361,6 +367,7 @@ export interface Task {
   name: string;
   status: TaskStatus;
   mode: "PAPER" | "SHADOW" | "LIVE";
+  decisionSource?: DecisionSource;
   symbol: string;
   timeframe: string;
   target: {

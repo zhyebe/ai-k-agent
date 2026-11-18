@@ -54,9 +54,10 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
       ? decision?.stopLossPrice
       : decision?.targetPrice ?? decision?.entryPrice;
   const requestedPrice = decision?.orderType === "LIMIT" ? Number(modelPrice) : NaN;
+  const algorithmEntry = decision?.decisionSource === "ALGORITHM" && !decision.exitType;
   const price = Number.isFinite(requestedPrice) && requestedPrice > 0
     ? requestedPrice
-    : Number(decision?.targetSummary && decision?.exitGuard?.triggerPrice != null
+    : algorithmEntry ? Number(decision.entryPrice) : Number(decision?.targetSummary && decision?.exitGuard?.triggerPrice != null
       ? decision.exitGuard.triggerPrice : isLiveTask(task) && !decision?.exitType
         ? entryOrderPrice(targetMarket, decision?.action, entryQuantityForTask(task)) ?? modelPrice
         : targetMarket?.latest?.price ?? targetMarket?.quote?.price);
@@ -91,7 +92,7 @@ export function suggestOrderPreview(task, decision, { enforceQuantityLimit = fal
     suggestedQty = 1;
   }
   const configuredQuantity = entryQuantityForTask(task);
-  const useConfiguredQuantity = (isLiveTask(task) || enforceQuantityLimit) && !decision?.exitType && hasPrice;
+  const useConfiguredQuantity = (isLiveTask(task) || enforceQuantityLimit || algorithmEntry) && !decision?.exitType && hasPrice;
   const quantityLimitApplied = useConfiguredQuantity && suggestedQty !== configuredQuantity;
   if (useConfiguredQuantity) suggestedQty = configuredQuantity;
   return {

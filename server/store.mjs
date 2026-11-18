@@ -88,7 +88,8 @@ export function publicTask(task) {
   return {
     ...safeTask,
     automationAuthorized: false,
-    providerSelectionRequired: !String(providerId || "").trim(),
+    decisionSource: task.decisionSource === "ALGORITHM" ? "ALGORITHM" : "AI",
+    providerSelectionRequired: task.decisionSource !== "ALGORITHM" && !String(providerId || "").trim(),
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
     sessionClose: parseSessionClose(task.sessionClose) || DEFAULT_SESSION_CLOSE,
@@ -210,6 +211,7 @@ function sanitizeHydratedTask(task) {
   const safeTask = {
     ...runtimeTask,
     automationAuthorized: false,
+    decisionSource: task.decisionSource === "ALGORITHM" ? "ALGORITHM" : "AI",
     autoDecisionEnabled: task.autoDecisionEnabled === true,
     entryQuantity: entryQuantityForTask(task),
     sessionClose: parseSessionClose(task.sessionClose) || DEFAULT_SESSION_CLOSE,

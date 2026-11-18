@@ -167,11 +167,12 @@ export function summaryRuleAuthorizationCurrent(task, summary, authorization) {
 }
 
 export function installSummaryPlan(task, context, source, { id, observedAt, holdingStartedAt, now = Date.now(), origin = "AI_REVIEW" } = {}) {
+  const fromEntry = origin === "AI_ENTRY" || origin === "ALGORITHM_ENTRY";
   const validated = validateHoldingPlan(source, context.summary, { observedAt, now,
-    allowExpired: origin === "AI_ENTRY", allowIncomplete: origin === "AI_ENTRY" });
+    allowExpired: fromEntry, allowIncomplete: fromEntry });
   if (validated.code) return validated;
   const holdingStart = Date.parse(holdingStartedAt || "");
-  if (origin === "AI_ENTRY" && validated.plan.maxHoldSec !== null && Number.isFinite(holdingStart) && holdingStart <= now) {
+  if (fromEntry && validated.plan.maxHoldSec !== null && Number.isFinite(holdingStart) && holdingStart <= now) {
     validated.maxHoldAt = new Date(holdingStart + validated.plan.maxHoldSec * 1000).toISOString();
   }
   const prior = (task.summaryTradingPlans || []).find(record => record.key === context.key
@@ -209,7 +210,7 @@ export function syncSummaryPlans(task, market, now = Date.now()) {
     }
     const installed = installSummaryPlan(task, context, forecast.tradePlan,
       { id: `entry-plan:${forecast.pendingId}`, observedAt: forecast.observedAt,
-        holdingStartedAt: forecast.confirmedAt, now, origin: "AI_ENTRY" });
+        holdingStartedAt: forecast.confirmedAt, now, origin: forecast.decisionSource === "ALGORITHM" ? "ALGORITHM_ENTRY" : "AI_ENTRY" });
     forecast.planError = installed.code || null;
   }
 }

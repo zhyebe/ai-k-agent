@@ -110,7 +110,7 @@ const formatCurrency = (value: number) => `¥${value.toLocaleString("zh-CN", { m
 const formatPercent = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 const actionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "买涨", SELL: "买跌", HOLD: "观望" };
 const actionSuggestionLabels: Record<"BUY" | "SELL" | "HOLD", string> = { BUY: "建议买涨", SELL: "建议买跌", HOLD: "保持观望" };
-const profitSignalLabels: Record<string, string> = { AI_RECOGNITION: "AI 趋势决策", EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
+const profitSignalLabels: Record<string, string> = { AI_RECOGNITION: "AI 趋势决策", ALGORITHM: "算法价格计划", EXPLORATORY: "试探提示", CAUTIOUS: "谨慎提示", STANDARD: "可交易提示", STRONG: "较强提示", VERY_STRONG: "强信号提示", HOLD: "观望" };
 const modeLabels: Record<string, string> = { PAPER: "观察 / 建议", SHADOW: "影子记录", LIVE: "实盘（可自动下单）" };
 const trendLabels: Record<string, string> = { up: "上行", down: "下行", range: "震荡", unknown: "未知" };
 const stageLabels: Record<string, string> = { connect: "连接目标", login: "登录验证", collect: "数据采集", analyze: "趋势分析", rules: "规则裁决", action: "动作建议", system: "系统" };
@@ -183,8 +183,16 @@ const riskLabels: Record<string, string> = {
   ENTRY_QUOTE_OR_DEPTH_UNVERIFIED: "入场报价或全部数量深度未核实",
   ENTRY_PRICE_OUTSIDE_AI_PLAN: "旧版参考区间限制（已取消）",
   ENTRY_RECHECK_FAILED: "提交前行情复核失败",
+  ALGORITHM_HISTORY_INSUFFICIENT: "定 K 数据不足",
+  ALGORITHM_TREND_UNCLEAR: "短线方向未形成",
+  ALGORITHM_WAITING_ENTRY_ZONE: "等待相对高低位",
+  ALGORITHM_PLAN_UNAVAILABLE: "暂无有效目标与止损",
+  ALGORITHM_ENTRY_PRICE_MOVED: "报价已离开计划区间",
+  ALGORITHM_ENTRY_EXPIRED: "入场计划已过期",
 };
 const reasonLabels: Record<string, string> = {
+  SHORT_TREND_PULLBACK: "短线顺势回调",
+  ALGORITHM_PRICE_PLAN: "历史路径估算目标和止损",
   EMA_SLOPE_POSITIVE: "EMA20 斜率为正",
   VOLUME_CONFIRMATION: "成交量确认突破",
   EMA_SLOPE_NEGATIVE: "EMA20 斜率为负",
@@ -232,18 +240,20 @@ const taskIsMonitoring = (task: Task | null | undefined) => Boolean(task && !tas
 const openPositions = (task: Task | null | undefined) => (task?.market?.account?.positions || []).filter((item) => Number(item.quantity) > 0);
 const consoleStatusCopy = (task: Task) => {
   if (task.stopLocked || task.status === "MANUAL_CONTROL") return "任务已停止，自动交易未运行";
+  const sourceLabel = task.decisionSource === "ALGORITHM" ? "算法" : "AI";
   const pending = task.pendingAction;
   if (pending?.status === "WAITING" && task.autoDecisionEnabled !== true && !pending.exitType) {
-    return task.mode === "LIVE" ? "AI 已填表，请在目标页点击入场；成交后自动离场" : "AI 已填写入场表单，等待确认";
+    if (task.mode !== "LIVE") return `${sourceLabel}建议待确认`;
+    return pending.formFilled ? "已填表，请在目标页点击入场，成交后自动监控离场" : pending.message;
   }
   if (pending?.status === "SUBMITTING") return "正在目标页执行下单或离场";
   if (pending?.status === "AWAITING_FILL") return "成交后台核实，持续分析行情和持仓";
   if (pending?.status === "UNVERIFIED") return "交易页面结果未明确，继续监控持仓变化核实成交";
-  if (pending?.status === "REJECTED") return "交易所拒绝请求，下一 K 继续由 AI 重新判断";
+  if (pending?.status === "REJECTED") return `交易所拒绝请求，下一轮由${sourceLabel}重新判断`;
   if (task.monitoringEnabled) {
     if (task.status === "MONITORING") {
       return task.mode === "LIVE"
-        ? (task.autoDecisionEnabled ? "AI 按价格计划自动入场、止盈与风控" : "手动入场；自动执行 AI 目标、利润保护与止损")
+        ? (task.autoDecisionEnabled ? `${sourceLabel}按价格计划自动入场、止盈与风控` : `手动入场，程序执行${sourceLabel}目标、利润保护与止损`)
         : "Agent 正在持续读取行情，数据变化后启动新一轮分析";
     }
     return "本轮出现问题，Agent 将继续重试，不会因单轮失败结束";
@@ -379,7 +389,7 @@ function App() {
   const task = workspace.tasks.find((item) => item.id === selectedTaskId) || workspace.tasks[0] || null;
   const isRunning = taskIsMonitoring(task);
   const currentProviderId = workspace.providers.some((item) => item.id === localProviderId && item.configured) ? localProviderId : "";
-  const runningTask = workspace.tasks.find(taskIsMonitoring);
+  const runningTask = workspace.tasks.find(item => item.decisionSource !== "ALGORITHM" && taskIsMonitoring(item));
 
   useEffect(() => {
     if (user) setLocalProviderIdState(getLocalProviderId(user.id));
@@ -558,12 +568,13 @@ function App() {
 
   async function handleStart() {
     if (!task) return;
-    if (!currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
+    const algorithm = task.decisionSource === "ALGORITHM";
+    if (!algorithm && !currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
     setBusyAction("start");
     try {
-      const next = await startTask(task.id, currentProviderId);
+      const next = await startTask(task.id, algorithm ? undefined : currentProviderId);
       replaceTask(next);
-      notify(next.status === "MONITORING" ? "启动检查通过，Agent 已进入持续观察并自动执行 LIVE 动作" : "启动未通过，等待连接恢复");
+      notify(next.status === "MONITORING" ? `${algorithm ? "本机算法" : "Agent"} 已开始持续监控` : "启动未通过，等待连接恢复");
     } catch (error) {
       notify(error instanceof Error && error.message === "不在开盘期间，不能使用" ? error.message : `启动失败：${error instanceof Error ? error.message : "请检查任务配置"}`);
     } finally { setBusyAction(null); }
@@ -583,10 +594,11 @@ function App() {
 
   async function handleAutoJudge() {
     if (!task) return;
-    if (!currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
+    const algorithm = task.decisionSource === "ALGORITHM";
+    if (!algorithm && !currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
     setBusyAction("judge");
     try {
-      const next = await autoJudge(task.id, currentProviderId);
+      const next = await autoJudge(task.id, algorithm ? undefined : currentProviderId);
       replaceTask(next);
       notify("规则已确认，结果写入审计链");
     } catch (error) {
@@ -676,11 +688,12 @@ function App() {
 
   async function handleAnalyze() {
     if (!task) return;
-    if (!currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
+    const algorithm = task.decisionSource === "ALGORITHM";
+    if (!algorithm && !currentProviderId) { notify("请先选择本机使用的 AI Provider"); return; }
     setBusyAction("analyze");
     openAgentOutput();
     try {
-      const result = await analyzeTask(task.id, currentProviderId);
+      const result = await analyzeTask(task.id, algorithm ? undefined : currentProviderId);
       replaceTask(result.task);
       if (result.output) setAgentLines(result.output);
       if (result.run) setAgentRuns((current) => [result.run!, ...current.filter((item) => item.id !== result.run!.id)]);
@@ -688,7 +701,7 @@ function App() {
       if (result.skipped) notify("上一轮分析仍在进行，已跳过本次触发");
       else if (result.route === "SUGGESTION_PENDING") {
         const target = decisionTargetLabel(result.task.decision);
-        notify(result.task.mode === "LIVE" ? `分析完成：${target ? `${target} ` : ""}AI 将自动执行并持续监控` : `分析完成：${target ? `${target} ` : ""}已给出建议，观察模式不会下单`);
+        notify(`${target ? `${target} ` : ""}已生成${algorithm ? "算法" : "AI"}建议`);
       }
       else if (result.task.status === "PAUSED" || result.task.status === "BLOCKED") notify(`分析暂停：${displayLabel(flags[0] || result.route || result.task.status, { ...riskLabels, ...routeLabels, ...statusMetaLabels }, "需要处理")}`);
       else notify(`分析完成：${decisionTargetLabel(result.task.decision) ? `${decisionTargetLabel(result.task.decision)} · ` : ""}${displaySuggestion(result.task.decision.action)}`);
@@ -938,7 +951,6 @@ function App() {
           {workspace.health?.dbAvailable === false && <LoadError title="本机数据保存失败" message="请检查磁盘空间和数据目录权限；未成功保存的修改需重新提交。" onRetry={() => setRefreshVersion(value => value + 1)} />}
           {!workspaceReady && !loadError && <DataSkeleton label="正在加载工作区" layout={view === "console" ? "dashboard" : "list"} />}
           {workspaceReady && <>
-          {workspace.tasks.length === 0 && !workspace.providers.some(provider => provider.configured) && <section className="panel empty-state"><Bot size={24} /><h2>配置 AI，开始使用</h2><p>无需注册或登录。填入 AI 接口地址、模型和 API Key，配置加密保存在本机。</p><button className="button button-primary" onClick={() => { setEditingProvider(null); setModal("provider"); }}>配置 AI</button></section>}
           {view === "console" && (task ? <ConsoleView task={task} currentProviderId={currentProviderId} workspace={workspace} isRunning={isRunning} busyAction={busyAction} onStart={handleStart} onStop={handleStop} onAutoJudge={handleAutoJudge} onAnalyze={handleAnalyze} onOpenStream={openAgentOutput} onConnectorTest={handleConnectorTest} onToggleAutoDecision={handleAutoDecisionToggle} onSelectProvider={handleSelectProvider} onSelectMarket={handleSelectMarket} onSetMode={handleSetMode} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "workflows" && (task ? <WorkflowsView tasks={workspace.tasks} task={task} onSelect={setSelectedTaskId} onCreate={() => setModal("task")} onEdit={() => setModal("task-edit")} onDelete={handleTaskDelete} onRun={handleStart} onStop={handleStop} busyAction={busyAction} /> : <EmptyTaskState onCreate={() => setModal("task")} />)}
           {view === "skills" && <SkillsView skills={workspace.skills} rag={workspace.rag} onCreate={() => setModal("skill")} onApprove={handleSkillApprove} onDelete={handleSkillDelete} busyAction={busyAction} />}
@@ -973,7 +985,7 @@ function ConsoleView({ task, currentProviderId, workspace, isRunning, busyAction
     <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail={positions.length ? `${positions.length} 笔持仓` : "只读"} change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change={openQty ? `持仓 ${openQty}` : "观察"} tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
     <WorkflowPanel task={task} onConnectorTest={onConnectorTest} busyAction={busyAction} />
     {task.exitMonitor && <div className="decision-safe" role={task.exitMonitor.status === "ERROR" ? "alert" : "status"}><Clock3 size={14} /><span>{task.exitMonitor.message}</span></div>}
-    <RulesPanel rules={task.rules} automatic={task.mode === "LIVE" || task.autoDecisionEnabled === true} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
+    <RulesPanel rules={task.rules} sourceLabel={task.decisionSource === "ALGORITHM" ? "算法" : "AI"} automatic={task.mode === "LIVE" || task.autoDecisionEnabled === true} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} />
   </>;
 }
 
@@ -1165,6 +1177,9 @@ function PendingActionCard({ pending }: { pending: PendingAction }) {
 
 function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task: Task; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
   const decision = task.decision;
+  const algorithm = task.decisionSource === "ALGORITHM";
+  const sourceLabel = algorithm ? "算法" : "AI";
+  const projection = decision.algorithmForecast;
   const analyzed = !decision.riskFlags.includes("NOT_ANALYZED");
   const confidenceLabel = decision.confidence != null && Number.isFinite(decision.confidence) ? `${Math.round(decision.confidence * 100)}% 置信度` : "置信度未提供";
   const analysisFailure = decision.riskFlags.find((flag) => ["PROVIDER_NOT_CONFIGURED", "PROVIDER_NOT_READY", "PROVIDER_REQUEST_FAILED", "EMPTY_MODEL_RESPONSE", "INVALID_MODEL_JSON", "INCONSISTENT_ACTION_PROBABILITY", "ANALYSIS_INCOMPLETE"].includes(flag));
@@ -1197,26 +1212,32 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
     <section className="panel decision-panel">
       <div className="panel-header">
         <div><div className="panel-kicker"><Bot size={14} />Agent 判断</div><h2>当前建议</h2></div>
-        <span className="decision-age"><span className="online-dot" />{analyzed ? decision.analysisDurationMs != null ? `AI ${Math.round(decision.analysisDurationMs / 1000)} 秒 · 数据 ${decision.observedAt ? formatTime(decision.observedAt) : "--"}` : `有效期 ${decision.ttlSec} 秒` : "未分析"}</span>
+        <span className="decision-age"><span className="online-dot" />{analyzed ? decision.analysisDurationMs != null ? `${sourceLabel} ${Math.round(decision.analysisDurationMs / 1000)} 秒 · 数据 ${decision.observedAt ? formatTime(decision.observedAt) : "--"}` : `有效期 ${decision.ttlSec} 秒` : "未分析"}</span>
       </div>
       <div className={`decision-action action-${decision.action.toLowerCase()}`}>
         <div className="decision-symbol">{decision.action === "BUY" ? <ArrowUpRight size={24} /> : decision.action === "SELL" ? <ArrowDownRight size={24} /> : <Pause size={22} />}</div>
-        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : analyzed ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? probabilitiesProvided ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%（仅参考）` : " · 概率未完整提供，不影响AI决定" : ""} · ${confidenceLabel}` : "点击「立即分析」读取目标并给出建议"}</span></div>
+        <div><strong>{target && decision.action !== "HOLD" ? `${target} · ${actionText}` : actionText}{analyzed && decision.action !== "HOLD" ? ` · ${profitSignalLabels[decision.signalTier || ""] || "风险提示"}` : ""}</strong><span>{!analyzed ? "点击「立即分析」读取目标并给出建议" : algorithm ? "本机算法 · 1 分钟 K" : analysisFailure ? `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘 · 未获得有效模型结果` : `监控范围 ${task.market?.books?.length || 1}/${task.market?.expectedBookCount || task.market?.books?.length || 1} 个盘${decision.action !== "HOLD" ? probabilitiesProvided ? ` · 所选方向 ${profitProbabilityLabel(profitProbability)}%（仅参考）` : " · 概率未完整提供，不影响AI决定" : ""} · ${confidenceLabel}`}</span></div>
         <span className="decision-time">{analyzed ? formatTime(decision.createdAt) : "--"}</span>
       </div>
-      {analyzed ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
+      {analyzed && !algorithm ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
-        <p><strong>本轮规则</strong>AI 按短线相对低位买涨、相对高位买跌，预测未来盈利离场 K。定价检查与执行由算法负责；闪 K 或未定价期间进出场均等待，所有止损和目标都在真实定 K 后按最新可成交报价重判，恢复则不离场，AI 不能绕过。保留 AI 入场方向，概率、形态、参考区间、计划格式及费用不拦截。正常持仓跟随原始目标，不因浮盈、只走一根 K 或复核到期提前退出。真实定 K 证明预测明显失效才允许 AI 提前离场。同有多空时按合计盈利全平、未盈利先退亏损侧处理；亏损侧确认清除后，盈利侧最多观察 60 秒，回落或到目标提前兑现，同样等待真实定价。</p>
+        {algorithm
+          ? <p><strong>本轮规则</strong>短线相对低位买涨、相对高位买跌。按相似历史路径估算时机和目标。成交后监控原目标、止损、回撤和持仓期限。闪 K 等待真实定价后重判。</p>
+          : <p><strong>本轮规则</strong>AI 按短线相对低位买涨、相对高位买跌，预测未来盈利离场 K。定价检查与执行由算法负责；闪 K 或未定价期间进出场均等待，所有止损和目标都在真实定 K 后按最新可成交报价重判，恢复则不离场，AI 不能绕过。保留 AI 入场方向，概率、形态、参考区间、计划格式及费用不拦截。正常持仓跟随原始目标，不因浮盈、只走一根 K 或复核到期提前退出。真实定 K 证明预测明显失效才允许 AI 提前离场。同有多空时按合计盈利全平、未盈利先退亏损侧处理；亏损侧确认清除后，盈利侧最多观察 60 秒，回落或到目标提前兑现，同样等待真实定价。</p>}
         {task.summaryExitBatch && <p><strong>离场批次</strong>{({ EXIT_ALL: "合计盈利，全仓离场", EXIT_LOSERS: "多空持仓，先退亏损侧", WATCH_WINNERS: "亏损侧已离场，观察盈利侧", EXIT_WINNERS: "盈利侧离场中", COMPLETE: "批次已核实结束", INVALIDATED: "持仓变化，重新核对" })[task.summaryExitBatch.phase]}{task.summaryExitBatch.winnerDeadlineAt ? ` · 盈利侧最晚提交 ${formatTime(task.summaryExitBatch.winnerDeadlineAt)}` : ""}{task.summaryExitBatch.lastWinnerProfit !== undefined ? ` · 当前保留价差合计 ${task.summaryExitBatch.lastWinnerProfit}` : ""}</p>}
-        {decision.tradePlan ? <p><strong>AI 入场计划</strong>区间 {decision.tradePlan.entryZone.min}～{decision.tradePlan.entryZone.max} · 目标 {decision.tradePlan.takeProfitPrice} · 止损 {decision.tradePlan.stopLossPrice} · 硬止损 {decision.tradePlan.hardStopPrice}；成交后以实际启用的离场计划为准</p> : null}
-        {task.entryForecast?.planError ? <p role="alert"><strong>入场风险计划未启用</strong>{task.entryForecast.planError}；正在请求 AI 修正，不能将入场预测视为已执行止损</p> : null}
-        {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · AI 离场计划已启用</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（{record.plan.stopConfirmationSec === null ? "等待 AI 补充确认时间" : `确认 ${record.plan.stopConfirmationSec} 秒`}）· 硬止损 {record.plan.hardStopPrice}</p><p>{record.profitProtectionEnabled === false ? "利润保护未启用" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {record.maxHoldAt ? formatTime(record.maxHoldAt) : "等待 AI 补充"}</p>{record.riskComplete === false ? <p>AI 正在补充风险字段；已有目标与硬止损持续执行，普通止损仅在确认时间明确后执行。</p> : null}<span>{record.plan.rationale}</span></div>)}
+        {decision.tradePlan ? <p><strong>{sourceLabel}入场计划</strong>区间 {decision.tradePlan.entryZone.min}～{decision.tradePlan.entryZone.max} · 目标 {decision.tradePlan.takeProfitPrice} · 止损 {decision.tradePlan.stopLossPrice} · 硬止损 {decision.tradePlan.hardStopPrice}</p> : projection ? <p><strong>候选入场区间</strong>{projection.entryZone.min}～{projection.entryZone.max}</p> : null}
+        {algorithm && projection?.matchedPaths !== undefined && <div className="forecast-row"><strong>相似历史路径</strong>
+          <p>{projection.matchedPaths} 段匹配 · {projection.targetHits ?? 0} 段先到目标 · 入场 {projection.expectedEntryBars === 0 ? "当前" : projection.expectedEntryBars == null ? "时机待定" : `约 ${projection.expectedEntryBars} 根 K 后`} · 离场 {projection.expectedExitBars == null ? "时机待定" : `入场后约 ${projection.expectedExitBars} 根 K`}</p>
+          {projection.historicalExpectedPoints != null && <span>样本内平均价差 {projection.historicalExpectedPoints} 点</span>}
+        </div>}
+        {task.entryForecast?.planError ? <p role="alert"><strong>入场风险计划未启用</strong>{task.entryForecast.planError}{algorithm ? "，等待核实持仓计划" : "；正在请求 AI 修正，不能将入场预测视为已执行止损"}</p> : null}
+        {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · {record.origin?.startsWith("ALGORITHM_") ? "算法" : "AI"}离场计划已启用</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（{record.plan.stopConfirmationSec === null ? "等待补充确认时间" : `确认 ${record.plan.stopConfirmationSec} 秒`}）· 硬止损 {record.plan.hardStopPrice}</p><p>{record.profitProtectionEnabled === false ? "利润保护未启用" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {record.maxHoldAt ? formatTime(record.maxHoldAt) : "等待补充"}</p>{record.riskComplete === false ? <p>目标与硬止损持续执行，普通止损在确认时间明确后执行。</p> : null}<span>{record.plan.rationale}</span></div>)}
         {task.summaryExitPriceWaits?.map(wait => <p key={wait.key} role="status"><strong>{wait.key} · 等待真实定 K</strong>持续观察真实报价风险，闪 K 暂不离场、不抬高保护峰值；定价后按最新报价重判。</p>)}
         {task.summaryLossObservations?.map(observation => <p key={observation.key}><strong>{observation.key}</strong> 止损观察 {Math.floor((observation.lastObservedAt - observation.startedAt) / 1000)}/{observation.confirmationSec ?? "待补充"} 秒 · 仅累计真实定价后的连续报价；闪 K 等待定 K 后重判。</p>)}
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
         {entryBlockReason ? <p className="entry-block" role="status">{decision.entryBlock ? `AI ${displaySuggestion(decision.entryBlock.requestedAction)}；` : ""}入场拦截：{displayLabel(entryBlockReason, riskLabels, entryBlockReason)}</p> : null}
         <p><strong>{decision.action === "HOLD" ? "观望依据" : "主判断"}</strong>{decision.analysisSummary || "本轮未提供判断说明"}</p>
-        {forecasts.map(({ label, value }) => <div className="forecast-row" key={label}>
+        {!algorithm && forecasts.map(({ label, value }) => <div className="forecast-row" key={label}>
           <strong>{label} · {displayLabel(value?.direction || "UNKNOWN", { UP: "偏涨", DOWN: "偏跌", RANGE: "震荡", UNKNOWN: "未知" }, value?.direction || "未知")}</strong>
           <p>{value?.path || "本轮未提供预测路径"}</p>
           {value?.invalidation ? <span>预测失效位：{value.invalidation}</span> : null}
@@ -1226,7 +1247,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
         {task.exitOutcomes?.slice(-5).reverse().map(outcome => <p key={outcome.pendingId}><strong>离场后观测 {formatTime(outcome.confirmedAt)}</strong>3 分钟：{outcome.after3Minutes?.status === "OBSERVED" ? `若仍持有，毛点差 ${outcome.after3Minutes.hypotheticalGrossPoints}` : outcome.after3Minutes ? "无有效报价" : "待观察"}；5 分钟：{outcome.after5Minutes?.status === "OBSERVED" ? `若仍持有，毛点差 ${outcome.after5Minutes.hypotheticalGrossPoints}` : outcome.after5Minutes ? "无有效报价" : "待观察"}。观测不代表实际成交收益。</p>)}
       </div> : null}
       {decision.invalidation ? <div className="invalidation"><AlertTriangle size={18} /><span>趋势失效位：{decision.invalidation}</span></div> : null}
-      {task.stopLocked ? <div className="decision-safe decision-stopped"><Square size={14} /><span>任务已停止，自动交易未运行</span></div> : task.mode === "LIVE" ? <div className="decision-safe" role={pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? "alert" : "status"}><Activity size={16} /><span>{pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? (pending.formFilled ? `AI 已填表，请在目标页点击${pending.action === "SELL" ? "卖出订立" : "买入订立"}入场按钮；之后自动确认、监控并离场` : pending.message) : pending?.message || (task.autoDecisionEnabled ? "AI 自动入场与离场，持续监控持仓" : "手动入场；AI 自动监控持仓并离场")}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? "全自动确认建议，观察模式不会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
+      {task.stopLocked ? <div className="decision-safe decision-stopped"><Square size={14} /><span>任务已停止，自动交易未运行</span></div> : task.mode === "LIVE" ? <div className="decision-safe" role={pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? "alert" : "status"}><Activity size={16} /><span>{pending?.status === "WAITING" && !pending.exitType && !task.autoDecisionEnabled ? (pending.formFilled ? `已填表，请在目标页点击${pending.action === "SELL" ? "卖出订立" : "买入订立"}，程序随后确认并监控离场` : pending.message) : pending?.message || (task.autoDecisionEnabled ? `${sourceLabel}决定入场，程序持续监控离场` : "手动入场，程序持续监控离场")}</span></div> : pending && !(task.autoDecisionEnabled && pending.status === "WAITING") ? <PendingActionCard pending={pending} /> : pendingReview ? <div className="decision-actions"><button className="button button-primary button-full" onClick={onAutoJudge} disabled={busyAction !== null}><BusyIcon busy={busyAction === "judge"}><Check size={15} /></BusyIcon>{busyAction === "judge" ? "记录中" : "确认规则并继续"}</button></div> : <div className="decision-safe"><ShieldCheck size={14} /><span>{task.autoDecisionEnabled ? "全自动确认建议，观察模式不会下单" : "观察模式只记录建议，确认后也不会提交实盘"}</span></div>}
       {historicalRequests.length ? <div className="decision-safe" role="status"><Activity size={14} /><span>后台核实 {historicalRequests.length} 笔历史请求</span></div> : null}
       <details className="decision-details">
         <summary>分析依据与各盘详情</summary>
@@ -1247,12 +1268,12 @@ function WorkflowPanel({ task, onConnectorTest, busyAction }: { task: Task; onCo
   return <section className="panel workflow-panel"><div className="panel-header"><div><div className="panel-kicker"><Workflow size={14} />工作流进度</div><h2>从连接到动作</h2></div><button className="text-button" onClick={() => onConnectorTest({ taskId: task.id, connectorId: task.target.connectorId, type: task.target.type, name: task.target.name, url: task.target.url, appId: task.target.appId, installPath: task.target.installPath })} disabled={busyAction !== null || !task.target.connectorId}><RefreshCw size={14} />重新测试连接</button></div><div className="workflow-rail">{task.workflow.map((step, index) => <div className={`workflow-step ${step.status}`} key={step.key}><div className="workflow-node">{step.status === "complete" ? <Check size={14} /> : step.status === "active" ? <span className="node-pulse" /> : <span>{index + 1}</span>}</div><div className="workflow-copy"><strong>{step.label}</strong><span>{step.detail}</span></div>{index < task.workflow.length - 1 && <div className={`workflow-connector ${step.status === "complete" ? "complete" : ""}`} />}</div>)}</div></section>;
 }
 
-function RulesPanel({ rules, automatic, pendingReview, onAutoJudge, busyAction }: { rules: Rule[]; automatic: boolean; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
+function RulesPanel({ rules, sourceLabel, automatic, pendingReview, onAutoJudge, busyAction }: { rules: Rule[]; sourceLabel: string; automatic: boolean; pendingReview: boolean; onAutoJudge: () => void; busyAction: string | null }) {
   return <section className="panel rules-panel">
     <div className="panel-header"><div><div className="panel-kicker"><ListChecks size={14} />规则裁决</div><h2>{automatic ? "策略参考" : "执行前检查"}</h2></div><span className="count-badge">{rules.filter((rule) => rule.status === "passed").length}/{rules.length} 已通过</span></div>
     <div className="rule-list">{rules.map((rule) => <div className="rule-row" key={rule.id}>
       <span className={`rule-order rule-${rule.mode.toLowerCase()}`}>{String(rule.order).padStart(2, "0")}</span>
-      <div className="rule-copy"><strong>{automatic && rule.mode === "REVIEW" ? "AI 策略复核" : automatic && rule.mode === "BLOCK" ? "异常波动参考" : rule.name}</strong><span>{automatic && rule.mode !== "AUTO" ? (rule.status === "pending" ? "标记已记录，AI 判断入场，程序监控汇总离场" : "未触发") : rule.detail}</span></div>
+      <div className="rule-copy"><strong>{automatic && rule.mode === "REVIEW" ? `${sourceLabel}策略复核` : automatic && rule.mode === "BLOCK" ? "异常波动参考" : rule.name}</strong><span>{automatic && rule.mode !== "AUTO" ? (rule.status === "pending" ? `标记已记录，${sourceLabel}判断入场，程序监控汇总离场` : "未触发") : rule.detail}</span></div>
       <span className={`rule-mode mode-${rule.mode.toLowerCase()}`}>{automatic ? "参考" : rule.mode === "AUTO" ? "自动" : rule.mode === "REVIEW" ? "人工" : "红线"}</span>
       <span className={`rule-status status-${rule.status}`}>{rule.status === "passed" ? <CheckCircle2 size={15} /> : rule.status === "pending" ? <AlertTriangle size={15} /> : <CircleDashed size={15} />}</span>
     </div>)}</div>
@@ -1400,6 +1421,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
   const [symbol, setSymbol] = useState(task.symbol);
   const [timeframe, setTimeframe] = useState(task.timeframe);
   const [mode, setMode] = useState<string>(task.mode);
+  const [decisionSource, setDecisionSource] = useState<string>(task.decisionSource || "AI");
   const [entryQuantity, setEntryQuantity] = useState(String(task.entryQuantity ?? 1));
   const [opensAt] = useState(shanghaiInputValue(task.tradingSession?.opensAt) || defaultSessionInputs().opensAt);
   const [closesAt] = useState(shanghaiInputValue(task.tradingSession?.closesAt) || defaultSessionInputs().closesAt);
@@ -1411,7 +1433,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     lock.current = true;
     setBusy(true);
     try {
-      await onSave({ name, symbol, timeframe, mode, entryQuantity: Number(entryQuantity) });
+      await onSave({ name, symbol, timeframe, mode, decisionSource, entryQuantity: Number(entryQuantity) });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1421,6 +1443,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label>
     <div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div>
     <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
+    <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>
     <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={closesAt} readOnly disabled /></label></div>
     <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
     <div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div>
@@ -1443,6 +1466,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   const [symbol, setSymbol] = useState("DGJJ");
   const [timeframe, setTimeframe] = useState("15m");
   const [mode, setMode] = useState("LIVE");
+  const [decisionSource, setDecisionSource] = useState("AI");
   const [entryQuantity, setEntryQuantity] = useState("1");
   const initialSession = defaultSessionInputs();
   const [busy, setBusy] = useState(false);
@@ -1455,14 +1479,14 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
     lock.current = true;
     setBusy(true);
     try {
-      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, entryQuantity: Number(entryQuantity), analysisName, analysisUrl, analysisUsername, analysisPassword });
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, decisionSource, entryQuantity: Number(entryQuantity), analysisName, analysisUrl, analysisUsername, analysisPassword });
     } catch {
       lock.current = false;
       setBusy(false);
     }
   }
   return (
-    <ModalShell title="创建任务" subtitle="目标网站凭据加密保存在本机；可选择已配置的 AI Provider。" onClose={busy ? () => {} : onClose}>
+    <ModalShell title="创建任务" subtitle="选择本机算法或 AI 模型。目标网站凭据加密保存在本机。" onClose={busy ? () => {} : onClose}>
       <form className="modal-form" onSubmit={submit}>
         <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
         <div className="form-row">
@@ -1470,6 +1494,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
           <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
         </div>
         <label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>
+        <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>
         <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
         <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={initialSession.opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={initialSession.closesAt} readOnly disabled /></label></div>
         {targetType === "website"

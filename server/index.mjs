@@ -607,6 +607,7 @@ app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAcc
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
+  if (body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const targetType = body.targetType === "app" ? "app" : "website";
@@ -646,7 +647,9 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     ownerUserId: request.auth.user.id,
     name: String(body.name || "新建观察任务"),
     status: "READY",
-    mode: body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : "LIVE",
+    mode: body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW"
+      : body.mode === "LIVE" || body.decisionSource !== "ALGORITHM" ? "LIVE" : "SHADOW",
+    decisionSource: body.decisionSource || "AI",
     symbol: String(body.symbol || "DGJJ"),
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
@@ -723,15 +726,26 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
     return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
   }
   const body = request.body || {};
+  if (body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
+  const changesSource = body.decisionSource !== undefined && body.decisionSource !== (task.decisionSource || "AI");
+  if (changesSource && (task.monitoringEnabled || task.pendingAction?.status === "SUBMITTING")) return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
-  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt };
+  const previous = { name: task.name, symbol: task.symbol, timeframe: task.timeframe, mode: task.mode, entryQuantity: task.entryQuantity, sessionClose: task.sessionClose, tradingSession: task.tradingSession, updatedAt: task.updatedAt, decisionSource: task.decisionSource, pendingAction: task.pendingAction };
   if (body.entryQuantity !== undefined) task.entryQuantity = parseEntryQuantity(body.entryQuantity);
   if (body.sessionClose !== undefined) task.sessionClose = parseSessionClose(body.sessionClose);
   task.name = String(body.name ?? task.name).trim().slice(0, 160) || task.name;
   task.symbol = String(body.symbol ?? task.symbol).trim().slice(0, 32) || task.symbol;
   task.timeframe = String(body.timeframe ?? task.timeframe).trim().slice(0, 16) || task.timeframe;
-  task.mode = body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW" : body.mode === "LIVE" ? "LIVE" : task.mode;
+  if (["PAPER", "SHADOW", "LIVE"].includes(body.mode)) task.mode = body.mode;
+  else if (changesSource && body.decisionSource === "ALGORITHM") task.mode = "SHADOW";
+  if (changesSource) {
+    task.decisionSource = body.decisionSource;
+    if (task.pendingAction?.status === "WAITING" && !task.pendingAction.exitType) {
+      task.pendingAction = { ...task.pendingAction, status: "CANCELLED", resolvedAt: new Date().toISOString(),
+        message: "决策来源已切换，旧入场建议已取消" };
+    }
+  }
   task.updatedAt = new Date().toISOString();
   try {
     await persistTask(task);
@@ -765,7 +779,7 @@ app.post("/api/tasks/:taskId/start", { preHandler: requireTaskAccess }, async (r
     const task = getTask(request.params.taskId);
     if (!task) throw new Error("TASK_NOT_FOUND");
     assertTradingSessionOpen(parseTradingSession(task.tradingSession) || tradingSessionFromEnv());
-    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    if (task.decisionSource !== "ALGORITHM" && request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const started = startTask(request.params.taskId);
     broadcast();
     return { task: publicTask(started) };
@@ -779,7 +793,7 @@ app.post("/api/tasks/:taskId/manual", { preHandler: requireTaskAccess }, async (
 });
 app.post("/api/tasks/:taskId/auto-judge", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
-    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    if (getTask(request.params.taskId)?.decisionSource !== "ALGORITHM" && request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const task = autoJudge(request.params.taskId);
     broadcast();
     return { task: publicTask(task) };
@@ -835,7 +849,7 @@ app.post("/api/tasks/:taskId/analyze", { preHandler: requireTaskAccess }, async 
     const task = getTask(request.params.taskId);
     if (!task) throw new Error("TASK_NOT_FOUND");
     assertTradingSessionOpen(parseTradingSession(task.tradingSession) || tradingSessionFromEnv());
-    if (request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
+    if (task.decisionSource !== "ALGORITHM" && request.body?.providerId) setTaskProvider(request.params.taskId, request.body.providerId, request.auth.user.id);
     const result = await runAnalysis(request.params.taskId, request.body?.providerId || getTask(request.params.taskId)?.providerId || "", { trigger: "manual", userId: request.auth.user.id });
     broadcast();
     return { ...result, task: publicTask(result.task), output: getAgentOutput(request.params.taskId, result.run?.id, 400) };

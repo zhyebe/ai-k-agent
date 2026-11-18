@@ -15,6 +15,7 @@ import { executableExitQuote } from "./exit-policy.mjs";
 import { entryOrderPrice, matchesInstrument } from "./trading-plan.mjs";
 import { markObservedMarketCandles } from "./candle-confirmation.mjs";
 import { entryTimingBlock } from "./entry-policy.mjs";
+import { recheckAlgorithmEntry } from "./algorithm-strategy.mjs";
 
 function valuesFromEnv(name, fallback) {
   const value = process.env[name];
@@ -775,7 +776,7 @@ export async function fillSuggestionForm({ sessionId = "default", action, price,
       if (!selected) return { ok: false, code: "TARGET_BOARD_NOT_FOUND", filled: false, submitted: false, fields: [] };
     }
     if (entryGuard) {
-      const quote = await refreshEntryPrice(sessionId, { action, quantity, price, orderType, requireConfirmedPrice: entryGuard.requireConfirmedPrice });
+      const quote = await refreshEntryPrice(sessionId, { action, quantity, price, orderType, entryGuard });
       if (!quote.ok) return { ...quote, filled: false, submitted: false, fields: [] };
       price = quote.price;
     }
@@ -862,13 +863,20 @@ export function tradeSubmissionOutcome({ responseSeen = false, responseOk = null
   return { ok: false, code: "TRADE_SUBMISSION_UNVERIFIED", message: "已点击交易控件，但页面未显示明确结果；需核实订单和持仓", filled: true, submitted: false, uncertain: true, responseOk };
 }
 
-async function refreshEntryPrice(sessionId, { action, quantity, price, orderType = "MARKET", fill = false, requireConfirmedPrice = false } = {}) {
+async function refreshEntryPrice(sessionId, { action, quantity, price, orderType = "MARKET", fill = false, entryGuard } = {}) {
   const snapshot = await readVisiblePage(sessionId, { quick: true, inspectCandles: true });
   const market = snapshot.ok ? markObservedMarketCandles({ ...parseHaohanPageSnapshot(snapshot, { symbol: snapshot.instrument?.symbol || "", timeframe: "1m" }),
     observedAt: new Date(snapshot.capturedAt).toISOString() }, sessionId) : null;
-  const timingBlock = entryTimingBlock(market, { requireConfirmed: requireConfirmedPrice === true });
-  if (timingBlock) return { ok: false, code: timingBlock, message: "闪K或未定价，等待真实定K后再下单" };
-  const currentPrice = orderType === "MARKET" && market && entryOrderPrice(market, action, quantity);
+  let currentPrice;
+  if (entryGuard?.decisionSource === "ALGORITHM") {
+    const quote = recheckAlgorithmEntry(market, { action, quantity, entryGuard });
+    if (!quote.ok) return quote;
+    currentPrice = quote.price;
+  } else {
+    const timingBlock = entryTimingBlock(market, { requireConfirmed: entryGuard?.requireConfirmedPrice === true });
+    if (timingBlock) return { ok: false, code: timingBlock, message: "闪K或未定价，等待真实定K后再下单" };
+    currentPrice = orderType === "MARKET" && market && entryOrderPrice(market, action, quantity);
+  }
   if (fill && currentPrice > 0) {
     const page = await getBrowserPage(sessionId);
     const labels = suggestionFormLabels(action);
@@ -887,7 +895,7 @@ export async function continueManualEntry({ sessionId = "default", action, entry
   const baselineToken = await markTradePageHints(page);
   try {
     const result = await completeTradeDialogs(page, { baselineToken,
-      canConfirm: () => refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true, requireConfirmedPrice: entryGuard.requireConfirmedPrice }) });
+      canConfirm: () => refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true, entryGuard }) });
     return { ...result, continued: result.confirmed === true };
   } finally { await dismissEntryDialogs(page, baselineToken); }
 }
@@ -1034,7 +1042,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
   let response, baselineToken;
   try {
     if (!await selectPageBoardInstrument(sessionId, { symbol, symbolName, instrumentId })) return { ok: false, code: "ENTRY_INSTRUMENT_CHANGED", submitted: false };
-    const quote = await refreshEntryPrice(sessionId, { action, quantity, price, orderType, requireConfirmedPrice: entryGuard.requireConfirmedPrice });
+    const quote = await refreshEntryPrice(sessionId, { action, quantity, price, orderType, entryGuard });
     if (!quote.ok) return { ...quote, submitted: false, stage };
     price = quote.price;
     const filled = await fillSuggestionForm({ sessionId, action, price, quantity, symbol, symbolName, instrumentId, browserProvider, provider });
@@ -1047,7 +1055,7 @@ export async function submitSuggestionForm({ sessionId = "default", action, pric
     clicked = true;
     stage = "confirm";
     dialog = await completeTradeDialogs(page, { orderType, price, baselineToken, finished: () => Boolean(response.peek()),
-      canConfirm: () => refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true, requireConfirmedPrice: entryGuard.requireConfirmedPrice }),
+      canConfirm: () => refreshEntryPrice(sessionId, { action, quantity, price, orderType, fill: true, entryGuard }),
       resolveConfirmation: aiProvider ? box => agentTradeConfirmation(page, box, aiProvider, { action, price, quantity }) : undefined });
     const confirmation = { confirmed: dialog.confirmed === true, confirmationLabel: dialog.confirmationLabel || "",
       cancelled: dialog.cancelled === true, cancellationLabel: dialog.cancellationLabel || "" };
