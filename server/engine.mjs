@@ -15,7 +15,7 @@ import { summarizeOrderBook } from "./order-book.mjs";
 import { exitNetPnl, evaluateExitPlan, executableExitQuote, heldDirection, isNonLosingExit, positionEntryPrice, validateExitPlans } from "./exit-policy.mjs";
 import { summaryExitCandidates, summaryExitAllowsPrice, summaryRuleAuthorizationCurrent, summaryKey, summarySignature, summaryExitReviewContexts, SUMMARY_REVIEW_TTL_MS, observeSummaryPlans, installSummaryPlan, deferSummaryExitUntilConfirmed } from "./summary-exit-policy.mjs";
 import { matchesInstrument, normalizeTradingPlan, profitProtectionFor } from "./trading-plan.mjs";
-import { algorithmEntryDecision, algorithmHoldingPlan } from "./algorithm-strategy.mjs";
+import { algorithmEntryDecision } from "./algorithm-strategy.mjs";
 
 const activeCycles = new Set();
 const cycleWaiters = new Map();
@@ -3062,24 +3062,8 @@ export async function runMonitoringCycle(taskId, { providerId = "", userId = "",
 
 function scheduleSummaryExitReviews(task, market, runtime, now = Date.now()) {
   observeSummaryPlans(task, market, now);
+  if (task.decisionSource === "ALGORITHM") return;
   const contexts = summaryExitReviewContexts(market, now);
-  if (task.decisionSource === "ALGORITHM") {
-    let installedAny = false;
-    for (const context of contexts) {
-      if ((task.summaryTradingPlans || []).some(record => record.signature === context.signature)) continue;
-      const snapshot = positionMarketSnapshot(market, context.summary);
-      const history = positionMarketSnapshot(task.market, context.summary);
-      const plan = algorithmHoldingPlan(snapshot, context.summary, now)
-        || (history !== snapshot ? algorithmHoldingPlan(history, context.summary, now) : null);
-      if (!plan) continue;
-      const observedAt = new Date(context.quote.observedAt).toISOString();
-      const { record } = installSummaryPlan(task, context, plan, { id: `algorithm:${task.id}:${context.key}:${now}`,
-        observedAt, now, origin: "ALGORITHM_REVIEW" });
-      if (record) installedAny = true;
-    }
-    if (installedAny) observeSummaryPlans(task, market, now);
-    return;
-  }
   const sameHolding = record => (market.account?.positionSummaries || []).some(summary => summarySignature(summary) === record.signature);
   if (market.account?.positionSummariesVerified === true) task.summaryExitReviews = (task.summaryExitReviews || []).filter(sameHolding);
   for (const [key, run] of summaryReviewRuns) {
@@ -3298,7 +3282,8 @@ export function runPositionExitCycle(taskId, { runtime: runtimeOverrides = {}, n
         : ["EXIT_ALL", "EXIT_LOSERS", "EXIT_WINNERS"].includes(task.summaryExitBatch?.phase) ? "正在执行已锁定的离场批次，逐笔核实结果；单笔失败继续处理其他持仓"
         : missingPlans.length ? (algorithm ? `${missingPlans.length} 笔持仓等待有效定 K 数据生成价格计划`
           : `${missingPlans.length}笔持仓缺少有效AI计划，正在请求；不按单向浮盈提前离场，禁止新增仓位`)
-        : `监控全部持仓，按原目标、止损、回撤保护和最长持仓执行。多空同时持仓按对冲退出规则处理` };
+        : algorithm ? "监控全部持仓。定 K 更新离场预测，当前盘口到价自动离场。"
+        : "监控全部持仓，按原目标、止损、回撤保护和最长持仓执行。多空同时持仓按对冲退出规则处理" };
     if (failures.length) task.exitMonitor = { ...task.exitMonitor, status: "ERROR", failures, message: `${failures.length}笔离场未完成；${task.exitMonitor.message}` };
     persistTask(task);
     return { submitted };

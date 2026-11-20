@@ -1017,7 +1017,8 @@ async function submitSummaryTransfer(page, { sessionId, action, symbol, symbolNa
     if (!dialog.ok) return { ...dialog, ok: false, submitted: false, uncertain: confirmed };
     const feedback = await observeTradeFeedback(page, response, baselineToken);
     return { ...tradeSubmissionOutcome({ responseSeen: Boolean(feedback.response), responseOk: feedback.response ? feedback.response.ok() : null,
-      pageHint: feedback.pageHint, clicked: result }), submittedQuantity: targetSummary.quantity, submittedPrice: dialog.submittedPrice,
+      pageHint: feedback.pageHint, clicked: result }), confirmed, confirmationLabel: dialog.confirmationLabel, stage: "feedback",
+      submittedQuantity: targetSummary.quantity, submittedPrice: dialog.submittedPrice,
       targetSummary, targetPositionIds: [] };
   } catch (error) {
     return { ok: false, code: "SUMMARY_TRANSFER_FAILED", message: error.message, submitted: false, uncertain: clicked };

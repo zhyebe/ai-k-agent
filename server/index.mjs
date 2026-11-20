@@ -60,6 +60,17 @@ try {
 hydrateState(restoredState);
 if (standalone) {
   for (const task of state.tasks) {
+    task.decisionSource = "ALGORITHM";
+    task.autoDecisionEnabled = true;
+    task.summaryExitReviews = [];
+    const pending = task.pendingAction;
+    if (pending?.status === "SUBMITTING" || (pending?.status === "WAITING" && (pending.source || pending.entrustedOrderIds?.length))) {
+      task.pendingAction = { ...pending, status: "UNVERIFIED", source: pending.source || "restart_reconciliation",
+        recoveryObservation: null, message: "提交结果未知，启动后先核实当前委托与持仓" };
+    } else if (pending?.status === "WAITING") {
+      task.pendingAction = { ...pending, status: "CANCELLED", resolvedAt: new Date().toISOString(),
+        message: "任务启动后按最新行情重新判断进出场" };
+    }
     task.monitoringEnabled = false;
     task.stopLocked = true;
     task.status = "PAUSED";
@@ -607,7 +618,8 @@ app.get("/api/desktop-ai", { websocket: true, preValidation: requireWorkspaceAcc
 app.get("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request) => ({ tasks: snapshot(request.auth).tasks }));
 app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, reply) => {
   const body = request.body || {};
-  if (body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
+  if (!standalone && body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
+  const decisionSource = standalone ? "ALGORITHM" : body.decisionSource || "AI";
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
   const targetType = body.targetType === "app" ? "app" : "website";
@@ -648,12 +660,12 @@ app.post("/api/tasks", { preHandler: requireWorkspaceAccess }, async (request, r
     name: String(body.name || "新建观察任务"),
     status: "READY",
     mode: body.mode === "PAPER" ? "PAPER" : body.mode === "SHADOW" ? "SHADOW"
-      : body.mode === "LIVE" || body.decisionSource !== "ALGORITHM" ? "LIVE" : "SHADOW",
-    decisionSource: body.decisionSource || "AI",
+      : body.mode === "LIVE" || decisionSource !== "ALGORITHM" ? "LIVE" : "SHADOW",
+    decisionSource,
     symbol: String(body.symbol || "DGJJ"),
     timeframe: String(body.timeframe || "15m"),
     automationAuthorized: false,
-    autoDecisionEnabled: body.autoDecisionEnabled === true,
+    autoDecisionEnabled: standalone || body.autoDecisionEnabled === true,
     entryQuantity: body.entryQuantity === undefined ? DEFAULT_ENTRY_QUANTITY : parseEntryQuantity(body.entryQuantity),
     autoDecisionCountdownSec: 30,
     sessionClose: parseSessionClose(body.sessionClose || DEFAULT_SESSION_CLOSE),
@@ -726,8 +738,8 @@ app.patch("/api/tasks/:taskId", { preHandler: requireTaskAccess }, async (reques
     return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
   }
   const body = request.body || {};
-  if (body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
-  const changesSource = body.decisionSource !== undefined && body.decisionSource !== (task.decisionSource || "AI");
+  if (!standalone && body.decisionSource !== undefined && !["AI", "ALGORITHM"].includes(body.decisionSource)) return reply.code(400).send({ error: "TASK_DECISION_SOURCE_INVALID" });
+  const changesSource = !standalone && body.decisionSource !== undefined && body.decisionSource !== (task.decisionSource || "AI");
   if (changesSource && (task.monitoringEnabled || task.pendingAction?.status === "SUBMITTING")) return reply.code(409).send({ error: "TASK_MUST_BE_STOPPED" });
   if (body.sessionClose !== undefined && !parseSessionClose(body.sessionClose)) return reply.code(400).send({ error: "INVALID_SESSION_CLOSE" });
   if (body.entryQuantity !== undefined && parseEntryQuantity(body.entryQuantity) === null) return reply.code(400).send({ error: "ENTRY_QUANTITY_MUST_BE_POSITIVE_INTEGER" });
@@ -801,6 +813,7 @@ app.post("/api/tasks/:taskId/auto-judge", { preHandler: requireTaskAccess }, asy
 });
 app.post("/api/tasks/:taskId/auto-decision", { preHandler: requireTaskAccess }, async (request, reply) => {
   try {
+    if (standalone) return { task: publicTask(getTask(request.params.taskId)) };
     const task = setAutoDecision(request.params.taskId, { enabled: request.body?.enabled === true, countdownSec: request.body?.countdownSec });
     broadcast();
     return { task: publicTask(task) };

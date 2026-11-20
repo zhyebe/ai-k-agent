@@ -4,9 +4,7 @@ import { heldDirection } from "./exit-policy.mjs";
 const number = value => !["number", "string"].includes(typeof value) || String(value).trim() === "" ? null
   : Number.isFinite(Number(value)) ? Number(value) : null;
 const text = value => String(value || "").trim().slice(0, 600);
-export const instrumentValues = value => [value?.symbol, value?.symbolName, value?.instrumentId]
-  .map(item => String(item || "").trim().toLowerCase()).filter(Boolean);
-export const matchesInstrument = (left, right) => instrumentValues(left).some(value => instrumentValues(right).includes(value));
+export { instrumentValues, matchesInstrument } from "./exit-policy.mjs";
 
 export function directionalProfitPoints(summary, price) {
   const average = number(summary?.averagePrice);

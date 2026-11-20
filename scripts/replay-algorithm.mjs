@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import { algorithmCandleProbeDecision, algorithmEntryDecision, algorithmEntryPriceInPlan, recheckAlgorithmEntry } from "../server/algorithm-strategy.mjs";
 import { executableExitQuote } from "../server/exit-policy.mjs";
 import { candleWickState } from "../server/flash-k.mjs";
-import { observeSummaryPlans, summaryExitCandidates, summaryReviewType, summarySignature } from "../server/summary-exit-policy.mjs";
-import { matchesInstrument, profitProtectionFor } from "../server/trading-plan.mjs";
+import { observeSummaryPlans, summaryExitCandidates } from "../server/summary-exit-policy.mjs";
+import { matchesInstrument } from "../server/trading-plan.mjs";
 
 const MINUTE_MS = 60_000;
 
@@ -14,9 +14,18 @@ function sameInstrument(left, right) {
   return matchesInstrument(left, right);
 }
 
+function marketWithPosition(book, position) {
+  return { ...book, account: { positionsVerified: true, positions: [],
+    positionSummariesVerified: true, positionSummaries: [position], openOrdersVerified: true, openOrders: [] } };
+}
+
+function clearReplayPosition(task) {
+  Object.assign(task, { summaryTradingPlans: [], summaryExitPriceWaits: [], entryForecast: null });
+}
+
 export async function replayAlgorithm(snapshots, quantity = 1) {
   if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error("数量必须是正整数");
-  const task = {};
+  const task = { decisionSource: "ALGORITHM" };
   const trades = [];
   let previousAt = -Infinity, instrument, signal, position;
   for await (const book of snapshots) {
@@ -28,8 +37,7 @@ export async function replayAlgorithm(snapshots, quantity = 1) {
     instrument ||= { symbol: book.symbol, instrumentId: book.instrumentId, symbolName: book.symbolName };
     previousAt = now;
     if (position) {
-      const market = { ...book, account: { positionsVerified: true, positions: [],
-        positionSummariesVerified: true, positionSummaries: [position], openOrdersVerified: true, openOrders: [] } };
+      const market = marketWithPosition(book, position);
       observeSummaryPlans(task, market, now);
       const [candidate] = summaryExitCandidates(task, market, now);
       if (!candidate) continue;
@@ -39,10 +47,11 @@ export async function replayAlgorithm(snapshots, quantity = 1) {
       const netPoints = costs.every(cost => typeof cost === "number" && Number.isFinite(cost) && cost >= 0)
         ? points - (costs[0] + costs[1]) * quantity : null;
       trades.push({ side: position.side, entryAt: task.entryForecast.confirmedAt, exitAt: book.observedAt,
-        entryPrice: position.averagePrice, targetPrice: task.entryForecast.tradePlan.takeProfitPrice, exitPrice: price,
+        entryPrice: position.averagePrice, targetPrice: task.summaryTradingPlans[0]?.algorithmExitForecast?.targetPrice
+          ?? task.summaryTradingPlans[0]?.plan.takeProfitPrice, exitPrice: price,
         exitReason: candidate.decision.exitReason, grossPoints: points, netPoints });
       position = null;
-      Object.assign(task, { summaryTradingPlans: [], summaryExitPriceWaits: [], entryForecast: null });
+      clearReplayPosition(task);
       continue;
     }
     if (signal) {
@@ -65,11 +74,12 @@ export async function replayAlgorithm(snapshots, quantity = 1) {
   return { mode: "ORDER_BOOK_REPLAY", ...reportTrades(trades, openPosition) };
 }
 
-export async function probeAlgorithmCandles(candles, quantity = 1) {
+export async function probeAlgorithmCandles(candles, quantity = 1, { rolling = true } = {}) {
   if (!Number.isSafeInteger(quantity) || quantity < 1) throw new Error("数量必须是正整数");
+  const task = { decisionSource: rolling ? "ALGORITHM" : undefined };
   const history = [];
   const trades = [];
-  let instrument, previousAt = -Infinity, signal, position, record;
+  let instrument, previousAt = -Infinity, signal, position;
   for await (const candle of candles) {
     const { timestamp, open, close } = candle;
     const shape = candleWickState(candle);
@@ -82,33 +92,37 @@ export async function probeAlgorithmCandles(candles, quantity = 1) {
     instrument ||= { symbol: candle.symbol, instrumentId: candle.instrumentId, symbolName: candle.symbolName };
     const now = timestamp + MINUTE_MS;
     if (signal && timestamp === previousAt + MINUTE_MS && algorithmEntryPriceInPlan(signal.tradePlan, open, signal.action)) {
-      const { tradePlan, action, algorithmForecast } = signal;
-      position = { ...instrument, quantity, side: action === "BUY" ? "LONG" : "SHORT", averagePrice: open,
-        entryAt: new Date(timestamp).toISOString(), expectedExitBars: algorithmForecast?.expectedExitBars ?? null };
-      record = { plan: tradePlan, signature: summarySignature(position), maxHoldAt: new Date(timestamp + tradePlan.maxHoldSec * 1000).toISOString(),
-        bestPrice: open, profitArmed: false };
+      const { tradePlan, action, algorithmForecast, observedAt } = signal;
+      position = { ...instrument, quantity, frozenQuantity: 0, side: action === "BUY" ? "LONG" : "SHORT",
+        averagePrice: open, entryAt: new Date(timestamp).toISOString(), expectedExitBars: algorithmForecast?.expectedExitBars ?? null };
+      task.entryForecast = { ...instrument, pendingId: `probe-${timestamp}`, action, decisionSource: "ALGORITHM",
+        tradePlan, observedAt, confirmedAt: position.entryAt };
     }
     signal = null;
     previousAt = timestamp;
-    history.push(candle);
+    history.push({ ...candle, confirmation: { status: shape === "HAS_WICK" ? "CONFIRMED" : "PROVISIONAL", lastObservedAt: now } });
     if (history.length > 720) history.shift();
-    if (shape !== "HAS_WICK") continue;
+    const observedAt = new Date(now).toISOString();
+    const book = { ...instrument, timeframe: "1m", history, observedAt };
     if (position) {
       const direction = position.side === "LONG" ? 1 : -1;
-      if ((close - record.bestPrice) * direction > 0) record.bestPrice = close;
-      const protection = profitProtectionFor(position, record.plan);
-      if (protection && (close - protection.activationPrice) * direction >= 0) record.profitArmed = true;
-      const exitReason = summaryReviewType(position, close, record, now);
-      if (exitReason) {
-        trades.push({ side: position.side, entryAt: position.entryAt, exitAt: new Date(now).toISOString(),
-          entryPrice: position.averagePrice, targetPrice: record.plan.takeProfitPrice, exitPrice: close, expectedExitBars: position.expectedExitBars,
-          exitReason, grossPoints: (close - position.averagePrice) * direction * quantity, netPoints: null });
+      const levels = [{ price: close, volume: quantity }];
+      const market = marketWithPosition({ ...book, orderBook: { bids: levels, asks: levels } }, position);
+      observeSummaryPlans(task, market, now);
+      const [candidate] = summaryExitCandidates(task, market, now);
+      if (candidate) {
+        const record = task.summaryTradingPlans[0];
+        trades.push({ side: position.side, entryAt: position.entryAt, exitAt: observedAt, entryPrice: position.averagePrice,
+          targetPrice: record.algorithmExitForecast?.targetPrice ?? record.plan.takeProfitPrice,
+          exitPrice: close, expectedExitBars: record.algorithmExitForecast?.expectedBars ?? position.expectedExitBars,
+          exitReason: candidate.decision.exitReason, grossPoints: (close - position.averagePrice) * direction * quantity, netPoints: null });
         position = null;
-        record = null;
+        clearReplayPosition(task);
       }
       continue;
     }
-    const decision = algorithmCandleProbeDecision({ ...instrument, timeframe: "1m", history }, close, now);
+    if (shape !== "HAS_WICK") continue;
+    const decision = algorithmCandleProbeDecision(book, close, now);
     if (decision.action !== "HOLD") signal = decision;
   }
   const openPosition = position ? { side: position.side, entryPrice: position.averagePrice, entryAt: position.entryAt } : null;

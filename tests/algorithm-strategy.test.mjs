@@ -6,11 +6,14 @@ import { probeAlgorithmCandles, replayAlgorithm } from "../scripts/replay-algori
 import { confirmPendingAction, runAnalysis, runPositionExitCycle, stopController } from "../server/engine.mjs";
 import { publicTask, state } from "../server/store.mjs";
 import { compactTaskRuntime } from "../server/persistence.mjs";
+import { installSummaryPlan, observeSummaryPlans, summaryExitAllowsPrice, summaryExitCandidates, summaryExitReviewContexts } from "../server/summary-exit-policy.mjs";
+import { tradingPlan } from "./fixtures/trading-plan.mjs";
 
-function bookAt(now, price, direction = 1, { flash = false, cost } = {}) {
-  const history = Array.from({ length: 97 }, (_, index) => {
-    const close = 100 + 0.44 * direction * (index - 96);
-    return { timestamp: now - (96 - index) * 60_000,
+function bookAt(now, price, direction = 1, { flash = false, cost, candles = 97 } = {}) {
+  const history = Array.from({ length: candles }, (_, index) => {
+    const minutesAgo = candles - 1 - index;
+    const close = 100 - 0.44 * direction * minutesAgo;
+    return { timestamp: now - minutesAgo * 60_000,
       open: close - 0.25 * direction, high: close + 0.6, low: close - 0.7, close };
   });
   const candle = history.at(-1);
@@ -124,6 +127,27 @@ test("entry after slow collection uses the refreshed normal candle and executabl
   assert.equal(fixture.calls.model, 0);
 });
 
+test("an unsubmitted confirmation failure allows the next automatic entry", async t => {
+  const fixture = engineFixture(t, "algo-entry-retry", "LIVE");
+  let now = Math.floor(Date.now() / 60_000) * 60_000;
+  t.mock.method(Date, "now", () => now);
+  const submit = fixture.runtime.submitSuggestionForm;
+  let attempts = 0;
+  t.mock.method(fixture.runtime, "submitSuggestionForm", async input => {
+    if (++attempts === 1) {
+      return { ok: false, code: "TRADE_CONFIRM_DISABLED", submitted: false, confirmed: false, cancelled: true };
+    }
+    return submit(input);
+  });
+  await runAnalysis(fixture.task.id, "", { runtime: fixture.runtime });
+  assert.equal(fixture.task.pendingAction.status, "CANCELLED");
+  assert.equal(fixture.task.pendingAction.lastExecution.cancelled, true);
+  now += 2000;
+  await runAnalysis(fixture.task.id, "", { trigger: "monitor", skipIfUnchanged: true, runtime: fixture.runtime });
+  assert.equal(fixture.task.pendingAction.status, "AWAITING_FILL");
+  assert.equal(fixture.calls.submitted.length, 1);
+});
+
 test("a pending suggestion cannot submit after switching decision sources", async t => {
   const fixture = engineFixture(t, "algo-changed-source", "LIVE");
   await runAnalysis(fixture.task.id, "", { runtime: fixture.runtime });
@@ -163,6 +187,132 @@ test("algorithm submits through the existing path, preserves target after fill a
   assert.equal(fixture.calls.submitted.length, 2);
   assert.equal(fixture.calls.submitted[1].exitGuard.aiAuthorization.trigger, "TAKE_PROFIT");
   assert.equal(fixture.calls.model, 0);
+});
+
+function forecastHolding(direction, type) {
+  const now = Math.floor(Date.now() / 60_000) * 60_000;
+  const side = direction === 1 ? "LONG" : "SHORT";
+  const averagePrice = 100 + direction * (type === "PROFIT" ? -0.4 : 2.5);
+  const summary = { symbol: "ALGO", instrumentId: "537", side, averagePrice, quantity: 1, frozenQuantity: 0 };
+  const plan = tradingPlan(side, averagePrice, { takeProfitPrice: averagePrice + direction * 6,
+    stopLossPrice: averagePrice - direction * 4, hardStopPrice: averagePrice - direction * 6, maxHoldSec: 480 });
+  const book = { ...bookAt(now, 100 - direction * 0.7, type === "STOP" ? -direction : direction, { candles: 170 }), instrumentId: "537" };
+  const account = { positionsVerified: true, positionSummariesVerified: true, positionSummaries: [summary],
+    openOrdersVerified: true, openOrders: [] };
+  const market = (time, price, { flash = false, nextClose } = {}) => {
+    const history = book.history.slice(-2);
+    if (nextClose !== undefined) {
+      const open = history[1].close;
+      history[1] = { ...history[1], open, close: nextClose, high: Math.max(open, nextClose) + 0.25, low: Math.min(open, nextClose) - 0.25,
+        confirmation: { status: "CONFIRMED", lastObservedAt: time } };
+      history.push({ ...history[1], timestamp: history[1].timestamp + 60_000 });
+    }
+    const last = { ...history.at(-1), confirmation: { observed: true, lastObservedAt: time } };
+    if (flash) Object.assign(last, { high: Math.max(last.open, last.close), low: Math.min(last.open, last.close) });
+    return { ...book, account, history: [...history.slice(0, -1), last], observedAt: new Date(time).toISOString(),
+      orderBook: { bids: [{ price, volume: 1 }], asks: [{ price, volume: 1 }] } };
+  };
+  const before = new Date(now - 60_000).toISOString();
+  const task = { decisionSource: "ALGORITHM", market: { ...book, observedAt: before, history: book.history.slice(0, -2) } };
+  const price = 100 - 0.8 * direction;
+  const context = summaryExitReviewContexts(market(now, price), now)[0];
+  const { record } = installSummaryPlan(task, context, plan, { id: `initial-${side}`,
+    origin: "ALGORITHM_ENTRY", observedAt: before, holdingStartedAt: before, now });
+  const tick = (time, quote = price, options) => {
+    const next = market(time, quote, options);
+    observeSummaryPlans(task, next, time);
+    return summaryExitCandidates(task, next, time);
+  };
+  return { task, book, record, plan, tick, price, now, summary, averagePrice };
+}
+
+for (const direction of [1, -1]) {
+  const side = direction === 1 ? "LONG" : "SHORT";
+  test(`${side} rolls its profitable target from confirmed history and uses fresh executable prices`, () => {
+    const { record, plan, tick, now, price, averagePrice } = forecastHolding(direction, "PROFIT");
+    const deadline = record.maxHoldAt;
+    assert.deepEqual(tick(now), []);
+    const forecast = record.algorithmExitForecast;
+    assert.equal(forecast.kind, "PROFIT");
+    assert.ok(forecast.matchedPaths >= 8);
+    assert.ok((forecast.targetPrice - averagePrice) * direction > 0);
+    assert.ok((plan.takeProfitPrice - forecast.targetPrice) * direction > 0);
+    assert.equal(record.plan.hardStopPrice, plan.hardStopPrice);
+    assert.equal(record.maxHoldAt, deadline);
+    assert.deepEqual(tick(now + 2000, price + 0.1 * direction), []);
+    assert.equal(record.algorithmExitForecast, forecast);
+    assert.equal(tick(now + 4000, forecast.targetPrice)[0]?.decision.exitReason, "TAKE_PROFIT");
+  });
+
+  test(`${side} rechecks a less-loss target after a flash without widening its risk`, () => {
+    const { record, plan, tick, now, price, averagePrice, summary } = forecastHolding(direction, "REDUCE_LOSS");
+    const deadline = record.maxHoldAt;
+    assert.deepEqual(tick(now), []);
+    const forecast = record.algorithmExitForecast;
+    assert.equal(forecast.kind, "REDUCE_LOSS");
+    assert.ok((forecast.targetPrice - price) * direction > 0);
+    assert.ok((forecast.targetPrice - averagePrice) * direction <= 0);
+    assert.ok(Date.parse(forecast.deadlineAt) < Date.parse(deadline));
+    assert.deepEqual(tick(now + 2000, forecast.targetPrice, { flash: true }), []);
+    assert.deepEqual(tick(now + 4000), []);
+    const candidate = tick(now + 6000, forecast.targetPrice)[0].decision;
+    assert.equal(candidate.exitReason, "ALGORITHM_REDUCE_LOSS");
+    assert.equal(candidate.exitType, "STOP_LOSS");
+    const authorization = candidate.exitGuard.aiAuthorization;
+    assert.equal(summaryExitAllowsPrice(summary, price, authorization, now + 6000), false);
+    assert.equal(summaryExitAllowsPrice(summary, plan.hardStopPrice, authorization, now + 6000), true);
+    assert.equal(record.maxHoldAt, deadline);
+    assert.equal(record.plan.stopLossPrice, plan.stopLossPrice);
+    assert.equal(record.algorithmExitForecast, forecast);
+  });
+}
+
+test("recovery expiry exits at the next normal price and an unsupported adverse trend arms a stop", () => {
+  const recovery = forecastHolding(1, "REDUCE_LOSS");
+  recovery.tick(recovery.now);
+  const expires = Date.parse(recovery.record.algorithmExitForecast.deadlineAt);
+  assert.deepEqual(recovery.tick(expires, recovery.price, { flash: true }), []);
+  assert.equal(recovery.tick(expires + 1000)[0]?.decision.exitReason, "ALGORITHM_RECOVERY_TIMEOUT");
+
+  const stop = forecastHolding(-1, "STOP");
+  const [candidate] = stop.tick(stop.now);
+  assert.equal(candidate.decision.exitReason, "ALGORITHM_STOP");
+  const authorization = candidate.decision.exitGuard.aiAuthorization;
+  assert.equal(summaryExitAllowsPrice(stop.summary, stop.averagePrice, authorization, stop.now), false);
+});
+
+test("a new confirmed reversal can invalidate a pending rebound before its deadline", () => {
+  const recovery = forecastHolding(1, "REDUCE_LOSS");
+  const older = bookAt(recovery.now, 99, 1, { candles: 520 }).history.slice(0, -2);
+  recovery.task.market.history = older.map((bar, index) => {
+    if (index >= 240) return bar;
+    const step = index % 20;
+    if (step === 11) return { ...bar, open: 100, high: 100.25, low: 95.75, close: 96 };
+    const close = step < 11 ? 95.16 + step * 0.44 : 96 - (step - 11) * 0.65;
+    return { ...bar, open: close - 0.25, high: close + 0.6, low: close - 0.7, close };
+  });
+  assert.deepEqual(recovery.tick(recovery.now), []);
+  const prior = recovery.record.algorithmExitForecast;
+  assert.equal(prior.kind, "REDUCE_LOSS");
+  const after = recovery.now + 61_000;
+  assert.ok(after < Date.parse(prior.deadlineAt));
+  assert.deepEqual(recovery.tick(after, 98, { nextClose: 96, flash: true }), []);
+  assert.equal(recovery.record.algorithmExitForecast, prior);
+  const [candidate] = recovery.tick(after + 1000, 98, { nextClose: 96 });
+  assert.equal(candidate?.decision.exitReason, "ALGORITHM_STOP");
+  assert.equal(recovery.record.plan.hardStopPrice, recovery.plan.hardStopPrice);
+});
+
+test("a quick observation cannot use another instrument's history or an unfinished candle to reforecast", () => {
+  const fixture = forecastHolding(1, "PROFIT");
+  fixture.task.market = { ...fixture.task.market, instrumentId: "536" };
+  assert.deepEqual(fixture.tick(fixture.now), []);
+  assert.equal(fixture.record.algorithmExitForecast, undefined);
+  fixture.task.market = { ...fixture.task.market, instrumentId: "537" };
+  assert.deepEqual(fixture.tick(fixture.now, fixture.price, { flash: true }), []);
+  assert.equal(fixture.record.algorithmExitForecast, undefined);
+  assert.deepEqual(fixture.tick(fixture.now + 2000), []);
+  assert.equal(fixture.record.algorithmExitForecast.candleTimestamp, fixture.now - 60_000);
 });
 
 test("replay executes only on a subsequent quote, reports net if available and keeps gross losses", async () => {

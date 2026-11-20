@@ -62,6 +62,9 @@ test("standalone needs no account/database and restores encrypted configuration 
   assert.equal(provider.body.provider.configured, true);
   const task = await runtime.request("/api/tasks", { name: "本机任务", targetType: "website", url: "https://smyw.haohandahan.cn/client/#/transcc", username: "target-username", password: "target-password", entryQuantity: 2, mode: "PAPER" });
   assert.equal(task.status, 201);
+  assert.equal(task.body.task.decisionSource, "ALGORITHM");
+  assert.equal(task.body.task.autoDecisionEnabled, true);
+  assert.equal(task.body.task.providerSelectionRequired, false);
   await runtime.request(`/api/skills/${workspace.skills[0].id}`, undefined, "DELETE");
   const oldToken = runtime.token;
   const secret = await fs.readFile(path.join(directory, ".axiom-secret"), "utf8");
@@ -72,6 +75,11 @@ test("standalone needs no account/database and restores encrypted configuration 
   const snapshot = JSON.parse(saved);
   snapshot.tasks[0].monitoringEnabled = true;
   snapshot.tasks[0].status = "MONITORING";
+  snapshot.tasks[0].decisionSource = "AI";
+  snapshot.tasks[0].autoDecisionEnabled = false;
+  snapshot.tasks[0].pendingAction = { id: "old-suggestion", status: "WAITING", action: "BUY" };
+  snapshot.tasks.push({ ...snapshot.tasks[0], id: "interrupted-live-task", mode: "LIVE",
+    pendingAction: { id: "interrupted-submit", status: "SUBMITTING", action: "BUY", baselinePositionQty: 0 } });
   await fs.writeFile(path.join(directory, "workspace.json"), JSON.stringify(snapshot));
   runtime = await start(directory);
   const rejected = await fetch(`${runtime.base}/api/workspace`, { headers: { "x-user-token": oldToken } });
@@ -79,8 +87,20 @@ test("standalone needs no account/database and restores encrypted configuration 
   const restored = (await runtime.request("/api/workspace")).body;
   assert.equal(restored.providers[0].configured, true);
   assert.equal(restored.tasks[0].entryQuantity, 2);
+  assert.equal(restored.tasks[0].mode, "PAPER");
+  assert.equal(restored.tasks[0].decisionSource, "ALGORITHM");
+  assert.equal(restored.tasks[0].autoDecisionEnabled, true);
+  assert.equal(restored.tasks[0].pendingAction.status, "CANCELLED");
   assert.equal(restored.tasks[0].status, "PAUSED");
   assert.equal(restored.tasks[0].monitoringEnabled, false);
+  const interrupted = restored.tasks.find(item => item.id === "interrupted-live-task");
+  assert.equal(interrupted.mode, "LIVE");
+  assert.equal(interrupted.status, "PAUSED");
+  assert.equal(interrupted.autoDecisionEnabled, true);
+  assert.equal(interrupted.pendingAction.status, "UNVERIFIED");
+  assert.equal(interrupted.pendingAction.id, "interrupted-submit");
+  const decisionToggle = await runtime.request(`/api/tasks/${interrupted.id}/auto-decision`, { enabled: false });
+  assert.equal(decisionToggle.body.task.autoDecisionEnabled, true);
   assert.equal(restored.skills.length, 0, "deleted built-in knowledge must not reappear on restart");
   assert.equal(await fs.readFile(path.join(directory, ".axiom-secret"), "utf8"), secret);
   await runtime.request("/api/health");
@@ -97,6 +117,7 @@ test("standalone needs no account/database and restores encrypted configuration 
   assert.equal((await runtime.request("/api/providers", { id: restored.providers[0].id, model: "test-model" })).status, 200);
   const reused = await runtime.request("/api/tasks", { name: "复用凭据", targetType: "website", url: "https://smyw.haohandahan.cn/client/#/transcc" });
   assert.equal(reused.body.task.target.credentialStatus, "已托管");
+  assert.equal(reused.body.task.mode, "SHADOW");
   await runtime.close();
   await fs.unlink(path.join(directory, ".axiom-secret"));
   await assert.rejects(start(directory), /LOCAL_SECRET_MISSING/);

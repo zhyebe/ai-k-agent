@@ -125,6 +125,8 @@ for (const side of ['LONG','SHORT']) test(`${side} summary exit refreshes a movi
  },side);
  const result = await submitSuggestionForm(input(side));
  assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.confirmed,true);
+ assert.equal(result.confirmationLabel,'确定');
  assert.equal(result.submittedPrice,side==='LONG'?101.99:99.01);
  assert.deepEqual(await page.evaluate(()=>window.summaryExits),[{side,quantity:side==='LONG'?3:1,price:side==='LONG'?101.99:99.01}]);
  assert.equal(await page.locator('.el-dialog:visible').count(),0);

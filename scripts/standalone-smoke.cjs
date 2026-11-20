@@ -51,7 +51,7 @@ async function main() {
     await taskModal.getByLabel("网站地址", { exact: true }).fill("https://trading.example.invalid");
     await taskModal.getByLabel("登录账号", { exact: true }).fill("smoke-user");
     await taskModal.getByLabel("登录密码", { exact: true }).fill("smoke-target-password");
-    await taskModal.getByRole("combobox", { name: /^决策方式/ }).selectOption("ALGORITHM");
+    assert.equal(await taskModal.getByRole("combobox", { name: /^决策方式/ }).count(), 0);
     assert.equal(await taskModal.getByRole("combobox", { name: /^运行模式/ }).inputValue(), "SHADOW");
     const createdResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/api/tasks" && response.request().method() === "POST");
     await taskModal.getByRole("button", { name: "创建任务", exact: true }).click();
@@ -60,8 +60,18 @@ async function main() {
     const { task } = await creation.json();
     assert.equal(task.decisionSource, "ALGORITHM");
     assert.equal(task.mode, "SHADOW");
+    assert.equal(task.autoDecisionEnabled, true);
+    assert.equal(task.providerSelectionRequired, false);
     assert.equal(modelCalls, 0);
     await taskModal.waitFor({ state: "hidden" });
+    const mode = page.getByRole("combobox", { name: "运行模式", exact: true });
+    await mode.selectOption("LIVE");
+    await page.getByRole("button", { name: "开始自动交易", exact: true }).waitFor();
+    assert.equal(await page.getByRole("combobox", { name: "分析模型" }).count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: "自动入场" }).count(), 0);
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    await mode.selectOption("SHADOW");
+    await page.getByRole("button", { name: "开始观察", exact: true }).waitFor();
 
     await page.getByRole("button", { name: "连接器", exact: true }).first().click();
     await page.getByRole("button", { name: "添加 Provider", exact: true }).click();
@@ -87,7 +97,7 @@ async function main() {
     await page.getByRole("button", { name: "任务管理", exact: true }).click();
     await page.getByRole("button", { name: `编辑 ${taskName}`, exact: true }).click();
     const restoredTask = page.getByRole("dialog", { name: "编辑任务", exact: true });
-    assert.equal(await restoredTask.getByRole("combobox", { name: /^决策方式/ }).inputValue(), "ALGORITHM");
+    assert.equal(await restoredTask.getByRole("combobox", { name: /^决策方式/ }).count(), 0);
     assert.equal(await restoredTask.getByRole("combobox", { name: /^运行模式/ }).inputValue(), "SHADOW");
     await restoredTask.getByRole("button", { name: "取消", exact: true }).click();
     await page.getByRole("button", { name: "连接器", exact: true }).first().click();

@@ -27,10 +27,15 @@ export function heldDirection(position) {
   return "UNKNOWN";
 }
 
-function sameInstrument(a, b) {
-  const values = (item) => [item?.symbol, item?.symbolName, item?.instrumentId].map(v => String(v || "").trim().toLowerCase()).filter(Boolean);
-  const av = values(a);
-  return values(b).some(v => av.includes(v));
+const normalizedInstrumentValue = value => String(value || "").trim().toLowerCase();
+export const instrumentValues = item => [item?.symbol, item?.symbolName, item?.instrumentId]
+  .map(normalizedInstrumentValue).filter(Boolean);
+
+export function matchesInstrument(left, right) {
+  const leftId = normalizedInstrumentValue(left?.instrumentId), rightId = normalizedInstrumentValue(right?.instrumentId);
+  if (leftId && rightId) return leftId === rightId;
+  const values = instrumentValues(left);
+  return instrumentValues(right).some(value => values.includes(value));
 }
 
 function numericValue(...values) {
@@ -78,7 +83,7 @@ function validProfitTarget(position, price) {
 }
 
 export function executableExitQuote(market, position, now = Date.now()) {
-  const book = (market.books || []).find(book => sameInstrument(book, position)) || (sameInstrument(market, position) ? market : null);
+  const book = (market.books || []).find(book => matchesInstrument(book, position)) || (matchesInstrument(market, position) ? market : null);
   const observedAt = Date.parse(book?.observedAt || market.observedAt || "");
   if (!Number.isFinite(observedAt) || now < observedAt || now - observedAt > 5000) return null;
   const depth = summarizeOrderBook(book?.orderBook || book?.pageView?.orderBook);

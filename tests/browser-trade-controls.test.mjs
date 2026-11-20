@@ -199,10 +199,12 @@ for (const action of ["BUY", "SELL"]) for (const missingQuote of [false, true]) 
   assert.deepEqual(await page.evaluate(() => window.entries), [{ side: action, price: expectedPrice, quantity: "2" }]);
 });
 
-test("missing entry confirmation fails explicitly and closes the blocking dialog", async () => {
+test("failed entry confirmation clears the dialog and allows the next submission on the same page", async () => {
   await page.reload();
   await page.evaluate(() => {
+    const enter = window.enter;
     window.enter = () => {
+      window.enter = enter;
       const box = document.createElement("div");
       box.className = "el-message-box";
       box.innerHTML = "确认下单，是否继续？<button disabled>确定</button><button>取消</button>";
@@ -220,6 +222,10 @@ test("missing entry confirmation fails explicitly and closes the blocking dialog
   assert.match(result.message, /已点击“取消”.*TRADE_CONFIRM_DISABLED/);
   assert.deepEqual(await page.evaluate(() => window.entries), []);
   assert.equal(await page.locator(".el-message-box:visible").count(), 0);
+  const retry = await submitSuggestionForm({ sessionId: "trade-fixture", action: "BUY", price: 101, quantity: 1 });
+  assert.equal(retry.confirmed, true, JSON.stringify(retry));
+  assert.equal(retry.cancelled, false);
+  assert.deepEqual(await page.evaluate(() => window.entries), [{ side: "BUY", price: "101", quantity: "1" }]);
 });
 
 test("an AI-selected cancel button cannot act as trade confirmation", async () => {
@@ -847,8 +853,16 @@ for (const action of ["BUY", "SELL"]) for (const orderType of ["MARKET", "LIMIT"
     assert.deepEqual(await page.evaluate(() => window.entries), []);
     now = minute + 57000;
     await page.evaluate(() => { document.querySelector("#hqchart_kline").JSChart.JSChartContainer.SourceData.Data.at(-1).High = 101; });
-    const confirmed = await submitSuggestionForm({ ...input, entryGuard: { ...entryGuard(action, 100), requireConfirmedPrice: true } });
+    const guard = entryGuard(action, 100);
+    guard.requireConfirmedPrice = true;
+    if (orderType === "MARKET") {
+      guard.decisionSource = "ALGORITHM";
+      guard.plan.entryZone = { min: 99, max: 102 };
+    }
+    const confirmed = await submitSuggestionForm({ ...input, entryGuard: guard });
     assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
+    assert.equal(confirmed.confirmed, true);
+    assert.equal(confirmed.cancelled, false);
     assert.equal((await page.evaluate(() => window.entries)).length, 1);
   });
 }

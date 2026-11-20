@@ -961,7 +961,7 @@ function App() {
       </main>
 
       {streamOpen && task && <AgentOutputDrawer task={task} lines={agentLines} runs={agentRuns} loading={agentLoading || agentTaskId !== task.id} error={agentError} onRetry={() => setAgentRefreshVersion((value) => value + 1)} onClose={() => setStreamOpen(false)} />}
-      {task?.pendingAction && task.mode !== "LIVE" && task.autoDecisionEnabled !== true && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
+      {!window.axiomDesktop?.standalone && task?.pendingAction && task.mode !== "LIVE" && task.autoDecisionEnabled !== true && (task.pendingAction.status === "WAITING" || task.pendingAction.status === "SUBMITTING") && (
         <TradeConfirmModal task={task} pending={task.pendingAction} busyAction={busyAction} onConfirm={handleConfirmAction} onCancel={handleCancelAction} />
       )}
       {modal === "task" && <TaskModal onClose={() => setModal(null)} onCreate={handleTaskCreate} savedCredentials={workspace.credentials || []} />}
@@ -974,13 +974,34 @@ function App() {
 }
 
 function ConsoleView({ task, currentProviderId, workspace, isRunning, busyAction, onStart, onStop, onAutoJudge, onAnalyze, onOpenStream, onConnectorTest, onToggleAutoDecision, onSelectProvider, onSelectMarket, onSetMode }: { task: Task; currentProviderId: string; workspace: Workspace; isRunning: boolean; busyAction: string | null; onStart: () => void; onStop: () => void; onAutoJudge: () => void; onAnalyze: () => void; onOpenStream: () => void; onConnectorTest: (payload: Record<string, unknown>) => void; onToggleAutoDecision: (enabled: boolean) => void; onSelectProvider: (providerId: string) => void; onSelectMarket: (selection: { symbol: string; symbolName?: string; instrumentId?: string }) => void; onSetMode: (mode: string) => void }) {
-  const pendingReview = task.mode !== "LIVE" && task.autoDecisionEnabled !== true && task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
+  const standalone = window.axiomDesktop?.standalone === true;
+  const automaticTrading = standalone && task.mode === "LIVE";
+  const pendingReview = !standalone && task.mode !== "LIVE" && task.autoDecisionEnabled !== true && task.rules.some((rule) => rule.status === "pending" && rule.mode === "REVIEW");
   const providers = configuredProviders(workspace.providers);
   const positions = openPositions(task);
   const openQty = positions.reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   return <>
-    <section className="page-heading console-heading"><div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div><div className="heading-controls"><div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div><button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button><button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BusyIcon busy={busyAction === "analyze"}><BarChart3 size={15} /></BusyIcon>{busyAction === "analyze" ? "分析中" : "立即分析"}</button>{isRunning ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : "停止观察"}</button> : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : "开始观察"}</button>}</div></section>
-    <section className="status-strip"><div className="status-main"><StatusBadge status={task.status} />{taskIsMonitoring(task) && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{consoleStatusCopy(task)}</span></div><div className="status-meta"><label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label><label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}><option value="">选择本机 AI Provider</option>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label>{<label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" aria-label={task.mode === "LIVE" ? "自动入场" : "自动确认"} checked={task.autoDecisionEnabled === true} disabled={busyAction !== null || task.pendingAction?.status === "SUBMITTING"} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "自动入场" : "手动入场") : `自动确认 ${task.autoDecisionEnabled ? "开" : "关"}`}</span></label>}<span>单笔下单量 {task.entryQuantity ?? 1}</span><span>停盘 {formatShanghaiMinute(task.tradingSession?.closesAt)}</span><span><LockKeyhole size={13} />{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "入场 自动 · 离场 自动" : "入场 手动 · 离场 自动") : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span><span><Database size={13} />{workspace.rag?.mode === "direct-ai" ? "经验直传 AI" : `${workspace.rag?.indexedChunks || 0} 个索引切片`}</span></div></section>
+    <section className="page-heading console-heading">
+      <div><div className="eyebrow"><span className="eyebrow-line" />实时任务</div><h1>任务工作台</h1><p>{task.name} <span className="heading-separator">·</span> {displayLabel(task.mode, modeLabels, "观察模式")} <span className="heading-separator">·</span> {task.timeframe} 周期</p></div>
+      <div className="heading-controls">
+        <div className="last-sync"><span className="online-dot" />{task.market ? `${task.market.source} · ${formatTime(task.market.observedAt)}` : "等待数据采集"}</div>
+        <button className="button button-quiet" onClick={onOpenStream}><Terminal size={15} />输出流</button>
+        <button className="button button-secondary" onClick={onAnalyze} disabled={busyAction !== null}><BusyIcon busy={busyAction === "analyze"}><BarChart3 size={15} /></BusyIcon>{busyAction === "analyze" ? "分析中" : "立即分析"}</button>
+        {isRunning
+          ? <button className="button button-danger" onClick={onStop} disabled={busyAction !== null}><BusyIcon busy={busyAction === "stop"}><Square size={15} /></BusyIcon>{busyAction === "stop" ? "正在停止" : automaticTrading ? "停止自动交易" : "停止观察"}</button>
+          : <button className="button button-primary" onClick={onStart} disabled={busyAction !== null}><BusyIcon busy={busyAction === "start"}><Play size={15} /></BusyIcon>{busyAction === "start" ? "检查中" : automaticTrading ? "开始自动交易" : "开始观察"}</button>}
+      </div>
+    </section>
+    <section className="status-strip">
+      <div className="status-main"><StatusBadge status={task.status} />{taskIsMonitoring(task) && <span className="monitoring-intent"><Activity size={13} />持续监测中</span>}<span className="status-copy">{consoleStatusCopy(task)}</span></div>
+      <div className="status-meta">
+        <label className="provider-switch"><select aria-label="运行模式" value={task.mode} disabled={busyAction !== null} onChange={(event) => onSetMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
+        {task.decisionSource !== "ALGORITHM" && <label className="provider-switch"><Bot size={13} /><select aria-label="分析模型" value={currentProviderId} disabled={busyAction !== null || providers.length === 0} onChange={(event) => onSelectProvider(event.target.value)}><option value="">选择本机 AI Provider</option>{providers.length ? providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name} · {provider.model}</option>) : <option value="">未配置 Provider</option>}</select></label>}
+        {!standalone && <label className={`auto-decision-switch ${task.autoDecisionEnabled ? "on" : ""}`}><input type="checkbox" aria-label={task.mode === "LIVE" ? "自动入场" : "自动确认"} checked={task.autoDecisionEnabled === true} disabled={busyAction !== null || task.pendingAction?.status === "SUBMITTING"} onChange={(event) => onToggleAutoDecision(event.target.checked)} /><span>{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "自动入场" : "手动入场") : `自动确认 ${task.autoDecisionEnabled ? "开" : "关"}`}</span></label>}
+        <span>单笔下单量 {task.entryQuantity ?? 1}</span><span>停盘 {formatShanghaiMinute(task.tradingSession?.closesAt)}</span><span><LockKeyhole size={13} />{task.mode === "LIVE" ? (task.autoDecisionEnabled ? "入场 自动 · 离场 自动" : "入场 手动 · 离场 自动") : "下单 已禁止"}</span><span><Clock3 size={13} />下次检查 {task.nextPollAt ? formatTime(task.nextPollAt) : "等待安排"}</span>
+        {task.decisionSource !== "ALGORITHM" && <span><Database size={13} />{workspace.rag?.mode === "direct-ai" ? "经验直传 AI" : `${workspace.rag?.indexedChunks || 0} 个索引切片`}</span>}
+      </div>
+    </section>
     <div className="console-grid"><DecisionPanel task={task} pendingReview={pendingReview} onAutoJudge={onAutoJudge} busyAction={busyAction} /><MarketPanel task={task} onSelectMarket={onSelectMarket} busyAction={busyAction} /></div>
     <div className="metrics-grid"><MetricCard label="账户权益" value={task.metrics.equity ? formatCurrency(task.metrics.equity) : "--"} detail={task.market?.account?.availableFunds != null ? `可用 ${formatCurrency(Number(task.market.account.availableFunds))}` : "以目标页面为准"} change={task.metrics.equity ? formatPercent(task.metrics.dayPnlPct) : "未采集"} tone="green" icon={<WalletIcon />} /><MetricCard label="今日盈亏" value={task.metrics.equity ? formatCurrency(task.metrics.dayPnl) : "--"} detail={positions.length ? `${positions.length} 笔持仓` : "只读"} change={displayLabel(task.market?.trend, trendLabels, "未知")} tone="green" icon={<ArrowUpRight size={16} />} /><MetricCard label="当前敞口" value={`${task.metrics.exposurePct}%`} detail="上限 30%" change={openQty ? `持仓 ${openQty}` : "观察"} tone="blue" icon={<Gauge size={16} />} /><MetricCard label="风险预算" value={`${task.metrics.riskBudgetPct}%`} detail="剩余可用" change={displayAction(task.decision.action)} tone="amber" icon={<ShieldCheck size={16} />} /></div>
     <WorkflowPanel task={task} onConnectorTest={onConnectorTest} busyAction={busyAction} />
@@ -1222,7 +1243,7 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
       {analyzed && !algorithm ? <div className="direction-probabilities"><div className="direction-long"><span>多 — 上涨</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bullishProbability)}%`}</b></div><div className="direction-short"><span>空 — 下跌</span><b className="tabular">{analysisFailure || !probabilitiesProvided ? "--" : `${profitProbabilityLabel(bearishProbability)}%`}</b></div></div> : null}
       {analyzed ? <div className="decision-forecast" aria-label="判断与未来预测">
         {algorithm
-          ? <p><strong>本轮规则</strong>短线相对低位买涨、相对高位买跌。按相似历史路径估算时机和目标。成交后监控原目标、止损、回撤和持仓期限。闪 K 等待真实定价后重判。</p>
+          ? <p><strong>本轮规则</strong>短线相对低位买涨、相对高位买跌。成交后用新定 K 更新各持仓的离场价。盘口到价自动离场，闪 K 等正常定价后重判。</p>
           : <p><strong>本轮规则</strong>AI 按短线相对低位买涨、相对高位买跌，预测未来盈利离场 K。定价检查与执行由算法负责；闪 K 或未定价期间进出场均等待，所有止损和目标都在真实定 K 后按最新可成交报价重判，恢复则不离场，AI 不能绕过。保留 AI 入场方向，概率、形态、参考区间、计划格式及费用不拦截。正常持仓跟随原始目标，不因浮盈、只走一根 K 或复核到期提前退出。真实定 K 证明预测明显失效才允许 AI 提前离场。同有多空时按合计盈利全平、未盈利先退亏损侧处理；亏损侧确认清除后，盈利侧最多观察 60 秒，回落或到目标提前兑现，同样等待真实定价。</p>}
         {task.summaryExitBatch && <p><strong>离场批次</strong>{({ EXIT_ALL: "合计盈利，全仓离场", EXIT_LOSERS: "多空持仓，先退亏损侧", WATCH_WINNERS: "亏损侧已离场，观察盈利侧", EXIT_WINNERS: "盈利侧离场中", COMPLETE: "批次已核实结束", INVALIDATED: "持仓变化，重新核对" })[task.summaryExitBatch.phase]}{task.summaryExitBatch.winnerDeadlineAt ? ` · 盈利侧最晚提交 ${formatTime(task.summaryExitBatch.winnerDeadlineAt)}` : ""}{task.summaryExitBatch.lastWinnerProfit !== undefined ? ` · 当前保留价差合计 ${task.summaryExitBatch.lastWinnerProfit}` : ""}</p>}
         {decision.tradePlan ? <p><strong>{sourceLabel}入场计划</strong>区间 {decision.tradePlan.entryZone.min}～{decision.tradePlan.entryZone.max} · 目标 {decision.tradePlan.takeProfitPrice} · 止损 {decision.tradePlan.stopLossPrice} · 硬止损 {decision.tradePlan.hardStopPrice}</p> : projection ? <p><strong>候选入场区间</strong>{projection.entryZone.min}～{projection.entryZone.max}</p> : null}
@@ -1231,7 +1252,18 @@ function DecisionPanel({ task, pendingReview, onAutoJudge, busyAction }: { task:
           {projection.historicalExpectedPoints != null && <span>样本内平均价差 {projection.historicalExpectedPoints} 点</span>}
         </div>}
         {task.entryForecast?.planError ? <p role="alert"><strong>入场风险计划未启用</strong>{task.entryForecast.planError}{algorithm ? "，等待核实持仓计划" : "；正在请求 AI 修正，不能将入场预测视为已执行止损"}</p> : null}
-        {task.summaryTradingPlans?.map(record => <div className="forecast-row" key={record.key}><strong>{record.key} · {record.origin?.startsWith("ALGORITHM_") ? "算法" : "AI"}离场计划已启用</strong><p>目标 {record.plan.takeProfitPrice} · 止损 {record.plan.stopLossPrice}（{record.plan.stopConfirmationSec === null ? "等待补充确认时间" : `确认 ${record.plan.stopConfirmationSec} 秒`}）· 硬止损 {record.plan.hardStopPrice}</p><p>{record.profitProtectionEnabled === false ? "利润保护未启用" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {record.maxHoldAt ? formatTime(record.maxHoldAt) : "等待补充"}</p>{record.riskComplete === false ? <p>目标与硬止损持续执行，普通止损在确认时间明确后执行。</p> : null}<span>{record.plan.rationale}</span></div>)}
+        {task.summaryTradingPlans?.map(record => {
+          const forecast = record.algorithmExitForecast;
+          const label = forecast && { PROFIT: "预计止盈", REDUCE_LOSS: "预计回弹减亏", STOP: "止损触发位", KEEP: "沿用当前目标", INSUFFICIENT: "样本不足，沿用当前目标" }[forecast.kind];
+          return <div className="forecast-row" key={record.key}>
+            <strong>{record.key} · 离场计划</strong>
+            {forecast && <p>{label} {forecast.targetPrice} · {forecast.matchedPaths} 段相似路径{forecast.targetHits != null ? `，${forecast.targetHits} 段到价` : ""}{forecast.expectedAt ? ` · 预计 ${formatTime(forecast.expectedAt)}` : ""}{forecast.deadlineAt ? ` · 减亏等待至 ${formatTime(forecast.deadlineAt)}` : ""}</p>}
+            <p>止盈 {record.plan.takeProfitPrice} · 普通止损 {record.plan.stopLossPrice}（{record.plan.stopConfirmationSec === null ? "等待补充确认时间" : `确认 ${record.plan.stopConfirmationSec} 秒`}）· 硬止损 {record.plan.hardStopPrice}</p>
+            <p>{record.profitProtectionEnabled === false ? "利润保护未启用" : <>利润保护 {record.profitArmed ? "已启动" : `到 ${record.plan.profitProtection.activationPrice} 启动`} · 允许回撤 {record.plan.profitProtection.trailingDistance} 点</>} · 最好可成交价 {record.bestPrice} · 最晚离场 {record.maxHoldAt ? formatTime(record.maxHoldAt) : "等待补充"}</p>
+            {record.riskComplete === false && <p>目标与硬止损持续执行，普通止损在确认时间明确后执行。</p>}
+            {!forecast && <span>{record.plan.rationale}</span>}
+          </div>;
+        })}
         {task.summaryExitPriceWaits?.map(wait => <p key={wait.key} role="status"><strong>{wait.key} · 等待真实定 K</strong>持续观察真实报价风险，闪 K 暂不离场、不抬高保护峰值；定价后按最新报价重判。</p>)}
         {task.summaryLossObservations?.map(observation => <p key={observation.key}><strong>{observation.key}</strong> 止损观察 {Math.floor((observation.lastObservedAt - observation.startedAt) / 1000)}/{observation.confirmationSec ?? "待补充"} 秒 · 仅累计真实定价后的连续报价；闪 K 等待定 K 后重判。</p>)}
         {task.summaryExitReviews?.map(review => <p key={review.id}><strong>{review.key}</strong> {review.pnlPoints} 点 · {review.status === "REQUESTING" ? "AI 正在判断" : review.status === "FAILED" ? "判断失败，继续请求" : review.decision === "EXIT" ? "AI 决定离场" : "AI 决定继续持仓"}{review.rationale ? `：${review.rationale}` : ""}</p>)}
@@ -1417,6 +1449,7 @@ function RunsView({ runs, agentRuns, orders = [] }: { runs: Workspace["runs"]; a
 }
 
 function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => void; onSave: (payload: Record<string, unknown>) => Promise<void> }) {
+  const standalone = window.axiomDesktop?.standalone === true;
   const [name, setName] = useState(task.name);
   const [symbol, setSymbol] = useState(task.symbol);
   const [timeframe, setTimeframe] = useState(task.timeframe);
@@ -1433,7 +1466,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     lock.current = true;
     setBusy(true);
     try {
-      await onSave({ name, symbol, timeframe, mode, decisionSource, entryQuantity: Number(entryQuantity) });
+      await onSave({ name, symbol, timeframe, mode, ...(!standalone && { decisionSource }), entryQuantity: Number(entryQuantity) });
     } catch {
       lock.current = false;
       setBusy(false);
@@ -1443,7 +1476,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
     <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required disabled={busy} /></label>
     <div className="form-row"><label>交易品种<input value={symbol} onChange={(event) => setSymbol(event.target.value)} required disabled={busy} /></label><label>分析周期<select value={timeframe} onChange={(event) => setTimeframe(event.target.value)} disabled={busy}><option value="15m">15 分钟</option><option value="1m">1 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option></select></label></div>
     <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
-    <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>
+    {!standalone && <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>}
     <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={closesAt} readOnly disabled /></label></div>
     <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)} disabled={busy}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
     <div className="modal-actions"><button type="button" className="button button-quiet" onClick={onClose} disabled={busy}>取消</button><button type="submit" className="button button-primary" disabled={busy || !name.trim() || !symbol.trim()}><BusyIcon busy={busy}><Pencil size={14} /></BusyIcon>{busy ? "保存中" : "保存修改"}</button></div>
@@ -1451,6 +1484,7 @@ function TaskEditModal({ task, onClose, onSave }: { task: Task; onClose: () => v
 }
 
 function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () => void; onCreate: (payload: Record<string, unknown>) => Promise<void>; savedCredentials?: SavedCredential[] }) {
+  const standalone = window.axiomDesktop?.standalone === true;
   const [name, setName] = useState("浩瀚数贸观察任务");
   const [targetType, setTargetType] = useState("website");
   const [targetName, setTargetName] = useState("浩瀚数贸");
@@ -1465,7 +1499,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
   const [analysisPassword, setAnalysisPassword] = useState("");
   const [symbol, setSymbol] = useState("DGJJ");
   const [timeframe, setTimeframe] = useState("15m");
-  const [mode, setMode] = useState("LIVE");
+  const [mode, setMode] = useState(standalone ? "SHADOW" : "LIVE");
   const [decisionSource, setDecisionSource] = useState("AI");
   const [entryQuantity, setEntryQuantity] = useState("1");
   const initialSession = defaultSessionInputs();
@@ -1479,14 +1513,14 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
     lock.current = true;
     setBusy(true);
     try {
-      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, decisionSource, entryQuantity: Number(entryQuantity), analysisName, analysisUrl, analysisUsername, analysisPassword });
+      await onCreate({ name, targetType, targetName, url, installPath, appId, username, password, symbol, timeframe, mode, ...(!standalone && { decisionSource }), entryQuantity: Number(entryQuantity), analysisName, analysisUrl, analysisUsername, analysisPassword });
     } catch {
       lock.current = false;
       setBusy(false);
     }
   }
   return (
-    <ModalShell title="创建任务" subtitle="选择本机算法或 AI 模型。目标网站凭据加密保存在本机。" onClose={busy ? () => {} : onClose}>
+    <ModalShell title="创建任务" subtitle="目标网站凭据加密保存在本机。" onClose={busy ? () => {} : onClose}>
       <form className="modal-form" onSubmit={submit}>
         <label>任务名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
         <div className="form-row">
@@ -1494,7 +1528,7 @@ function TaskModal({ onClose, onCreate, savedCredentials = [] }: { onClose: () =
           <label>运行模式<select value={mode} onChange={(event) => setMode(event.target.value)}><option value="PAPER">观察 / 建议</option><option value="SHADOW">影子记录</option><option value="LIVE">实盘（可自动下单）</option></select></label>
         </div>
         <label>目标名称<input value={targetName} onChange={(event) => setTargetName(event.target.value)} /></label>
-        <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>
+        {!standalone && <label>决策方式<select value={decisionSource} onChange={event => { setDecisionSource(event.target.value); if (event.target.value === "ALGORITHM") setMode("SHADOW"); }} disabled={busy}><option value="AI">AI 模型</option><option value="ALGORITHM">本机算法</option></select></label>}
         <label>单笔下单量<input type="number" min="1" step="1" required value={entryQuantity} onChange={(event) => setEntryQuantity(event.target.value)} disabled={busy} /></label>
         <div className="form-row"><label>开盘时间<input type="datetime-local" aria-label="开盘时间" step={60} value={initialSession.opensAt} readOnly disabled /></label><label>停盘时间<input type="datetime-local" aria-label="停盘时间" step={60} value={initialSession.closesAt} readOnly disabled /></label></div>
         {targetType === "website"

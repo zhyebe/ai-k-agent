@@ -1,6 +1,7 @@
 import { executableExitQuote, heldDirection } from "./exit-policy.mjs";
 import { directionalProfitPoints, matchesInstrument, profitProtectionFor, tightenHoldingPlan, validateHoldingPlan } from "./trading-plan.mjs";
 import { entryTimingBlock } from "./entry-policy.mjs";
+import { algorithmHoldingPlan, algorithmPriceUnconfirmed, forecastAlgorithmExit } from "./algorithm-strategy.mjs";
 
 export const SUMMARY_REVIEW_TTL_MS = 60_000;
 export const SUMMARY_LOSS_SAMPLE_GAP_MS = 10_000;
@@ -15,6 +16,8 @@ const batchTargetMatches = (target, summary) => summaryKey(target) === summaryKe
   && Number(summary.quantity) > 0 && Number(summary.quantity) <= Number(target.quantity);
 const unsettled = task => [task.pendingAction, ...(task.unsettledActions || [])]
   .filter(action => action && ["SUBMITTING", "AWAITING_FILL", "UNVERIFIED"].includes(action.status));
+const summaryBook = (market, summary) => (market?.books || []).find(item => matchesInstrument(item, summary))
+  || (matchesInstrument(market, summary) ? market : null);
 
 export function summaryExitTimingBlock(market, { requireConfirmed = false, notBefore = null } = {}) {
   const minute = market?.timeframes?.["1m"] || (market?.timeframe === "1m" ? market : null);
@@ -34,7 +37,7 @@ function syncSummaryPriceWaits(task, market, now) {
     .filter(wait => (market.account.positionSummaries || []).some(row => Number(row.quantity) > 0 && summaryKey(row) === wait.key));
   for (const context of summaryExitReviewContexts(market, now)) {
     const waiting = (task.summaryExitPriceWaits || []).some(wait => wait.key === context.key);
-    if (context.priceUnconfirmed) {
+    if (context.priceUnconfirmed || (task.decisionSource === "ALGORITHM" && algorithmPriceUnconfirmed(context.book, now))) {
       if (!waiting) deferSummaryExitUntilConfirmed(task, context.summary, new Date(context.quote.observedAt).toISOString());
     } else if (waiting && context.priceConfirmed && context.priceConfirmationAt >= Date.parse(
       task.summaryExitPriceWaits.find(wait => wait.key === context.key).observedAt)) {
@@ -53,12 +56,12 @@ export function summaryExitReviewContexts(market, now = Date.now()) {
   if (market.account?.positionSummariesVerified !== true) return [];
   return (market.account.positionSummaries || []).flatMap(row => {
     if (!(Number(row.quantity) > 0) || Number(row.frozenQuantity) !== 0 || !["LONG", "SHORT"].includes(heldDirection(row))) return [];
-    const book = (market.books || []).find(item => matchesInstrument(item, row)) || (matchesInstrument(market, row) ? market : null);
+    const book = summaryBook(market, row);
     const summary = { symbol: book?.symbol, instrumentId: book?.instrumentId, ...row, side: heldDirection(row) };
     const quote = executableExitQuote(market, summary, now);
     if (!quote) return [];
     const minute = book?.timeframes?.["1m"] || (book?.timeframe === "1m" ? book : null);
-    return [{ key: summaryKey(summary), signature: summarySignature(summary), summary, quote,
+    return [{ key: summaryKey(summary), signature: summarySignature(summary), summary, quote, book,
       priceUnconfirmed: Boolean(summaryExitTimingBlock(book)),
       priceConfirmed: !summaryExitTimingBlock(book, { requireConfirmed: true }),
       priceConfirmationAt: Number(minute?.history?.at(-1)?.confirmation?.lastObservedAt) || null,
@@ -181,7 +184,8 @@ export function installSummaryPlan(task, context, source, { id, observedAt, hold
   const record = tightenHoldingPlan(prior, {
     id, key: context.key, signature: context.signature, summary: context.summary, origin,
     ...validated, createdAt: new Date(now).toISOString(),
-    bestPrice: context.priceUnconfirmed || task.summaryExitPriceWaits?.some(wait => wait.key === context.key)
+    bestPrice: context.priceUnconfirmed || (task.decisionSource === "ALGORITHM" && !context.priceConfirmed)
+      || task.summaryExitPriceWaits?.some(wait => wait.key === context.key)
       ? Number(context.summary.averagePrice) : context.quote.price, profitArmed: false,
   });
   task.summaryTradingPlans = [...(task.summaryTradingPlans || []).filter(item => item.key !== context.key), record];
@@ -218,25 +222,44 @@ export function syncSummaryPlans(task, market, now = Date.now()) {
 export function observeSummaryPlans(task, market, now = Date.now()) {
   syncSummaryPlans(task, market, now);
   syncSummaryPriceWaits(task, market, now);
+  const algorithm = task.decisionSource === "ALGORITHM" && verifiedAccount(market, now);
   for (const context of summaryExitReviewContexts(market, now)) {
-    const record = (task.summaryTradingPlans || []).find(item => item.signature === context.signature);
+    const waiting = task.summaryExitPriceWaits?.some(wait => wait.key === context.key);
+    const canForecast = algorithm && !waiting
+      && !unsettled(task).some(action => action.targetSummary && summaryKey(action.targetSummary) === context.key);
+    const earlierBook = canForecast ? summaryBook(task.market, context.summary) : null;
+    let record = (task.summaryTradingPlans || []).find(item => item.signature === context.signature);
+    if (!record && canForecast) {
+      const plan = algorithmHoldingPlan(context.book, context.summary, context.quote.observedAt, earlierBook);
+      if (plan) {
+        const observedAt = new Date(context.quote.observedAt).toISOString();
+        ({ record } = installSummaryPlan(task, context, plan, { id: `algorithm:${context.key}:${observedAt}`,
+          observedAt, now, origin: "ALGORITHM_REVIEW" }));
+      }
+    }
     if (!record) continue;
     if (record.lastObservedAt && context.quote.observedAt < record.lastObservedAt) continue;
     record.lastObservedAt = context.quote.observedAt;
     const long = context.summary.side === "LONG", price = context.quote.price;
-    if (!task.summaryExitPriceWaits?.some(wait => wait.key === context.key)) {
+    if (!waiting) {
       record.bestPrice = long ? Math.max(record.bestPrice, price) : Math.min(record.bestPrice, price);
       const protection = profitProtectionFor(context.summary, record.plan);
       if (protection && (long ? price >= protection.activationPrice : price <= protection.activationPrice)) record.profitArmed = true;
     }
     const breached = long ? price <= record.plan.stopLossPrice : price >= record.plan.stopLossPrice;
     const prior = record.lossObservation;
-    if (!breached) { record.lossObservation = null; continue; }
-    if (prior && context.quote.observedAt === prior.lastObservedAt) continue;
-    const continuous = prior && context.quote.observedAt > prior.lastObservedAt
-      && context.quote.observedAt - prior.lastObservedAt <= SUMMARY_LOSS_SAMPLE_GAP_MS;
-    record.lossObservation = { startedAt: continuous ? prior.startedAt : context.quote.observedAt,
-      lastObservedAt: context.quote.observedAt, price };
+    if (!breached) record.lossObservation = null;
+    else if (context.quote.observedAt !== prior?.lastObservedAt) {
+      const continuous = prior && context.quote.observedAt > prior.lastObservedAt
+        && context.quote.observedAt - prior.lastObservedAt <= SUMMARY_LOSS_SAMPLE_GAP_MS;
+      record.lossObservation = { startedAt: continuous ? prior.startedAt : context.quote.observedAt,
+        lastObservedAt: context.quote.observedAt, price };
+    }
+    if (!canForecast || summaryReviewType(context.summary, price, record, now)) continue;
+    const forecast = forecastAlgorithmExit(context.book, record, context.quote, now, earlierBook);
+    if (!forecast) continue;
+    record.algorithmExitForecast = forecast;
+    if (forecast.kind === "PROFIT") record.plan.takeProfitPrice = forecast.targetPrice;
   }
   task.summaryLossObservations = (task.summaryTradingPlans || []).flatMap(record => record.lossObservation
     ? [{ key: record.key, signature: record.signature, confirmationSec: record.plan.stopConfirmationSec, ...record.lossObservation }] : []);
@@ -263,6 +286,12 @@ export function summaryReviewType(summary, price, record, now = Date.now()) {
   }
   const breached = long ? price <= plan.stopLossPrice : price >= plan.stopLossPrice;
   if (breached && stopLossConfirmed(record, now)) return "STOP_LOSS";
+  const forecast = record.algorithmExitForecast;
+  if (forecast?.kind === "REDUCE_LOSS") {
+    if (long ? price >= forecast.targetPrice : price <= forecast.targetPrice) return "ALGORITHM_REDUCE_LOSS";
+    if (Date.parse(forecast.deadlineAt) <= now && directionalProfitPoints(summary, price) < 0) return "ALGORITHM_RECOVERY_TIMEOUT";
+  }
+  if (forecast?.kind === "STOP" && (long ? price <= forecast.targetPrice : price >= forecast.targetPrice)) return "ALGORITHM_STOP";
   return null;
 }
 
@@ -283,8 +312,7 @@ export function summaryExitAllowsPrice(summary, price, authorization, now = Date
   if (authorization.trigger === "STOP_LOSS" && stopLossConfirmed(authorization.record, now, false)
     && (heldDirection(summary) === "LONG" ? price <= authorization.record.plan.stopLossPrice
       : price >= authorization.record.plan.stopLossPrice)) return true;
-  return trigger === authorization.trigger || (["STOP_LOSS", "PROFIT_PROTECTION", "TAKE_PROFIT", "MAX_HOLD"].includes(authorization.trigger)
-    && ["HARD_STOP", "MAX_HOLD"].includes(trigger));
+  return Boolean(trigger && (trigger === authorization.trigger || ["HARD_STOP", "MAX_HOLD"].includes(trigger)));
 }
 
 export function summaryExitCandidates(task, market, now = Date.now()) {

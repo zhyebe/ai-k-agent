@@ -356,6 +356,8 @@ export interface Task {
     triggerPnl: number; winnerDeadlineAt?: string; lastWinnerProfit?: number; reason?: string } | null;
   entryForecast?: { tradePlan?: TradingPlan; forecastHorizon?: Decision["forecastHorizon"]; planError?: string | null };
   summaryTradingPlans?: Array<{ id: string; key: string; origin?: string; summary: { averagePrice: number; quantity: number }; plan: TradingPlan;
+    algorithmExitForecast?: { kind: "PROFIT" | "REDUCE_LOSS" | "STOP" | "KEEP" | "INSUFFICIENT"; targetPrice: number; matchedPaths: number;
+      targetHits?: number; expectedBars?: number | null; expectedAt?: string | null; deadlineAt?: string };
     profitProtectionEnabled?: boolean; riskComplete?: boolean; bestPrice: number; profitArmed: boolean; expiresAt: string | null; maxHoldAt: string | null }>;
   exitOutcomes?: Array<{ pendingId: string; confirmedAt: string; exitReason?: string;
     after3Minutes?: { status: string; hypotheticalGrossPoints?: number } | null;

@@ -1,7 +1,7 @@
 import { entryTimingBlock } from "./entry-policy.mjs";
 import { heldDirection } from "./exit-policy.mjs";
 import { candleWickState } from "./flash-k.mjs";
-import { executableEntryQuote, matchesInstrument } from "./trading-plan.mjs";
+import { directionalProfitPoints, executableEntryQuote, matchesInstrument } from "./trading-plan.mjs";
 
 const MINUTE_MS = 60_000;
 const STATE_BARS = 12;
@@ -9,6 +9,8 @@ const PATH_BARS = 6;
 const MAX_HOLD_BARS = 8;
 const MAX_HISTORY = 720;
 const MAX_PATHS = 24;
+const MIN_EXIT_PATHS = 8;
+const MAX_RECOVERY_BARS = 2;
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const roundPrice = value => Number(value.toFixed(6));
 
@@ -30,17 +32,28 @@ function weightedQuantile(rows, fraction) {
   return sorted.at(-1).value;
 }
 
-function closedMinutes(book, now) {
-  const minute = book?.timeframes?.["1m"] || (book?.timeframe === "1m" ? book : null);
+function minuteBook(book) {
+  return book?.timeframes?.["1m"] || (book?.timeframe === "1m" ? book : null);
+}
+
+function closedMinutes(book, now, earlierBook) {
   const rows = new Map();
-  for (const candle of (minute?.history || []).slice(-MAX_HISTORY)) {
-    const timestamp = Number(candle.timestamp);
-    if (!Number.isFinite(timestamp) || timestamp <= 0 || timestamp + MINUTE_MS > now) continue;
-    if (candleWickState(candle) !== "HAS_WICK" || (candle.confirmation?.status || candle.confirmation) === "PROVISIONAL") continue;
-    if (Number(candle.confirmation?.lastObservedAt) > now) continue;
-    rows.set(timestamp, { ...candle, timestamp });
+  for (const snapshot of [earlierBook, book]) {
+    const observedAt = Date.parse(snapshot?.observedAt || "");
+    if (observedAt > now) continue;
+    const cutoff = Number.isFinite(observedAt) ? observedAt : now;
+    for (const candle of (minuteBook(snapshot)?.history || []).slice(-MAX_HISTORY)) {
+      const timestamp = Number(candle.timestamp);
+      if (!Number.isSafeInteger(timestamp) || timestamp <= 0 || timestamp + MINUTE_MS > cutoff) continue;
+      if (candleWickState(candle) !== "HAS_WICK" || candle.partial === true || (candle.confirmation?.status || candle.confirmation) === "PROVISIONAL"
+        || Number(candle.confirmation?.lastObservedAt) > cutoff) {
+        rows.delete(timestamp);
+        continue;
+      }
+      rows.set(timestamp, { ...candle, timestamp });
+    }
   }
-  return [...rows.values()].sort((left, right) => left.timestamp - right.timestamp);
+  return [...rows.values()].sort((left, right) => left.timestamp - right.timestamp).slice(-MAX_HISTORY);
 }
 
 function slope(bars) {
@@ -75,9 +88,8 @@ function recentState(history, now, minimum = STATE_BARS) {
   return describeState(bars);
 }
 
-function awaitingPrice(book, now) {
-  const minute = book?.timeframes?.["1m"] || (book?.timeframe === "1m" ? book : null);
-  const candle = minute?.history?.at(-1);
+export function algorithmPriceUnconfirmed(book, now) {
+  const candle = minuteBook(book)?.history?.at(-1);
   return entryTimingBlock(book, { requireConfirmed: true }) || Number(candle?.timestamp) > now
     || Number(candle?.confirmation?.lastObservedAt) > now;
 }
@@ -86,13 +98,13 @@ function relativeLocation(state, price, direction) {
   return (direction === 1 ? price - state.low : state.high - price) / Math.max(state.range, state.high - state.low);
 }
 
-function analoguePaths(history, current, price, direction) {
+function analoguePaths(history, current, price, direction, { horizon = PATH_BARS, holding = false } = {}) {
   const candidates = [];
   const location = relativeLocation(current, price, direction);
-  for (let index = STATE_BARS - 1; index + PATH_BARS < history.length - STATE_BARS; index += 1) {
+  for (let index = STATE_BARS - 1; index + horizon < history.length - STATE_BARS; index += 1) {
     const prior = describeState(history.slice(index - STATE_BARS + 1, index + 1));
-    if (!prior || prior.momentum * direction <= 0) continue;
-    const path = history.slice(index + 1, index + 1 + PATH_BARS);
+    if (!prior || (!holding && prior.momentum * direction <= 0)) continue;
+    const path = history.slice(index + 1, index + 1 + horizon);
     if (path.some((candle, step) => candle.timestamp - prior.last.timestamp !== (step + 1) * MINUTE_MS)) continue;
     const distance = Math.abs(clamp(current.momentum, -3, 3) - clamp(prior.momentum, -3, 3))
       + Math.abs(location - relativeLocation(prior, prior.last.close, direction))
@@ -226,7 +238,7 @@ function entryPlanAtPrice(book, now, readQuote) {
 }
 
 export function algorithmEntryDecision(book, { executionBook = book, quantity = 1, now = Date.now() } = {}) {
-  return entryPlanAtPrice(book, now, action => awaitingPrice(executionBook, now)
+  return entryPlanAtPrice(book, now, action => algorithmPriceUnconfirmed(executionBook, now)
     ? { code: "ENTRY_AWAITING_CONFIRMED_PRICE" } : executableEntryQuote(executionBook, action, quantity, now));
 }
 
@@ -235,12 +247,124 @@ export function algorithmCandleProbeDecision(book, price, now) {
   return entryPlanAtPrice(book, now, () => ({ price, observedAt: now }));
 }
 
-export function algorithmHoldingPlan(book, summary, now = Date.now()) {
-  const history = closedMinutes(book, now);
+export function algorithmHoldingPlan(book, summary, now = Date.now(), earlierBook) {
+  const history = closedMinutes(book, now, earlierBook);
   const state = recentState(history, now, 4);
   const entry = Number(summary?.averagePrice), side = heldDirection(summary);
   if (!state || !(entry > 0) || !["LONG", "SHORT"].includes(side)) return null;
   return makePlan(history, state, entry, side === "LONG" ? 1 : -1, { min: entry, max: entry })?.plan || null;
+}
+
+function projectedExit(paths, trigger, stop, bars) {
+  const hits = [];
+  let weightedMove = 0, hitWeight = 0, totalWeight = 0;
+  for (const { path, weight } of paths) {
+    let move = path[bars - 1].close;
+    for (let index = 0; index < bars; index += 1) {
+      const { adverse, close } = path[index];
+      if (adverse <= stop) {
+        move = Math.min(stop, close);
+        break;
+      }
+      if (close >= trigger) {
+        move = trigger;
+        hits.push({ value: index + 1, weight });
+        hitWeight += weight;
+        break;
+      }
+    }
+    totalWeight += weight;
+    weightedMove += move * weight;
+  }
+  const expectedMove = weightedMove / totalWeight;
+  return { targetHits: hits.length, expectedBars: weightedQuantile(hits, 0.5), expectedMove,
+    supported: hits.length >= MIN_EXIT_PATHS / 2 && hitWeight >= totalWeight / 2 && expectedMove > 0 };
+}
+
+function reachableMove(paths, stop, bars) {
+  return weightedQuantile(paths.map(({ path, weight }) => {
+    let best = 0;
+    for (const step of path.slice(0, bars)) {
+      if (step.adverse <= stop) break;
+      best = Math.max(best, step.close);
+    }
+    return { value: best, weight };
+  }), 0.4);
+}
+
+export function forecastAlgorithmExit(book, record, quote, now, earlierBook) {
+  const prior = record.algorithmExitForecast;
+  const reducingLoss = prior?.kind === "REDUCE_LOSS";
+  const history = closedMinutes(book, quote.observedAt, earlierBook);
+  const state = recentState(history, quote.observedAt, 8);
+  const maxHoldAt = Date.parse(record.maxHoldAt);
+  const forecastUntil = reducingLoss ? Math.min(maxHoldAt, Date.parse(prior.deadlineAt)) : maxHoldAt;
+  const forecastStart = Math.floor(now / MINUTE_MS) * MINUTE_MS;
+  const horizon = Math.min(PATH_BARS, Math.floor((forecastUntil - forecastStart) / MINUTE_MS));
+  const heldSince = maxHoldAt - record.plan.maxHoldSec * 1000;
+  if (!state || !(horizon > 0) || state.last.timestamp + MINUTE_MS <= heldSince
+    || state.last.timestamp <= (prior?.candleTimestamp ?? -Infinity)) return null;
+
+  const { plan, summary } = record;
+  const direction = heldDirection(summary) === "LONG" ? 1 : -1;
+  const pnl = directionalProfitPoints(summary, quote.price);
+  if (pnl === null) return null;
+  const paths = analoguePaths(history, state, quote.price, direction, { horizon, holding: true });
+  const candleTimestamp = state.last.timestamp;
+  const details = { candleTimestamp, matchedPaths: paths.length };
+  if (paths.length < MIN_EXIT_PATHS) return reducingLoss ? { ...prior, candleTimestamp }
+    : { ...details, kind: "INSUFFICIENT", targetPrice: plan.takeProfitPrice };
+
+  const moveTo = price => (price - quote.price) * direction;
+  const hardStop = moveTo(plan.hardStopPrice);
+  const room = state.range * 0.25;
+  const trend = state.momentum * direction;
+  const opposing = trend <= -0.35;
+  const confirmedPnl = directionalProfitPoints(summary, state.last.close);
+  const stopPrice = roundPrice(Number(summary.averagePrice) - direction * room);
+  const stopEligible = confirmedPnl < 0 && stopPrice > 0 && moveTo(stopPrice) >= 0;
+  const stop = { ...details, kind: "STOP", targetPrice: stopPrice, expectedBars: 0, expectedAt: new Date(now).toISOString() };
+  if (reducingLoss) {
+    const rebound = projectedExit(paths, moveTo(prior.targetPrice), hardStop, horizon);
+    return pnl < 0 && opposing && stopEligible && !rebound.supported && rebound.expectedMove <= -room
+      ? stop : { ...prior, candleTimestamp };
+  }
+
+  const originalMove = moveTo(plan.takeProfitPrice);
+  const original = projectedExit(paths, originalMove, hardStop, horizon);
+  const result = (kind, targetPrice, estimate, extra) => ({ ...details, kind, targetPrice,
+    targetHits: estimate.targetHits, expectedBars: estimate.expectedBars,
+    expectedAt: estimate.expectedBars == null ? null : new Date(forecastStart + estimate.expectedBars * MINUTE_MS).toISOString(),
+    ...extra });
+  if (original.supported && pnl + original.expectedMove > 0) return result("PROFIT", plan.takeProfitPrice, original);
+
+  if (pnl > 0 && trend > 0.35 && original.expectedMove >= 0) return result("KEEP", plan.takeProfitPrice, original);
+  const projectedMove = Math.min(originalMove, reachableMove(paths, hardStop, horizon));
+  if (projectedMove >= room && pnl + projectedMove > 0) {
+    const closer = projectedExit(paths, projectedMove, hardStop, horizon);
+    const targetPrice = roundPrice(quote.price + direction * projectedMove);
+    if (closer.supported && pnl + closer.expectedMove > 0 && directionalProfitPoints(summary, targetPrice) > 0) {
+      return result("PROFIT", targetPrice, closer);
+    }
+  }
+  if (pnl > 0 && opposing && original.expectedMove <= -room) {
+    return { ...details, kind: "PROFIT", targetPrice: quote.price, expectedBars: 0, expectedAt: new Date(now).toISOString() };
+  }
+  if (pnl >= 0 || pnl + original.expectedMove >= 0 || (!opposing && confirmedPnl > -room)) {
+    return result("KEEP", plan.takeProfitPrice, original);
+  }
+
+  const recoveryBars = Math.min(MAX_RECOVERY_BARS, horizon);
+  const recoveryMove = Math.min(-pnl, reachableMove(paths, hardStop, recoveryBars));
+  if (recoveryMove >= room) {
+    const rebound = projectedExit(paths, recoveryMove, hardStop, recoveryBars);
+    const targetPrice = roundPrice(quote.price + direction * recoveryMove);
+    if (rebound.supported && moveTo(targetPrice) > 0) {
+      return result("REDUCE_LOSS", targetPrice, rebound, { deadlineAt: new Date(forecastStart + recoveryBars * MINUTE_MS).toISOString() });
+    }
+  }
+  if (original.expectedMove <= 0 && stopEligible) return stop;
+  return result("KEEP", plan.takeProfitPrice, original);
 }
 
 export function algorithmEntryPriceInPlan(plan, price, action) {
@@ -255,7 +379,7 @@ export function recheckAlgorithmEntry(book, { action, quantity, entryGuard, now 
   if (!(Date.parse(entryGuard.expiresAt) > now)) {
     return { ok: false, code: "ALGORITHM_ENTRY_EXPIRED", message: "入场计划已过期，等待新行情重算" };
   }
-  if (awaitingPrice(book, now)) {
+  if (algorithmPriceUnconfirmed(book, now)) {
     return { ok: false, code: "ENTRY_AWAITING_CONFIRMED_PRICE", message: "闪K或未定价，等待真实定K后再下单" };
   }
   const bothIds = entryGuard.instrumentId && book.instrumentId;
